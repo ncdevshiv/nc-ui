@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc a664f8a13fb89ee4457999d092a6615838bcb7a2c840092a2d01e5ee28bc62a7 # shrinks to depth = 5, tail = "/"
+cc b1bcdfcc3832fa801b390088fc29c6a922c9061cd4fcf101e4b182e6f6896852 # shrinks to a = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], b = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 36, 66, 121, 64, 30, 235, 112, 20, 248, 240, 29, 138, 166, 60, 113, 109, 232, 140, 248, 244, 34, 12, 246, 123, 145, 38, 169, 218, 27, 34, 64, 60, 132, 10, 209, 163, 79, 181, 14, 117, 187, 191, 25, 165, 204, 6, 18, 22, 153, 77, 20, 30, 248, 250, 135]
+cc b4dbf84e384ceea3700ba7576d19722e8c5f2826862e2514a32e47a62ef63fef # shrinks to depth = 6, tail = "..0"

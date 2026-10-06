@@ -1,0 +1,10 @@
+[package]
+name = "ncui-fuzz-target"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# The one-line re-export that lets a fuzz target's body be compiled and run by the ordinary
+# test suite, where `libfuzzer-sys` is not a dependency and cannot be.
+[dependencies]
+libfuzzer-sys = "0.4"

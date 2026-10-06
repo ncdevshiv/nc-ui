@@ -1,0 +1,93 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "Apache-2.0"
+repository = "https://github.com/nc-ui/nc-ui"
+authors = ["NC-UI Contributors"]
+
+[workspace.dependencies]
+# Internal crates. Dependency direction is enforced by tools/ncui-arch (see ADR-011).
+ncui-a11y = { path = "crates/ncui-a11y" }
+ncui-abi = { path = "crates/ncui-abi" }
+ncui-core = { path = "crates/ncui-core" }
+ncui-observability = { path = "crates/ncui-observability" }
+ncui-security = { path = "crates/ncui-security" }
+ncui-ipc = { path = "crates/ncui-ipc" }
+ncui-state = { path = "crates/ncui-state" }
+ncui-scheduler = { path = "crates/ncui-scheduler" }
+ncui-workers = { path = "crates/ncui-workers" }
+ncui-runtime = { path = "crates/ncui-runtime" }
+ncui-webview = { path = "crates/ncui-webview" }
+ncui-cli = { path = "crates/ncui-cli" }
+
+# External dependencies. Kept deliberately small; see ADR-012 (dependency policy).
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.145"
+thiserror = "2.0.17"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json", "fmt", "ansi"] }
+criterion = "0.7.0"
+# Dev-only. Property tests run in the normal suite so CI gates on them (see
+# docs/remaining-work.md, `process.fuzzing`); a dev-dependency cannot reach a shipped binary.
+proptest = "1.7.0"
+# The one external crate that reaches a platform primitive `std` does not expose. It is
+# scoped to `ncui-security` (see ADR-012) and is the only reason the agent transport can
+# obtain a bearer token on Windows: BCryptGenRandom needs FFI, which the workspace
+# forbids, and a predictable fallback would be worse than no token.
+getrandom = "0.4.3"
+
+[workspace.lints.rust]
+# Warnings are defects. This is the project's core quality mandate (spec 4.5, 48).
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unused_qualifications = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+nonstandard_style = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Deny outright: patterns that have produced real defects in systems of this shape.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+# Documented, intentional exceptions live at the call site with a written reason.
+allow_attributes_without_reason = "warn"
+too_many_lines = "warn"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+similar_names = "allow"
+struct_excessive_bools = "allow"
+fn_params_excessive_bools = "allow"
+single_match_else = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+debug = 1
+
+# Benchmarks and the hot IPC path are measured in release mode (spec 71).
+[profile.bench]
+opt-level = 3
+lto = "thin"
+debug = 1
+
+[profile.release.package."*"]
+opt-level = 3

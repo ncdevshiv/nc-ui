@@ -1,0 +1,24 @@
+[package]
+name = "ncui-runtime"
+description = "Runtime composition: wires core subsystems, serves the agent-facing JSON-RPC API, and reports health."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ncui-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ncui-ipc = { workspace = true }
+ncui-state = { workspace = true }
+ncui-scheduler = { workspace = true }
+ncui-security = { workspace = true }
+ncui-observability = { workspace = true }
+ncui-workers = { workspace = true }
+tracing = { workspace = true }

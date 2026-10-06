@@ -1,0 +1,39 @@
+[package]
+name = "ncui-bench"
+description = "Performance measurement harness and benchmark suite for NC-UI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ncui-abi = { workspace = true }
+ncui-core = { workspace = true }
+ncui-a11y = { workspace = true }
+ncui-ipc = { workspace = true }
+ncui-runtime = { workspace = true }
+ncui-webview = { workspace = true }
+ncui-observability = { workspace = true }
+ncui-scheduler = { workspace = true }
+ncui-security = { workspace = true }
+ncui-state = { workspace = true }
+ncui-workers = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "latency"
+harness = false
+
+[[bench]]
+name = "throughput"
+harness = false

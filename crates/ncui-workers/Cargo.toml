@@ -1,0 +1,19 @@
+[package]
+name = "ncui-workers"
+description = "Native worker pool with bounded queues, task lifecycle, cancellation, and observable queue metrics."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ncui-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ncui-scheduler = { workspace = true }
+ncui-observability = { workspace = true }

@@ -1,0 +1,23 @@
+[package]
+name = "ncui-cli"
+description = "Machine-readable command line interface: status, health, describe, and capability inspection."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ncui-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ncui-runtime = { workspace = true }
+ncui-security = { workspace = true }
+
+[[bin]]
+name = "ncui"
+path = "src/main.rs"

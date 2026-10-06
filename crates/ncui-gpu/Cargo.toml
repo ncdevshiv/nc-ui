@@ -1,0 +1,17 @@
+[package]
+name = "ncui-gpu"
+description = "GPU islands: geometry, the DOM/GPU composition boundary, and the full input contract ADR-002 requires."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors = ["NC-UI Contributors"]
+
+[lints]
+workspace = true
+
+# No dependencies. The compositing boundary's decision logic is self-contained: hit testing and
+# routing need nothing from ncui-core. `ncui-a11y`'s semantic tree is NOT yet wired in, which is
+# part of why `gpu.islands` stays `not_implemented` — see docs/remaining-work.md.
+[dependencies]

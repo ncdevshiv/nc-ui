@@ -1,0 +1,68 @@
+[package]
+name = "ncui-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# A separate workspace so the fuzz targets never enter the shipped dependency graph: they
+# need nightly, and `libfuzzer-sys` must not be a dependency of anything that builds on
+# stable.
+[workspace]
+members = ["."]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# Re-exports `fuzz_target!` under a name the compile-check test can substitute, so the target
+# ncui-allow-placeholder: prose describing the compile-check mechanism, not a stand-in in this file
+# bodies are type-checked by the ordinary suite rather than only by `cargo fuzz build`.
+ncui-fuzz-target = { path = "target-macro" }
+ncui-core = { path = "../crates/ncui-core" }
+ncui-ipc = { path = "../crates/ncui-ipc" }
+ncui-security = { path = "../crates/ncui-security" }
+ncui-state = { path = "../crates/ncui-state" }
+serde_json = "1.0.145"
+
+[[bin]]
+name = "fuzz_frame_decode"
+path = "fuzz_targets/fuzz_frame_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_message_decode"
+path = "fuzz_targets/fuzz_message_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_semver_parse"
+path = "fuzz_targets/fuzz_semver_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_path_resolve"
+path = "fuzz_targets/fuzz_path_resolve.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_token_hex"
+path = "fuzz_targets/fuzz_token_hex.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_registry_parse"
+path = "fuzz_targets/fuzz_registry_parse.rs"
+test = false
+doc = false
+bench = false

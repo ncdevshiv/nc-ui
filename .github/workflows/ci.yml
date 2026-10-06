@@ -1,0 +1,246 @@
+name: ci
+
+# The gates mirror the project's quality mandate: warnings are defects, a feature is
+# either absent or fully evidenced, and performance claims require measurements.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Compile-time gates. These run on every push and pull request.
+  # ---------------------------------------------------------------------------
+  rust:
+    name: rust / build, lint, test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install 1.98.1 --profile minimal --component rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (deny warnings, pedantic)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Unit, integration and doc tests
+        run: cargo test --workspace --all-targets
+
+      - name: Documentation builds without warnings
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: Tooling tests
+        working-directory: tools
+        run: |
+          cargo test --all-targets
+          cargo clippy --all-targets -- -D warnings
+
+  # ---------------------------------------------------------------------------
+  # Policy gates. These encode the project's own rules as executable checks.
+  # ---------------------------------------------------------------------------
+  policy:
+    name: policy / placeholders, architecture, registry
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal
+
+      - name: Build the verification tools
+        working-directory: tools
+        run: cargo build --release
+
+      # One invocation per workspace root, matching the Makefile's `policy` target.
+      # Exemption is decided by a file's first path component, so a single root above both
+      # workspaces would treat every test file as production source — and would leave the
+      # tooling crate unscanned entirely.
+      - name: No markers of unfinished work in runtime source
+        run: ./tools/target/release/ncui-placeholders crates protocols
+
+      - name: No markers of unfinished work in tooling source
+        working-directory: tools
+        run: ../tools/target/release/ncui-placeholders ncui-tools
+
+      - name: No markers of unfinished work in fuzz targets
+        run: ./tools/target/release/ncui-placeholders fuzz
+
+      - name: Crate layering and dependency direction
+        run: ./tools/target/release/ncui-arch .
+
+      - name: Every completed feature carries its required evidence
+        run: ./tools/target/release/ncui-registry protocols/feature-registry.json
+
+  # ---------------------------------------------------------------------------
+  # Performance. Benchmarks are reported evidence; they do not block merges on a
+  # shared runner. See docs/known-gaps.md for the measurement behind that decision.
+  # ---------------------------------------------------------------------------
+  benchmark:
+    name: benchmark / measure and report
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal
+
+      # One baseline per platform, at benches/baseline/<os>/latency.json. A p99 measured on
+      # Windows says nothing about a Linux runner, so a platform with no committed baseline
+      # records its own rather than being compared against someone else's machine.
+      - name: Measure latency percentiles
+        run: cargo bench -p ncui-bench --bench latency
+
+      - name: Record this platform's baseline if none is committed
+        run: |
+          # The path comes from the tool, not from `uname`: `uname -s` yields `darwin` on
+          # macOS while `std::env::consts::OS` yields `macos`, and a second source of truth
+          # for a platform-dependent path is exactly how this step broke before.
+          baseline="$(cargo bench -p ncui-bench --bench latency -- --print-baseline 2>&1 >/dev/null | tail -1)"
+          echo "this platform's baseline is $baseline"
+          if [ ! -f "$baseline" ]; then
+            cargo bench -p ncui-bench --bench latency -- --write-baseline
+            echo "::notice::recorded the first baseline for this platform at $baseline"
+          else
+            cargo bench -p ncui-bench --bench latency -- --baseline "$baseline"
+            echo "compared against $baseline"
+          fi
+
+      # `--enforce` is deliberately absent. It is the right setting on a dedicated, quiet
+      # runner and the wrong one on a shared one; docs/known-gaps.md records the
+      # measurement behind that decision.
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: latency-report
+          path: benches/results/latency.json
+
+
+# ---------------------------------------------------------------------------
+  # Long-running resource checks. A bound that holds on the first cycle can still leak on
+  # the thousandth, so the soak runs on a schedule rather than only per-push — the in-suite
+  # default of 200 rounds is a smoke test, and this is the one that would catch a slow leak.
+  # ---------------------------------------------------------------------------
+  soak:
+    name: soak / resource bounds over many cycles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Soak with an elevated round count
+        env:
+          NCUI_SOAK_ROUNDS: "2000"
+        run: cargo test -p ncui-runtime --test soak -- --nocapture
+
+  # ---------------------------------------------------------------------------
+  # Fuzzing. The property half runs in the ordinary suite above; this job additionally
+  # checks that every libFuzzer target still *compiles*, which is the part a contributor
+  # without a sanitizer runtime would otherwise ship unchecked. It does not run the engine:
+  # that needs an x64 sanitizer runtime, which the ubuntu image does provide, so it is
+  # built here and run for a short fixed duration per target.
+  # ---------------------------------------------------------------------------
+  fuzz:
+    name: fuzz / targets compile and run briefly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo install cargo-fuzz
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build every fuzz target
+        run: cargo +nightly fuzz build
+
+      - name: Fuzz each target briefly
+        run: |
+          for target in $(ls fuzz/fuzz_targets | sed 's/\.rs$//'); do
+            echo "::group::$target"
+            cargo +nightly fuzz run "$target" -- -max_total_time=30 -rss_limit_mb=2560
+            echo "::endgroup::"
+          done
+
+  # ---------------------------------------------------------------------------
+  # Release artefacts. The reproducibility check builds twice and compares digests, which
+  # is the only honest way to assert it — and it failed before `.cargo/config.toml` set
+  # /Brepro, because the MSVC linker stamps a timestamp into the image by default.
+  # Signing is skipped when no key is configured, so this job is useful without one.
+  # ---------------------------------------------------------------------------
+  release:
+    name: release / sbom, reproducible build, signature
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install the SBOM generator
+        run: cargo install cargo-cyclonedx
+
+      - name: Release tooling tests
+        run: python tools/test_build_release.py
+
+      - name: Build, check reproducibility and sign
+        env:
+          NCUI_SIGNING_KEY: ${{ secrets.NCUI_SIGNING_KEY }}
+        run: python tools/build_release.py
+
+      - name: Upload the SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.os }}
+          path: artifacts/
+
+  # ---------------------------------------------------------------------------
+  # Supply chain. See ADR-012.
+  # ---------------------------------------------------------------------------
+  supply-chain:
+    name: supply-chain / audit and licence policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal
+
+      - uses: taiki-e/install-action@cargo-deny
+
+      - name: Dependency policy
+        run: cargo deny check
+
+      - name: Vulnerability scan
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

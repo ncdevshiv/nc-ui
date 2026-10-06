@@ -1,0 +1,22 @@
+# Reproducible release builds.
+#
+# Two clean builds of this tree produced different `ncui.exe` byte for byte until this was
+# added. The cause is the MSVC linker, which stamps a timestamp and a PDB GUID into the image
+# by default; `SOURCE_DATE_EPOCH` alone does not override it. `/Brepro` replaces both with
+# values derived from the content.
+#
+# This is a *correctness* setting rather than a nicety: a consumer who cannot tell a rebuild
+# from a substitution cannot verify a release at all. `tools/build_release.py` asserts the
+# property by building twice and comparing digests, so a regression here fails rather than
+# being assumed away.
+[build]
+rustflags = ["-C", "link-args=/Brepro"]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-args=/Brepro"]
+
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "link-args=-Wl,--build-id=none"]
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-args=-Wl,--build-id=none"]

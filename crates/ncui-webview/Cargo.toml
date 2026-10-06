@@ -1,0 +1,19 @@
+[package]
+name = "ncui-webview"
+description = "Window and WebView host policy: lifecycle, capability isolation, and the IPC seam."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors = ["NC-UI Contributors"]
+
+[lints]
+workspace = true
+
+[dependencies]
+ncui-core = { workspace = true }
+ncui-ipc = { workspace = true }
+ncui-security = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

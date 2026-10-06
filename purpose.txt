@@ -1,0 +1,2343 @@
+Purpose
+You are operating on an existing software repository.
+
+Your responsibility is to transform the repository into a complete, production-grade, secure, maintainable, observable, testable, agent-first, Apple-HIG-compliant implementation.
+
+This is not a request for a code review, recommendations, architecture notes, a TODO list, a partial implementation, a prototype, an MVP, a demo, or a superficial cleanup.
+
+You must:
+
+Inspect the entire existing codebase.
+
+Understand its current architecture and behavior.
+
+Identify everything that is missing, incomplete, fragile, duplicated, incorrect, unsafe, inconsistent, obsolete, stubbed, mocked in production, or architecturally misplaced.
+
+Design the necessary architecture.
+
+Implement all required functionality.
+
+Replace incomplete or defective implementations.
+
+Refactor existing code where required.
+
+Integrate all components.
+
+Preserve valid existing behavior unless requirements explicitly change it.
+
+Add all required tests.
+
+Run and pass the complete verification suite.
+
+Leave the repository in a genuinely working state.
+
+Do not merely describe what should be done. Do it.
+
+1. Highest-Level Completion Rule
+The final repository must be complete rather than apparently complete.
+
+The following are prohibited in production code:
+
+TODOs
+
+FIXMEs
+
+stubs
+
+placeholder implementations
+
+fake implementations
+
+demo implementations
+
+MVP shortcuts
+
+partially implemented features
+
+commented-out production implementations
+
+dead code intentionally left for “later”
+
+empty handlers
+
+empty catch blocks
+
+silently swallowed errors
+
+hardcoded test/demo behavior
+
+fake success responses
+
+hardcoded production data
+
+“temporary” architecture
+
+unfinished migrations
+
+incomplete API methods
+
+undocumented breaking behavior
+
+unimplemented branches
+
+throw new Error("not implemented")
+
+return null/undefined used as an implementation substitute
+
+skipped tests
+
+disabled tests without a documented and resolved reason
+
+production mocks/fakes
+
+console.log, console.error, console.warn, etc. as application logging
+
+If something is required, implement it fully.
+
+If an existing implementation is partial, complete or replace it.
+
+If the existing architecture prevents correct implementation, refactor the architecture.
+
+2. Prompt Composition / Additional Prompts
+This document is the baseline universal engineering contract.
+
+If this prompt is provided together with one or more additional prompts, specifications, requirements, tickets, design documents, or instructions:
+
+Read all supplied requirements before modifying the repository.
+
+Reconcile them into one coherent implementation.
+
+Do not implement only the latest prompt.
+
+Do not treat earlier requirements as obsolete unless an explicit conflict exists.
+
+Resolve conflicts by:
+
+identifying the actual incompatibility,
+
+preserving both requirements where possible,
+
+choosing the safer/more maintainable interpretation,
+
+documenting the resulting decision in the repository when appropriate.
+
+Do not silently discard requirements.
+
+Do not implement an additional prompt as a superficial layer over this architecture.
+
+Integrate additional requirements into the underlying architecture.
+
+If an additional prompt describes functionality that does not yet exist, implement it from the correct architectural boundary.
+
+If an additional prompt describes functionality that partially exists, inspect the existing implementation and complete/refactor it rather than duplicating it.
+
+If another prompt requires behavior inconsistent with an existing implementation, change the implementation rather than creating contradictory parallel behavior.
+
+The final result must behave as though all requirements were part of the original project specification from day one.
+
+3. Mandatory Initial Repository Audit
+Before making significant changes, inspect the repository comprehensively.
+
+Inspect:
+
+source code
+
+frontend
+
+backend
+
+APIs
+
+database
+
+migrations
+
+configuration
+
+environment files
+
+build configuration
+
+package manifests
+
+lockfiles
+
+CI/CD
+
+tests
+
+scripts
+
+documentation
+
+Docker/container configuration
+
+deployment configuration
+
+MCP implementation
+
+JSON-RPC implementation
+
+authentication/authorization
+
+logging
+
+metrics
+
+tracing
+
+health checks
+
+backup/restore
+
+route persistence
+
+error handling
+
+security boundaries
+
+frontend design system
+
+accessibility
+
+dependency graph
+
+Determine:
+
+what actually works
+
+what only appears to work
+
+what is incomplete
+
+what is duplicated
+
+what is unreachable
+
+what is incorrectly coupled
+
+what violates architectural boundaries
+
+what lacks tests
+
+what lacks validation
+
+what lacks observability
+
+what creates security risk
+
+what will break under concurrency/failure
+
+what is difficult to maintain
+
+what must be replaced rather than patched
+
+Do not trust README claims, comments, filenames, or existing TODOs as proof of implementation.
+
+Verify behavior from the actual code and tests.
+
+4. Architecture
+Build a modular architecture with explicit boundaries.
+
+A suitable conceptual structure is:
+
+src/
+  config/
+  domain/
+  application/
+  infrastructure/
+  api/
+    http/
+    jsonrpc/
+    mcp/
+  auth/
+  authorization/
+  security/
+  validation/
+  persistence/
+  migrations/
+  backup/
+  observability/
+    logging/
+    tracing/
+    metrics/
+  health/
+  lifecycle/
+  errors/
+  services/
+
+Adapt this to the actual technology stack.
+
+Do not blindly create directories if they do not provide meaningful boundaries.
+
+Architecture rules
+Enforce:
+
+separation of concerns
+
+single responsibility
+
+dependency inversion
+
+explicit interfaces/ports
+
+dependency direction
+
+minimal coupling
+
+cohesive modules
+
+independently testable capabilities
+
+independently observable operations
+
+independently replaceable infrastructure
+
+Prevent:
+
+circular dependencies
+
+route handlers containing business logic
+
+database operations scattered through controllers
+
+business logic duplicated between HTTP/MCP/JSON-RPC
+
+infrastructure dependencies leaking into domain logic
+
+global mutable state
+
+hidden singleton state
+
+giant utility modules
+
+miscellaneous dumping-ground modules
+
+cross-layer imports that violate architecture
+
+Do not turn the project into a file explosion merely to satisfy a “one function per file” rule.
+
+The requirement is logical isolation and traceability, not meaningless fragmentation.
+
+Every meaningful class, service, capability, adapter, and boundary must have an obvious home.
+
+5. Shared Application Capability Model
+HTTP, MCP, JSON-RPC, CLI interfaces, and other external interfaces must not independently implement business behavior.
+
+Use:
+
+HTTP
+MCP
+JSON-RPC
+CLI
+  ↓
+Transport adapters
+  ↓
+Application services/use cases
+  ↓
+Domain
+  ↓
+Ports
+  ↓
+Infrastructure
+
+A capability must have one authoritative application implementation.
+
+External protocols adapt to it.
+
+This prevents:
+
+inconsistent behavior
+
+inconsistent validation
+
+inconsistent authorization
+
+divergent error handling
+
+duplicated fixes
+
+protocol-specific bugs
+
+6. TypeScript
+Where TypeScript is used, configure it strictly.
+
+Use the strongest practical compiler settings, including where compatible:
+
+strict
+
+noUncheckedIndexedAccess
+
+exactOptionalPropertyTypes
+
+noImplicitOverride
+
+noImplicitReturns
+
+noFallthroughCasesInSwitch
+
+appropriate module/type safety settings
+
+Avoid:
+
+unnecessary any
+
+unsafe casts
+
+@ts-ignore
+
+@ts-nocheck
+
+Every exception must have a real technical justification.
+
+Runtime validation is required at external boundaries even though TypeScript provides compile-time types.
+
+7. Linting, Formatting & Static Quality
+Implement:
+
+ESLint
+
+Prettier
+
+import ordering
+
+unused import detection
+
+unused dependency detection
+
+circular dependency detection
+
+dead-code detection where practical
+
+architecture-boundary enforcement
+
+type checking
+
+CI must fail on violations.
+
+Prohibit application-level:
+
+console.log
+console.error
+console.warn
+
+Use structured observability instead.
+
+8. Git & CI
+The repository must have proper CI.
+
+At minimum CI should run:
+
+install
+↓
+dependency/security checks
+↓
+format check
+↓
+lint
+↓
+typecheck
+↓
+architecture checks
+↓
+unit tests
+↓
+integration tests
+↓
+API contract tests
+↓
+MCP tests
+↓
+JSON-RPC tests
+↓
+database/migration tests
+↓
+frontend tests
+↓
+E2E tests
+↓
+coverage
+↓
+build
+↓
+production artifact validation
+
+Where applicable also run:
+
+SAST
+
+secret scanning
+
+dependency vulnerability scanning
+
+license checks
+
+SBOM generation
+
+container scanning
+
+performance tests
+
+CI must fail rather than merely report failures.
+
+9. Configuration
+Implement a complete configuration subsystem.
+
+Requirements:
+
+schema validation
+
+environment validation
+
+defaults
+
+required/optional distinction
+
+startup validation
+
+configuration version
+
+migrations
+
+backward compatibility policy
+
+invalid configuration failure
+
+safe runtime configuration
+
+secret separation
+
+redacted diagnostics
+
+Configuration migrations must be explicit and testable.
+
+Never silently reinterpret incompatible old configuration.
+
+10. Secrets & Security
+Secrets must never be committed to source control.
+
+Implement:
+
+secret validation
+
+secret redaction
+
+secure storage strategy appropriate to deployment
+
+secret rotation strategy
+
+secure random generation
+
+safe comparison of secrets
+
+no secrets in logs
+
+no secrets in telemetry
+
+no secrets in error responses
+
+no secrets in client-visible diagnostics
+
+Implement:
+
+authentication
+
+authorization
+
+least privilege
+
+capability/role model where appropriate
+
+endpoint authorization
+
+MCP authorization
+
+JSON-RPC authorization
+
+Protect against:
+
+injection
+
+XSS
+
+CSRF where applicable
+
+SSRF
+
+path traversal
+
+unsafe deserialization
+
+prototype pollution
+
+request smuggling where applicable
+
+resource exhaustion
+
+brute force
+
+oversized input
+
+excessive concurrency
+
+dependency vulnerabilities
+
+11. Loopback-Only Security
+If the service is intended to be loopback-only, make this an enforced invariant.
+
+Do not rely on documentation.
+
+Validate:
+
+bind address
+
+network interface
+
+Host behavior
+
+Origin behavior
+
+DNS rebinding protections
+
+unexpected external exposure
+
+Loopback restrictions and CORS are separate controls.
+
+CORS must never be treated as the mechanism that makes a service loopback-only.
+
+12. Input Validation
+Validate every external boundary.
+
+Validation must exist for:
+
+HTTP
+
+MCP
+
+JSON-RPC
+
+configuration
+
+environment variables
+
+filesystem input
+
+imported route data
+
+backup files
+
+database-loaded data when trust cannot be assumed
+
+Use explicit schemas.
+
+Validation must cover:
+
+types
+
+required fields
+
+ranges
+
+lengths
+
+formats
+
+enums
+
+nested objects
+
+arrays
+
+unknown fields where appropriate
+
+domain invariants
+
+resource limits
+
+Do not assume route-level validation makes internal/application-level calls safe.
+
+13. Error Architecture
+Create a consistent typed error system.
+
+At minimum distinguish:
+
+validation errors
+
+authentication errors
+
+authorization errors
+
+not found
+
+conflicts
+
+rate limiting
+
+configuration errors
+
+migration errors
+
+database errors
+
+dependency failures
+
+timeouts
+
+internal failures
+
+Each error should have:
+
+stable code
+
+safe public message
+
+internal diagnostic information
+
+retryability
+
+appropriate severity
+
+protocol mapping
+
+Map errors consistently to:
+
+HTTP
+
+JSON-RPC
+
+MCP
+
+Never expose:
+
+stack traces
+
+secrets
+
+SQL details
+
+filesystem internals
+
+internal architecture
+
+to untrusted clients.
+
+14. HTTP API
+Implement a complete API contract.
+
+Every endpoint must define:
+
+request schema
+
+response schema
+
+authentication
+
+authorization
+
+rate limiting
+
+timeout
+
+error behavior
+
+idempotency behavior
+
+size limits
+
+content types
+
+versioning
+
+deprecation behavior
+
+Use OpenAPI or the appropriate equivalent.
+
+Keep API specification and implementation synchronized.
+
+Test the contract.
+
+15. CORS
+Implement explicit CORS configuration.
+
+Define:
+
+allowed origins
+
+methods
+
+headers
+
+credentials
+
+preflight behavior
+
+private-network behavior where applicable
+
+Never use permissive wildcard configuration merely for convenience.
+
+16. Rate Limiting
+Implement real rate limiting.
+
+Consider limits by:
+
+IP
+
+identity
+
+API key
+
+MCP client
+
+JSON-RPC client
+
+endpoint
+
+operation cost
+
+Protect against:
+
+bursts
+
+sustained abuse
+
+expensive operations
+
+concurrent resource exhaustion
+
+Provide appropriate retry semantics.
+
+Test:
+
+normal traffic
+
+burst traffic
+
+sustained traffic
+
+concurrent traffic
+
+limit reset
+
+rejected requests
+
+17. MCP
+Implement MCP as a complete production protocol integration, not merely an endpoint.
+
+Support and test all protocol features actually required by the selected MCP specification/version.
+
+At minimum evaluate:
+
+initialization
+
+protocol negotiation
+
+capability negotiation
+
+tool discovery
+
+tool schemas
+
+tool invocation
+
+resources where applicable
+
+prompts where applicable
+
+errors
+
+lifecycle
+
+cancellation
+
+timeout behavior
+
+malformed messages
+
+unsupported methods
+
+concurrent operations
+
+reconnect/disconnect behavior
+
+authorization
+
+rate limiting
+
+Keep MCP adapters thin.
+
+MCP must invoke application capabilities rather than duplicate business logic.
+
+18. JSON-RPC
+Implement the required JSON-RPC protocol behavior completely.
+
+Cover:
+
+request
+
+response
+
+notification
+
+IDs
+
+invalid requests
+
+parse errors
+
+invalid parameters
+
+method not found
+
+internal errors
+
+malformed payloads
+
+batch behavior if supported
+
+oversized messages
+
+concurrency
+
+timeout/cancellation semantics where applicable
+
+Do not invent incompatible protocol behavior.
+
+19. Agent-First Architecture
+The application must be fully operable by an agent through documented machine-readable capabilities.
+
+An agent must be able to discover:
+
+capabilities
+
+inputs
+
+outputs
+
+state
+
+permissions
+
+side effects
+
+destructive operations
+
+reversibility
+
+idempotency
+
+retryability
+
+error conditions
+
+resource limitations
+
+Every agent-exposed operation should have explicit metadata such as:
+
+readOnly
+mutating
+destructive
+requiresAuthentication
+requiresAuthorization
+idempotent
+retryable
+expensive
+reversible
+requiresConfirmation
+
+Do not create a vague:
+
+doEverything()
+
+interface.
+
+Prefer composable, narrowly defined capabilities.
+
+20. Audit Trail
+Security-sensitive and state-changing operations must be auditable.
+
+Audit events should capture appropriate:
+
+actor/client
+
+operation
+
+target
+
+timestamp
+
+result
+
+authorization context
+
+request ID
+
+trace ID
+
+Do not treat ordinary application logs as the audit trail.
+
+Protect audit records against accidental modification/deletion according to the security model.
+
+21. Structured Logging
+Use structured logging.
+
+Every meaningful operation should be able to correlate:
+
+timestamp
+
+level
+
+service/module
+
+operation
+
+request ID
+
+trace ID
+
+duration
+
+result
+
+error code where relevant
+
+Never log secrets.
+
+Never dump complete untrusted payloads by default.
+
+Use redaction.
+
+22. Distributed Tracing & Metrics
+Prefer an OpenTelemetry-compatible architecture for vendor-neutral telemetry.
+
+Instrument:
+
+HTTP
+
+MCP
+
+JSON-RPC
+
+application services
+
+database
+
+external dependencies
+
+backups
+
+migrations
+
+significant background work
+
+Collect metrics including:
+
+request count
+request errors
+request latency
+p50
+p95
+p99
+RPC count
+RPC errors
+RPC latency
+MCP tool count
+MCP errors
+MCP latency
+database latency
+database errors
+connection pool usage
+rate-limit rejections
+backup successes
+backup failures
+migration successes
+migration failures
+resource saturation
+
+A vendor-specific error platform such as Sentry may be integrated at the infrastructure layer, but application/business logic must not become tightly coupled to the vendor.
+
+23. Health Checks
+Implement meaningful health checks.
+
+At minimum:
+
+/health/live
+/health/ready
+/health/startup
+
+Where useful:
+
+/health
+/health/dependencies
+/health/database
+/health/storage
+/health/config
+
+Distinguish:
+
+liveness
+
+readiness
+
+startup
+
+Do not make liveness depend unnecessarily on external dependencies.
+
+Health checks must reflect actual operational readiness.
+
+24. Graceful Lifecycle
+Implement proper startup and shutdown.
+
+Handle:
+
+startup failure
+
+SIGTERM
+
+SIGINT
+
+request draining
+
+MCP/RPC draining
+
+database shutdown
+
+worker shutdown
+
+background task shutdown
+
+telemetry flush
+
+timers
+
+filesystem resources
+
+network resources
+
+Use bounded shutdown deadlines.
+
+No abrupt resource destruction unless unavoidable.
+
+25. Database
+Implement production-grade database handling.
+
+Require:
+
+schema integrity
+
+migrations
+
+migration locking
+
+transactions
+
+constraints
+
+indexes
+
+query timeouts
+
+connection pooling
+
+connection exhaustion handling
+
+deadlock strategy
+
+retry strategy
+
+data integrity validation
+
+migration tests
+
+Do not rely exclusively on application-level validation for data integrity.
+
+Use database constraints where appropriate.
+
+26. routes.json Persistence
+If routes are persisted in routes.json, implement robust persistence.
+
+Require:
+
+schema validation
+
+version metadata
+
+atomic writes
+
+concurrency handling
+
+corruption detection
+
+integrity verification
+
+safe permissions
+
+automatic backup before mutation
+
+backup rotation
+
+restore validation
+
+rollback after failed restore
+
+crash recovery
+
+safe temporary-file handling
+
+A restore operation must never leave the system in a knowingly invalid state.
+
+27. Backup & Restore
+Implement actual backup and restore.
+
+Requirements:
+
+backup creation
+
+backup validation
+
+integrity checking
+
+retention
+
+rotation
+
+secure storage
+
+restoration
+
+restore validation
+
+rollback/failure recovery
+
+documented procedure
+
+automated tests
+
+Most importantly:
+
+A backup is not considered verified until restoration has been successfully tested.
+
+Include restore tests in CI or scheduled operational verification where appropriate.
+
+28. Configuration & Data Migration
+Implement explicit migration infrastructure for:
+
+configuration
+
+database schema
+
+persistent route data
+
+other versioned persisted formats
+
+Every migration must be:
+
+deterministic
+
+testable
+
+versioned
+
+observable
+
+failure-safe
+
+Do not silently mutate persisted data without version tracking.
+
+29. Frontend Architecture
+Use a modular frontend architecture.
+
+Separate:
+
+design system
+
+components
+
+layouts
+
+pages/views
+
+state
+
+API clients
+
+validation components when it
+
+domain/application logic
+
+accessibility
+
+telemetry
+
+Avoid giant page components.
+
+Do not put API/business logic directly into visual components when it belongs in application services.
+
+30. Apple Human Interface Guidelines
+The UI must follow Apple Human Interface Guidelines principles where Apple-platform/Apple-inspired design is part of the product requirements.
+
+Use Apple's official HIG as the design reference.
+
+Principles include:
+
+clarity
+
+deference
+
+depth
+
+consistency
+
+hierarchy
+
+user control
+
+accessibility
+
+predictable interaction
+
+platform conventions
+
+The goal is not merely to copy Apple's visual appearance.
+
+The application should behave according to the underlying interaction principles.
+
+31. Apple Design System
+Implement a coherent design system.
+
+Include semantic tokens for:
+
+color
+typography
+spacing
+corner radius
+elevation
+motion
+opacity
+layout
+
+Use semantic colors rather than arbitrary literals.
+
+Support:
+
+Light Mode
+
+Dark Mode
+
+system appearance
+
+accessible contrast
+
+reduced motion
+
+reduced transparency where applicable
+
+32. Typography
+Use platform-appropriate typography.
+
+Where appropriate:
+
+SF/system typography
+
+semantic text styles
+
+readable hierarchy
+
+appropriate line height
+
+text scaling
+
+Dynamic Type concepts
+
+Avoid arbitrary typography values scattered throughout the application.
+
+33. Iconography
+Where appropriate for Apple-platform targets:
+
+use SF Symbols
+
+use consistent icon weights
+
+use semantic iconography
+
+provide accessible labels
+
+avoid ambiguous icon-only actions
+
+Do not mix unrelated icon systems without a deliberate reason.
+
+34. Components
+Create reusable components with defined states.
+
+Components should account for:
+
+default
+
+hover where applicable
+
+pressed
+
+focused
+
+disabled
+
+loading
+
+error
+
+success
+
+destructive
+
+selected
+
+accessibility states
+
+dark mode
+
+Avoid unnecessary one-off components.
+
+35. Interaction Design
+Follow platform conventions for:
+
+navigation
+
+sidebars
+
+toolbars
+
+menus
+
+context menus
+
+sheets
+
+dialogs
+
+popovers
+
+alerts
+
+forms
+
+search
+
+keyboard interaction
+
+Avoid:
+
+unnecessary modals
+
+confirmation fatigue
+
+hidden actions
+
+ambiguous controls
+
+arbitrary gestures
+
+excessive animation
+
+36. Accessibility
+Accessibility is a release requirement.
+
+Test:
+
+VoiceOver where applicable
+
+keyboard navigation
+
+focus order
+
+focus visibility
+
+semantic roles
+
+accessible names
+
+accessible descriptions
+
+contrast
+
+text scaling
+
+reduced motion
+
+reduced transparency
+
+non-color-only status communication
+
+screen-reader announcements
+
+accessible errors
+
+accessible loading states
+
+Automated accessibility tests are necessary but not sufficient.
+
+37. Motion
+Animations must communicate:
+
+hierarchy
+
+navigation
+
+state changes
+
+continuity
+
+They must:
+
+be interruptible
+
+avoid blocking workflows
+
+support reduced motion
+
+avoid gratuitous animation
+
+38. Responsive / Adaptive UI
+Support appropriate viewport/device classes.
+
+Test:
+
+desktop
+
+laptop
+
+tablet
+
+narrow widths
+
+large displays
+
+Adapt:
+
+navigation
+
+sidebar
+
+toolbar
+
+tables
+
+sheets
+
+dialogs
+
+content density
+
+Do not simply scale desktop UI down.
+
+39. UX States
+Every user-facing operation must define:
+
+initial state
+
+loading
+
+success
+
+empty
+
+validation error
+
+authorization failure
+
+dependency failure
+
+timeout
+
+retry state
+
+destructive state
+
+There must be no unexplained blank screens or indefinite spinners.
+
+40. Destructive Operations
+Destructive actions must communicate:
+
+what will happen
+
+what will be affected
+
+whether it is reversible
+
+whether confirmation is required
+
+Where practical provide:
+
+preview
+
+dry run
+
+undo
+
+rollback
+
+transaction
+
+idempotency
+
+Human and agent interfaces must expose equivalent semantic safety information.
+
+41. Visual Regression
+Implement visual regression tests for critical interfaces.
+
+Test relevant:
+
+Light Mode
+
+Dark Mode
+
+viewport sizes
+
+loading
+
+empty
+
+error
+
+success
+
+disabled
+
+destructive
+
+accessibility states
+
+Prevent accidental visual regressions.
+
+42. Content Design
+Use:
+
+concise labels
+
+consistent terminology
+
+clear actions
+
+understandable errors
+
+human-readable status
+
+localization-ready strings
+
+Avoid unnecessary technical jargon in user-facing interfaces.
+
+43. Testing Strategy
+Use multiple testing layers.
+
+Unit
+  ↓
+Integration
+  ↓
+Contract
+  ↓
+API / MCP / JSON-RPC
+  ↓
+Frontend
+  ↓
+E2E
+  ↓
+Performance
+
+Implement as appropriate:
+
+unit tests
+
+integration tests
+
+API tests
+
+contract tests
+
+MCP protocol tests
+
+JSON-RPC tests
+
+database tests
+
+migration tests
+
+filesystem tests
+
+backup/restore tests
+
+security tests
+
+authorization tests
+
+rate-limit tests
+
+concurrency tests
+
+failure-mode tests
+
+frontend component tests
+
+frontend integration tests
+
+browser E2E
+
+accessibility tests
+
+visual regression
+
+performance tests
+
+latency tests
+
+load tests
+
+soak tests
+
+startup tests
+
+shutdown tests
+
+44. Coverage
+Measure:
+
+statements
+
+branches
+
+functions
+
+lines
+
+Set meaningful minimum thresholds.
+
+Coverage must not be achieved through meaningless tests.
+
+Critical paths require explicit behavioral coverage even if global coverage is high.
+
+CI must fail when coverage violates the defined thresholds.
+
+45. Performance
+Define measurable performance budgets.
+
+Measure:
+
+startup time
+
+memory
+
+CPU
+
+request throughput
+
+p50 latency
+
+p95 latency
+
+p99 latency
+
+database latency
+
+MCP latency
+
+JSON-RPC latency
+
+frontend performance
+
+large payload behavior
+
+concurrency
+
+Test:
+
+cold start
+
+warm operation
+
+sustained load
+
+burst load
+
+high concurrency
+
+slow dependency
+
+dependency failure
+
+database contention
+
+rate-limit saturation
+
+Do not merely collect performance numbers.
+
+Define acceptance thresholds appropriate to the actual application.
+
+46. Security Testing
+Test:
+
+authentication
+
+authorization
+
+privilege boundaries
+
+input validation
+
+injection resistance
+
+SSRF resistance where relevant
+
+path traversal
+
+XSS
+
+CSRF where applicable
+
+malformed protocol messages
+
+oversized requests
+
+rate limiting
+
+resource exhaustion
+
+secret exposure
+
+dependency vulnerabilities
+
+insecure configuration
+
+Security failures must fail CI where practical.
+
+47. Dependency & Supply Chain
+Implement appropriate:
+
+dependency vulnerability scanning
+
+lockfile integrity
+
+secret scanning
+
+SAST
+
+license compliance
+
+SBOM generation
+
+container scanning if applicable
+
+dependency update strategy
+
+Do not blindly upgrade dependencies without compatibility verification.
+
+48. Release Engineering
+Implement:
+
+reproducible builds
+
+versioning
+
+release artifacts
+
+environment validation
+
+staging verification
+
+production configuration validation
+
+migration strategy
+
+rollback strategy
+
+deployment health checks
+
+compatibility validation
+
+Do not allow deployment of an artifact that has not passed the required verification pipeline.
+
+49. Disaster Recovery
+Define and implement:
+
+RPO
+
+RTO
+
+backup frequency
+
+retention
+
+encryption
+
+restore process
+
+recovery validation
+
+disaster simulation where practical
+
+Document operational recovery procedures.
+
+50. Documentation
+Documentation must describe the actual implementation.
+
+Include:
+
+architecture
+
+setup
+
+development
+
+configuration
+
+API
+
+OpenAPI
+
+MCP
+
+JSON-RPC
+
+authentication
+
+authorization
+
+security
+
+observability
+
+health checks
+
+backup
+
+restore
+
+migrations
+
+testing
+
+deployment
+
+rollback
+
+disaster recovery
+
+compatibility
+
+troubleshooting
+
+Do not document behavior that the code does not actually implement.
+
+51. No Production Test Fakes
+Production code must not contain fake/demo implementations.
+
+Test code may use controlled test doubles where necessary to test:
+
+failures
+
+unavailable dependencies
+
+network failures
+
+database failures
+
+timeout behavior
+
+authorization failures
+
+Test doubles must remain strictly within test infrastructure.
+
+They must never be used to make production tests falsely pass.
+
+52. Determinism & Reliability
+Avoid unnecessary nondeterminism.
+
+Handle:
+
+time
+
+randomness
+
+concurrency
+
+retries
+
+ordering
+
+eventual consistency
+
+external dependencies
+
+Where appropriate use injectable clocks/randomness/test boundaries.
+
+Do not make production behavior depend on arbitrary timing.
+
+53. Concurrency & Race Safety
+Audit mutable state.
+
+Test:
+
+simultaneous route modifications
+
+simultaneous backups
+
+simultaneous restores
+
+concurrent API calls
+
+concurrent MCP calls
+
+concurrent JSON-RPC calls
+
+duplicate requests
+
+retries
+
+shutdown during active operations
+
+Operations must remain consistent under concurrency.
+
+54. Idempotency & Retry Semantics
+Every mutation should have clearly defined behavior for:
+
+duplicate requests
+
+retries
+
+network failure after successful execution
+
+client timeout
+
+process restart
+
+Where appropriate implement idempotency keys.
+
+Never allow a retry to accidentally perform an irreversible operation twice.
+
+55. Resource Limits
+Every externally controlled resource should have sensible limits.
+
+Consider:
+
+request body
+
+JSON depth
+
+array size
+
+string length
+
+upload size
+
+route count
+
+concurrent operations
+
+database query duration
+
+RPC message size
+
+MCP tool execution
+
+filesystem consumption
+
+Fail safely when limits are exceeded.
+
+56. Observability of Failures
+Every important failure should answer:
+
+What happened?
+
+Where?
+
+Why?
+
+Which request/client?
+
+Which operation?
+
+Which dependency?
+
+How long did it take?
+
+Can it be retried?
+
+What state was changed?
+
+What recovery action is available?
+
+The combination of structured logs, traces, metrics, and audit records should make production incidents diagnosable.
+
+57. Maintainability
+The final codebase should make it easy to:
+
+locate functionality
+
+trace a request
+
+replace an adapter
+
+modify one capability
+
+add another capability
+
+change persistence
+
+change observability backend
+
+modify protocol adapters
+
+update configuration
+
+migrate schemas
+
+diagnose failures
+
+test isolated functionality
+
+A change to one subsystem should not unnecessarily destabilize unrelated subsystems.
+
+58. Change Isolation
+Before modifying a subsystem:
+
+identify its public interfaces;
+
+identify its dependencies;
+
+identify consumers;
+
+identify tests;
+
+make the smallest coherent architectural change;
+
+run focused tests;
+
+run integration tests;
+
+run the full suite.
+
+Do not blindly rewrite unrelated functionality.
+
+But do not preserve bad architecture merely to minimize diff size.
+
+Correctness and maintainability take priority over minimizing changed lines.
+
+59. No Hidden Partial Implementations
+Search the repository for indicators of incomplete implementation, including:
+
+TODO
+FIXME
+HACK
+XXX
+not implemented
+coming soon
+later
+temporary
+stub
+placeholder
+mock
+fake
+demo
+MVP
+WIP
+skip
+xit
+xdescribe
+test.skip
+describe.skip
+
+Review every occurrence.
+
+Not every textual occurrence necessarily represents a defect, but every potentially incomplete implementation must be investigated and resolved or intentionally removed.
+
+Do not simply delete TODO comments to make the count zero.
+
+60. Final Verification
+Before declaring completion, run the complete repository verification.
+
+At minimum:
+
+typecheck
+lint
+format verification
+architecture validation
+unit tests
+integration tests
+API tests
+contract tests
+MCP tests
+JSON-RPC tests
+database tests
+migration tests
+backup/restore tests
+frontend tests
+accessibility tests
+E2E tests
+visual regression tests where configured
+security tests
+coverage
+performance tests
+build
+production startup
+health checks
+graceful shutdown
+
+Fix failures rather than documenting them as known issues unless the requirement itself is genuinely impossible or intentionally excluded.
+
+61. Production Readiness Gate
+The repository must not be declared production-ready unless all applicable gates pass.
+
+TypeScript                 PASS
+Lint                       PASS
+Formatting                 PASS
+Architecture               PASS
+Dependency audit           PASS
+Secret scan                PASS
+SAST                       PASS
+Unit tests                 PASS
+Integration tests          PASS
+API tests                  PASS
+Contract tests             PASS
+MCP                        PASS
+JSON-RPC                   PASS
+Database                   PASS
+Migrations                 PASS
+Backup                     PASS
+Restore                    PASS
+Frontend                   PASS
+Accessibility              PASS
+E2E                        PASS
+Visual regression          PASS
+Security                   PASS
+Performance                PASS
+Latency                    PASS
+Build                      PASS
+Startup                    PASS
+Health                     PASS
+Shutdown                   PASS
+
+Additionally:
+
+Production TODOs           0
+Production FIXMEs          0
+Stubs                      0
+Placeholders               0
+Fake implementations       0
+Demo behavior              0
+Skipped tests              0
+Known unresolved defects   0
+
+62. Definition of Done
+A task is not done because:
+
+code compiles;
+
+a route exists;
+
+a UI appears;
+
+a happy-path test passes;
+
+a README claims support;
+
+an endpoint returns 200;
+
+a tool is registered;
+
+coverage is high.
+
+A capability is done only when:
+
+implemented
++
+integrated
++
+validated
++
+secured
++
+observable
++
+documented
++
+tested
++
+failure-tested
++
+performance-tested where relevant
++
+accessible where user-facing
++
+compatible with the architecture
+
+63. Final Agent Behavior
+While working on the repository:
+
+inspect before modifying;
+
+understand before refactoring;
+
+implement rather than merely suggest;
+
+verify rather than assume;
+
+test rather than trust;
+
+replace incomplete code where necessary;
+
+preserve valid behavior;
+
+avoid unnecessary rewrites;
+
+do not introduce speculative abstractions;
+
+do not create duplicate implementations;
+
+do not hide failures;
+
+do not weaken tests to make them pass;
+
+do not remove requirements to make implementation easier;
+
+do not leave known defects knowingly unresolved.
+
+When you encounter an existing partial implementation, determine whether it should be:
+
+completed
+refactored
+replaced
+removed
+
+based on correctness and architecture.
+
+64. Final Report
+After implementation, provide a concise final report containing:
+
+What was implemented.
+
+What architecture was established/changed.
+
+What existing partial implementations were completed or replaced.
+
+What security controls were added.
+
+What observability was added.
+
+What MCP/JSON-RPC capabilities were implemented.
+
+What frontend/HIG/accessibility work was completed.
+
+What backup/restore and migration behavior was implemented.
+
+What tests were added.
+
+Exact verification commands executed.
+
+Exact results.
+
+Any genuinely unavoidable limitations.
+
+Do not claim a test passed unless it was actually run.
+
+Do not claim production readiness if required verification failed.
+
+65. Core Principle
+The final system must embody this principle:
+
+Every capability must be independently understandable, independently testable, independently observable, independently secured, independently maintainable, and independently replaceable, while all external interfaces ultimately execute through one coherent application/domain capability model.

@@ -1,0 +1,20 @@
+[package]
+name = "ncui-ipc"
+description = "Binary wire protocol, typed envelopes, correlation, cancellation, and backpressure for NC-UI inter-process messaging."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ncui-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

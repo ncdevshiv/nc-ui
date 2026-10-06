@@ -1,0 +1,43 @@
+# Dependency policy (ADR-012).
+#
+# NC-UI links a WebView and talks to a GPU driver; a compromised transitive dependency
+# in that position is a compromised application. This file makes the policy explicit and
+# machine-checked rather than aspirational.
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+# A known vulnerability is a hard failure. NC-UI ships as a runtime that executes
+# untrusted web content and agent-supplied commands, so the exploit surface is real.
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+# A copyleft or unknown licence in a dependency is a distribution blocker until
+# reviewed and added deliberately, not something to discover at release time.
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# A bare `deny.toml` and an empty lockfile are both supply-chain holes.
+allow-wildcard-paths = false
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# Crates.io only: the runtime must be buildable without reaching a private index.
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

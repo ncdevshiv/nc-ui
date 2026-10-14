@@ -36,6 +36,10 @@ GATES = [
         "registry",
         "/tmp/ncui-tools-linux/release/ncui-registry protocols/feature-registry.json",
     ),
+    # The registry validator proves a cited file exists, not that the file says what the
+    # citation claims about it. This is the half that *is* mechanically checkable: a test
+    # count re-derived from the file it names. See tools/correct_test_counts.py.
+    ("registry counts", "python3 tools/correct_test_counts.py --check"),
     ("placeholders crates", "/tmp/ncui-tools-linux/release/ncui-placeholders crates protocols"),
     ("placeholders tools", "cd tools && /tmp/ncui-tools-linux/release/ncui-placeholders ncui-tools"),
 ]

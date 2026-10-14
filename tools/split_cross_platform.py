@@ -37,8 +37,8 @@ linux = {
     "crates": ["ncui-core"],
     "evidence": {
         "unit_tests": verified(
-            "tools/linux_gate.py runs eleven gates under WSL2 and tallies the results; the "
-            "recorded run passed 909 tests across 23 suites"
+            "tools/linux_gate.py runs its full gate list under WSL2 and tallies the results; the "
+            "recorded run passed 954 tests across 30 suites"
         ),
         "integration_tests": verified(
             "tools/linux_gate.py gates fmt, clippy pedantic with -D warnings, tests, rustdoc "

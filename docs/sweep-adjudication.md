@@ -68,10 +68,13 @@ The four hits that touch I/O or error handling were read individually:
 
 ## Justified: `suppression` (33 hits)
 
-23 `#[allow]` attributes exist in the workspace. **Every one carries a written `reason =`**,
+15 `#[allow]` attributes exist in the workspace. **Every one carries a written `reason =`**,
 verified by reading the full attribute from source rather than the sweep's single-line
-capture. The sweep reports 33 because it matches the opening line of a multi-line
+capture. The sweep reports more than that because it matches the opening line of a multi-line
 attribute; none is a bare suppression.
+
+The count moves as crates are added, so it is stated for the tree this adjudication ran
+against rather than as a standing fact.
 
 ## Justified: `mock-fake-stub` and `todo-marker` in production (5 files)
 

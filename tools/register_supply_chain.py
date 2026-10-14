@@ -27,7 +27,7 @@ by_id["process.supply_chain_releases"] = {
     "crates": ["ncui-core"],
     "evidence": {
         "unit_tests": verified(
-            "tools/test_build_release.py — 14 tests covering the tooling's own decisions: "
+            "tools/test_build_release.py — 8 tests covering the tooling's own decisions: "
             "digest correctness, tool resolution, and that verification fails on an unsigned "
             "or modified artefact"
         ),
@@ -65,7 +65,9 @@ by_id["process.supply_chain_releases"] = {
         ),
         "api_review": verified(
             "tools/build_release.py --verify is the consumer-facing entry point and takes no "
-            "arguments beyond that flag, so verification cannot be misconfigured"
+            "arguments beyond that flag, so verification cannot be misconfigured. The "
+            "capability names ncui-core because that crate holds the version and licence "
+            "identities a release records alongside the SBOM"
         ),
     },
     "platforms": {"linux": "verified", "windows": "verified", "macos": "unverified"},

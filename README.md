@@ -45,9 +45,12 @@ registry rather than from intent.
 | IME, bidi and text shaping inside a GPU island | **Not implemented** |
 | Cross-platform verification on macOS | **Not implemented** — no macOS host reachable |
 
-**Linux and Windows both pass the full gate** — 909 tests, formatting, clippy pedantic with
-`-D warnings`, rustdoc with `-D warnings`, the tools workspace, and all four policy gates.
-`tools/linux_gate.py` runs the Linux side. **macOS has not been run**: no host is reachable
+**Linux and Windows both pass the full gate** — the full workspace suite, formatting, clippy
+pedantic with `-D warnings`, rustdoc with `-D warnings`, the tools workspace, and the policy
+gates (`ncui-arch`, `ncui-registry`, `ncui-placeholders`, and the count check described below).
+`cargo test --workspace --all-targets` is the suite behind that claim;
+`tools/linux_gate.py` runs the Linux side: every gate it lists, last run clean under WSL2.
+**macOS has not been run**: no host is reachable
 from the machine that produced this tree, and the registry records it as `unverified` rather
 than inferred from a CI matrix. That is
 recorded as outstanding work rather than hidden: a feature is not treated as verified on a
@@ -75,11 +78,16 @@ crates/
   ncui-ipc             layer 1  binary framing, envelopes, correlation, backpressure
   ncui-state           layer 1  revisioned stores, coalescing patches, subscriptions, windowing
   ncui-scheduler       layer 1  priority, ageing, cooperative budget, cancellation
+  ncui-a11y            layer 1  semantic tree, focus order, keyboard routing
+  ncui-abi             layer 1  component ABI manifest and capability negotiation
   ncui-workers         layer 2  native worker pool with bounded queues
+  ncui-webview         layer 2  webview host policy, lifecycle, navigation, capability
+  ncui-gpu             layer 2  compositing boundary: geometry and the ADR-002 input contract
   ncui-runtime         layer 3  composition, JSON-RPC agent API, health
   ncui-cli             layer 4  machine-readable status and introspection
+  ncui-bench           layer 4  latency and throughput harness with committed baselines
 tools/                 a separate workspace: placeholder scanner, architecture checker,
-                       feature registry validator
+                       feature registry validator, coverage battery
 docs/adr/              architecture decision records
 protocols/             machine-readable feature registry
 ```
@@ -238,10 +246,14 @@ Loopback is not trusted, so the transport adds, over the in-process path:
 * an audit event for every request, including every refusal;
 * a bound on concurrent connections.
 
-`crates/ncui-runtime/tests/agent_transport.rs` drives a live server over a real socket:
-15 tests covering the authenticated round trip, refusal without a token, refusal of a wrong
-or malformed token, the hostile-length case, per-connection rate limiting, and capability
-denial across the socket.
+`crates/ncui-runtime/tests/agent_transport.rs` drives a live server over a real socket,
+covering the authenticated round trip, refusal without a token, refusal of a wrong or malformed
+token, the hostile-length case, per-connection rate limiting, and capability denial across the
+socket.
+
+No figure is quoted here: a count written in prose is a claim nothing re-derives, and
+`tools/correct_test_counts.py` — which does derive them — reads the registry, where the
+citations are structured. The file is named instead.
 
 Verified by hand against the released binary: an authenticated client received the full
 eight-method surface, `ncui.logs.purge` was refused without consent and served with it, and

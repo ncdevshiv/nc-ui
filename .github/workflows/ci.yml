@@ -88,6 +88,13 @@ jobs:
       - name: Every completed feature carries its required evidence
         run: ./tools/target/release/ncui-registry protocols/feature-registry.json
 
+      # `ncui-registry` proves a cited file exists, not that it contains what is claimed.
+      # A hand-typed "95 tests" against a 20-test file passes it. This re-derives every
+      # count citation from the file it names, which is the only half of the claim that
+      # can be checked mechanically today.
+      - name: Registry test counts match the files they cite
+        run: python tools/correct_test_counts.py --check
+
   # ---------------------------------------------------------------------------
   # Performance. Benchmarks are reported evidence; they do not block merges on a
   # shared runner. See docs/known-gaps.md for the measurement behind that decision.

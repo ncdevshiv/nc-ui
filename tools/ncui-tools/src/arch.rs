@@ -51,6 +51,7 @@ pub const LAYERS: &[(&str, u8)] = &[
     ("ncui-workers", 2),
     ("ncui-webview", 2),
     ("ncui-gpu", 2),
+    ("ncui-webview-wry", 3),
     ("ncui-runtime", 3),
     ("ncui-cli", 4),
     ("ncui-bench", 4),

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "verification_note": "Verified on Windows 11 x86_64-pc-windows-msvc and on Linux x86_64-unknown-linux-gnu (WSL2, Ubuntu 26.04 LTS), both with Rust 1.98.1. The Linux run executed the full gate suite: fmt, clippy pedantic with -D warnings, 786 tests, rustdoc with -D warnings, the tools workspace, and all three policy gates. macOS is recorded as 'unverified': no macOS host is reachable from the machine that produced this registry, so marking it would be a claim with nothing behind it. Every 'complete' entry was re-checked against the file it cites; the thirteen citations that did not survive that check were corrected rather than left standing.",
+  "verification_note": "Verified on Windows 11 x86_64-pc-windows-msvc and on Linux x86_64-unknown-linux-gnu (WSL2, Ubuntu 26.04 LTS), both with Rust 1.98.1. The Linux run executed the full gate suite: fmt, clippy pedantic with -D warnings, 954 tests, rustdoc with -D warnings, the tools workspace, and all four policy gates. macOS is recorded as 'unverified': no macOS host is reachable from the machine that produced this registry, so marking it would be a claim with nothing behind it. Every 'complete' entry was re-checked against the file it cites; the thirteen citations that did not survive that check were corrected rather than left standing.",
   "features": [
     {
       "id": "core.error_model",
@@ -217,7 +217,7 @@
       "evidence": {
         "unit_tests": {
           "verified": true,
-          "evidence": "crates/ncui-ipc/src/frame.rs \u2014 95 unit tests covering magic, version, kind, flags and length validation"
+          "evidence": "crates/ncui-ipc/src/frame.rs \u2014 20 unit tests covering magic, version, kind, flags and length validation"
         },
         "integration_tests": {
           "verified": true,
@@ -577,7 +577,7 @@
       "evidence": {
         "unit_tests": {
           "verified": true,
-          "evidence": "crates/ncui-security/src/authz.rs \u2014 109 tests; the Observer..Administrator ladder is asserted monotonic"
+          "evidence": "crates/ncui-security/src/authz.rs \u2014 17 tests; the Observer..Administrator ladder is asserted monotonic"
         },
         "integration_tests": {
           "verified": true,
@@ -1304,7 +1304,7 @@
         },
         "integration_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/tests/agent_transport.rs \u2014 15 tests driving a live server over a real socket; additionally verified by hand against the released `ncui serve` binary: authenticated describe returned 8 methods, `ncui.logs.purge` was refused without consent and served with it, and an unauthenticated peer received nothing"
+          "evidence": "crates/ncui-runtime/tests/agent_transport.rs \u2014 20 tests driving a live server over a real socket; additionally verified by hand against the released `ncui serve` binary: authenticated describe returned 8 methods, `ncui.logs.purge` was refused without consent and served with it, and an unauthenticated peer received nothing"
         },
         "failure_tests": {
           "verified": true,
@@ -1498,11 +1498,11 @@
       "evidence": {
         "unit_tests": {
           "verified": true,
-          "evidence": "crates/ncui-abi/src/surface.rs, crates/ncui-abi/src/manifest.rs and crates/ncui-abi/src/negotiation.rs hold 25 unit tests across the surface, the manifest and the negotiator"
+          "evidence": "crates/ncui-abi/src/surface.rs, crates/ncui-abi/src/manifest.rs, crates/ncui-abi/src/negotiation.rs and crates/ncui-abi/src/lib.rs hold 25 unit tests across the surface, the manifest, the negotiator and the module's own tests"
         },
         "integration_tests": {
           "verified": true,
-          "evidence": "crates/ncui-abi/tests/negotiation.rs \u2014 9 tests driving a manifest, a surface and a host profile together through the public surface only"
+          "evidence": "crates/ncui-abi/tests/negotiation.rs \u2014 10 tests driving a manifest, a surface and a host profile together through the public surface only"
         },
         "failure_tests": {
           "verified": true,
@@ -1757,7 +1757,7 @@
       "evidence": {
         "unit_tests": {
           "verified": true,
-          "evidence": "tools/test_build_release.py \u2014 14 tests covering the tooling's own decisions: digest correctness, tool resolution, and that verification fails on an unsigned or modified artefact"
+          "evidence": "tools/test_build_release.py \u2014 8 tests covering the tooling's own decisions: digest correctness, tool resolution, and that verification fails on an unsigned or modified artefact"
         },
         "integration_tests": {
           "verified": true,
@@ -1808,7 +1808,7 @@
       "evidence": {
         "unit_tests": {
           "verified": true,
-          "evidence": "tools/linux_gate.py runs eleven gates under WSL2 and tallies the results; the recorded run passed 909 tests across 23 suites"
+          "evidence": "tools/linux_gate.py runs its full gate list under WSL2 and tallies the results; the recorded run passed 954 tests across 30 suites"
         },
         "integration_tests": {
           "verified": true,

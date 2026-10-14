@@ -82,17 +82,20 @@ failure to its trace.
 | JSON-RPC code | `ncui_code` | Meaning |
 | --- | --- | --- |
 | -32600 | `validation` | Malformed request or invalid parameter |
-| -32601 | `protocol` | Unknown method |
 | -32602 | `validation` | Invalid params |
 | -32603 | `internal` | Runtime defect — a defect, not bad input |
-| -32001 | `capability_denied` | The agent lacks a required capability |
+| -32001 | `capability_denied` | The agent lacks a required capability, or authentication failed |
 | -32002 | `limit_exceeded` | Rate or resource limit exceeded |
 | -32003 | `timeout` | The operation exceeded its deadline |
 | -32004 | `cancelled` | The operation was cancelled |
-| -32005 | `not_found` | The referenced entity does not exist |
+| -32005 | `not_found` | The referenced entity or method does not exist |
 | -32006 | `conflict` | Conflicts with current runtime state |
-| -32007 | `unauthorized` | Missing or invalid token |
 | -32008 | `backpressure` | A bounded queue is saturated |
+
+Unknown methods return `-32005` / `not_found`. Authentication failures return
+`-32001` / `capability_denied` — the connection is closed without a response frame,
+because a peer that cannot authenticate must not receive any information about the
+surface.
 
 ## Methods
 
@@ -140,9 +143,12 @@ a GPU surface does. Publishing them as merely "planned" would hide that dependen
 
 ## Pagination and limits
 
-Every method that returns a collection accepts `limit` (default 100, maximum 10 000) and an
-opaque `cursor`. Exceeding the maximum is a `validation` error, not a silent clamp — a silently
-clamped result reads as "this is everything" and is worse than a refusal.
+Every method that returns a collection accepts `limit` (default 100, maximum 10 000).
+Exceeding the maximum is a `validation` error, not a silent clamp — a silently clamped result
+reads as "this is everything" and is worse than a refusal.
+
+An opaque `cursor` for paginating past the first page is **not yet implemented**. It is
+specified here so the interface is stable when it lands; no method reads it today.
 
 ## Cancellation
 
@@ -154,7 +160,7 @@ used to conceal a correctness problem.
 
 Every method invocation produces an audit event containing `agent_id`, `request_id`,
 `correlation`, `method`, `target`, `result`, and the capabilities used. Destructive actions
-require an explicit `authorized: true` field in `params`; holding the capability is necessary
+require an explicit `consent: true` field in `params`; holding the capability is necessary
 but not sufficient (ADR-007).
 
 ## Versioning

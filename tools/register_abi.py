@@ -27,12 +27,12 @@ by_id["abi.component_abi"] = {
     "crates": ["ncui-abi"],
     "evidence": {
         "unit_tests": verified(
-            "crates/ncui-abi/src/surface.rs, crates/ncui-abi/src/manifest.rs and crates/"
-            "ncui-abi/src/negotiation.rs hold 25 unit tests across the surface, the manifest "
-            "and the negotiator"
+            "crates/ncui-abi/src/surface.rs, crates/ncui-abi/src/manifest.rs, crates/"
+            "ncui-abi/src/negotiation.rs and crates/ncui-abi/src/lib.rs hold 25 unit tests "
+            "across the surface, the manifest, the negotiator and the module's own tests"
         ),
         "integration_tests": verified(
-            "crates/ncui-abi/tests/negotiation.rs — 9 tests driving a manifest, a surface and "
+            "crates/ncui-abi/tests/negotiation.rs — 10 tests driving a manifest, a surface and "
             "a host profile together through the public surface only"
         ),
         "failure_tests": verified(

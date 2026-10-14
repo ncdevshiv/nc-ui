@@ -43,6 +43,7 @@ policy:
 	cd tools && ../tools/target/release/ncui-placeholders ncui-tools
 	./tools/target/release/ncui-arch .
 	./tools/target/release/ncui-registry protocols/feature-registry.json
+	python tools/correct_test_counts.py --check
 
 ## bench: run the benchmark suite and report percentiles
 bench:

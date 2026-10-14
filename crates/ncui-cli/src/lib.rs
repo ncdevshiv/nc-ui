@@ -440,12 +440,26 @@ mod tests {
         );
     }
 
-    /// Writes a minimal valid registry next to the test binary and returns its path.
+    /// Writes a minimal valid registry to a per-run scratch file and returns its path.
+    ///
+    /// The name carries a per-call nonce as well as the process id. Two tests in this binary
+    /// call it and cargo runs tests in parallel, so a name derived from the pid alone had both
+    /// writing the same path: one truncated the file while the other parsed it, and a flag
+    /// test failed intermittently with an empty registry.
+    ///
+    /// The file is left in the OS temp directory rather than removed on drop. Removing it at
+    /// the end of the `if` deleted it before `parse` had read the path; keeping the guard
+    /// alive across `parse` needed a binding clippy rejects as unused. A uniquely-named file
+    /// in the system temp directory cannot collide, so leaving it is the smaller cost.
     fn temp_registry() -> std::path::PathBuf {
         use std::io::Write;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(0);
+
         let path = std::env::temp_dir().join(format!(
-            "ncui-cli-usage-example-{}.json",
-            std::process::id()
+            "ncui-cli-usage-example-{}-{}.json",
+            std::process::id(),
+            NONCE.fetch_add(1, Ordering::Relaxed)
         ));
         let mut file = std::fs::File::create(&path).expect("fixture file");
         write!(file, "{{\"schema_version\":1,\"features\":[]}}").expect("fixture write");

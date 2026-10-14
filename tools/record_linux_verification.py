@@ -1,7 +1,7 @@
 """Marks Linux verification for every completed feature.
 
 Written after the full gate suite was run under WSL2 (Ubuntu 26.04, rustc 1.98.1) and passed
-10/10 with 786 tests. Every entry records the environment the run happened in rather than
+every gate in `tools/linux_gate.py` with 954 tests. Every entry records the environment the run happened in rather than
 booting "verified", because a bare flag cannot be checked later.
 
 macOS stays `unverified`: no macOS host is reachable from this machine, so a macOS run would

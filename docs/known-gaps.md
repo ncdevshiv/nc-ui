@@ -124,9 +124,15 @@ but is irrelevant.
 
 ### Most citations are self-certifying
 
-Every one of the 27 completed features cites, for at least one slot, a file inside its own
-crate. `runtime.virtualization` cites `crates/ncui-state/src/virtualize.rs` for all nine
-slots, including `security_review` and `api_review`.
+32 of the 35 completed features cite, for at least one slot, a file inside its own crate. The
+three that do not are the tooling capabilities — `process.supply_chain_releases`,
+`process.verification_tooling` and `cross_platform.verification.linux` — which name `ncui-core`
+in `crates` for its version and licence identities but cite their evidence in `tools/` and
+`benches/`, which is where that work actually lives.
+
+`runtime.virtualization` is the clearest case of the pattern: it cites
+`crates/ncui-state/src/virtualize.rs` for all nine slots, including `security_review` and
+`api_review`.
 
 That is a real limit and it is worth stating plainly: the validator proves a file **exists**,
 not that the file contains what the citation says about it. A `security_review` that cites
@@ -144,11 +150,17 @@ derive `verified` as an output rather than accepting it as an input. That is the
 long-term design and it has not been built. It is recorded here so the current validator is
 not mistaken for something stronger than it is.
 
-## Nothing has been verified on Linux or macOS
+## macOS is the only platform with nothing verified
 
-Every feature is recorded `unverified` on both platforms. The CI matrix defines the jobs; the
-results have not been observed. The registry prints these gaps on every run so they cannot
-be forgotten.
+Every feature is recorded `verified` on Windows and on Linux, and `unverified` on macOS. That
+entry is real: no macOS host is reachable from the machine that produced this tree, so the
+platform claim is the absence of a run rather than a run that passed. The CI matrix defines the
+job; it has never executed, because the repository had no commits and no remote until this
+commit.
+
+The Linux claim is a run, not an inference: `tools/linux_gate.py` executes every gate it
+lists under WSL2, and its tally is the authoritative count. An earlier revision of this file said nothing had been verified on either platform,
+which was true when it was written and stopped being true when the Linux run happened.
 
 ## The scheduler declines one requested behaviour
 
@@ -248,7 +260,7 @@ of the six were buildable, and one was blocked on something a single command wou
 
 | Recorded as blocked on | What was actually there |
 | --- | --- |
-| "Linux and macOS runners" | WSL2 with Ubuntu 26.04; the full gate runs on it (909 tests, 10/10 gates) |
+| "Linux and macOS runners" | WSL2 with Ubuntu 26.04; the full gate runs on it (every gate in `tools/linux_gate.py` passing) |
 | "a signing key" | `gpg` is installed; a key is generatable and the pipeline signs |
 | "a WASM component-model toolchain" | The wire format, negotiation and capability declarations need none — only execution does, and execution is separately recorded as absent |
 | "a platform Webview library" | The WebView2 runtime is installed and a window can be created *and shown* in this session; what was missing was the host policy, which is pure logic |

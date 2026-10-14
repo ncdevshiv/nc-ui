@@ -1,13 +1,13 @@
 # Remaining work
 
-The registry records 35 tracked capabilities: 34 complete, 1 absent. This file is the plan
-for the one that remains, and records what building it needs.
+The registry records 37 tracked capabilities: 35 complete, 2 absent. This file is the plan
+for the two that remain, and records what building each needs.
 
 Six capabilities were recorded here as absent and are now delivered. They were marked blocked
 on things this machine turned out to have — a Linux environment, a signing key, a component ABI
 that needs no runtime to be specified — so the list was worth re-checking rather than
-inheriting. The one capability still absent is the one that genuinely needs hardware this
-project cannot fake.
+inheriting. The two still absent are the ones that genuinely need hardware this project cannot
+fake.
 
 The three that were buildable here — `runtime.mcp_adapter`, `process.fuzzing` and
 `process.soak_and_leaks` — are done and registered. The sections that described them are
@@ -57,6 +57,25 @@ entry on the original list turned out not to be:
 
 Recording it as complete on the strength of `IslandDescriptor` would be exactly the error this
 project's own rules exist to prevent.
+
+### Why the contract report has no consumer yet
+
+`crates/ncui-gpu` answers "which ADR-002 items can a host actually demonstrate?" by driving a
+host and observing each item's effect — not by returning a list. That replaced a check which
+compared a cloned constant's length to itself and so passed on a host whose router was a no-op.
+
+Its consumer is its own tests, and that is the honest state rather than an unfinished one. The
+report is a property of a *live host*: one with islands, in a page, being routed to. There is no
+such host outside the renderer, so anything else answering the question would have to invent
+one and report the fixture's answers — a fake implementation, which the project's own rules
+prohibit outright.
+
+Wiring it therefore belongs to the renderer work, not to a CLI shim. The two things that change
+this: a real `Islands` reaching the runtime, at which point `ncui contract` (or the equivalent
+JSON-RPC method) can report the *running* page; and `ncui-a11y`'s semantic tree being wired into
+this crate, at which point `UNIMPLEMENTED` loses its `Accessibility` entry and that item becomes
+probeable. Until both are true, `satisfied_contracts()` is correctly a test-observed capability
+report and not a release gate.
 
 ## The sequencing that follows from the blockers
 

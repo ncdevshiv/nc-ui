@@ -13,16 +13,48 @@
 
 use core::time::Duration;
 
-use ncui_core::{Capability, Limits};
+use ncui_core::{Capability, Limits, WindowId};
 use ncui_runtime::Runtime;
 use ncui_runtime::agent::AgentSession;
 use ncui_runtime::dispatch::dispatch;
 use ncui_runtime::rpc::{Request, Response};
 use ncui_security::authz::AgentRole;
+use ncui_webview::HostFactory;
 use serde_json::{Value, json};
 
+/// A test factory whose hosts always come up alive.
+#[derive(Debug, Default)]
+struct AlwaysReady;
+
+impl HostFactory for AlwaysReady {
+    fn spawn(
+        &self,
+        _window: WindowId,
+        _url: &str,
+    ) -> Option<Box<dyn ncui_webview::WebViewBackend>> {
+        Some(Box::new(AlwaysAlive))
+    }
+}
+
+#[derive(Debug)]
+struct AlwaysAlive;
+
+impl ncui_webview::WebViewBackend for AlwaysAlive {
+    fn last_error(&self) -> Option<String> {
+        None
+    }
+    fn is_alive(&self) -> bool {
+        true
+    }
+}
+
 fn runtime() -> Runtime {
-    Runtime::start(Limits::default()).expect("runtime should start")
+    let mut runtime = Runtime::start(Limits::default()).expect("runtime should start");
+    runtime.windows = runtime
+        .windows
+        .with_registry(ncui_webview::WindowRegistry::new())
+        .with_factory(Box::new(AlwaysReady));
+    runtime
 }
 
 fn session(role: AgentRole) -> AgentSession {
@@ -98,6 +130,7 @@ fn the_advertised_surface_matches_the_enforced_surface() {
     assert!(!methods.is_empty(), "the surface must not be empty");
 
     let mut destructive_seen = false;
+    let mut created_window: Option<WindowId> = None;
 
     for method in &methods {
         let name = method["name"].as_str().expect("a method name");
@@ -145,10 +178,18 @@ fn the_advertised_surface_matches_the_enforced_surface() {
             continue;
         }
 
+        let params = match name {
+            "ncui.window.create" => json!({ "url": "https://example.com" }),
+            "ncui.window.close" => match created_window {
+                Some(id) => json!({ "window": id.to_string() }),
+                None => json!({ "window": "00000000000000000000000000000001" }),
+            },
+            _ => json!({ "deep": true }),
+        };
         let allowed = dispatch(
             &mut runtime,
             &mut administrator,
-            &Request::new(json!(1), name, json!({ "deep": true })),
+            &Request::new(json!(1), name, params),
             Duration::from_secs(0),
             Some(&registry),
         )
@@ -158,6 +199,15 @@ fn the_advertised_surface_matches_the_enforced_surface() {
             "an administrator was refused `{name}`: {:?}",
             allowed.error
         );
+        if name == "ncui.window.create"
+            && let Some(id) = allowed
+                .result
+                .as_ref()
+                .and_then(|value| value.get("id").and_then(|value| value.as_str()))
+                .and_then(|text| text.parse::<WindowId>().ok())
+        {
+            created_window = Some(id);
+        }
     }
 
     assert!(

@@ -17,9 +17,13 @@
 use core::time::Duration;
 use std::time::SystemTime;
 
-use ncui_core::{Capability, CapabilitySet, CorrelationId, ErrorKind, NcError, Result};
+use ncui_core::{
+    Capability, CapabilitySet, CorrelationId, ErrorKind, NcError, Result, WindowId,
+};
+use ncui_core::error::validation;
 use ncui_security::audit::AuditEvent;
 use ncui_security::audit::AuditOutcome;
+use ncui_webview::{MAX_WINDOWS, WindowRejection};
 use serde_json::{Value, json};
 
 use crate::Runtime;
@@ -91,6 +95,30 @@ pub fn method_table() -> Vec<MethodDescription> {
             "Discard the in-memory log ring. Irreversible, so it requires per-call consent.",
             CapabilitySet::empty().with(Capability::ReadLogs),
             true,
+        ),
+        entry(
+            "ncui.window.list",
+            "Every open window, with its lifecycle state and page grant.",
+            CapabilitySet::empty().with(Capability::Window),
+            false,
+        ),
+        entry(
+            "ncui.window.create",
+            "Open a window on a URL. Requires a host to be installed.",
+            CapabilitySet::empty().with(Capability::Window),
+            false,
+        ),
+        entry(
+            "ncui.window.close",
+            "Close a window by identity.",
+            CapabilitySet::empty().with(Capability::Window),
+            false,
+        ),
+        entry(
+            "ncui.components.list",
+            "Every component declared by mounted windows' manifests.",
+            inspect,
+            false,
         ),
     ]
 }
@@ -271,6 +299,39 @@ fn invoke(
             runtime.logs.clear();
             serde_json::to_value(json!({ "purged": purged })).map_err(|e| json_error(&e))
         }
+        "ncui.window.list" => {
+            let summaries = runtime
+                .windows
+                .summaries()
+                .map_err(window_rejection)?;
+            serde_json::to_value(json!({ "windows": summaries })).map_err(|e| json_error(&e))
+        }
+        "ncui.window.create" => {
+            let url = url_param(&request.params)?;
+            let grant = grant_param(&request.params)?;
+            // The host factory is installed on the window surface at startup; when none is
+            // installed the registry reports the refusal rather than this handler inventing
+            // a window.
+            let id = runtime.windows.open(&url, grant).map_err(window_rejection)?;
+            serde_json::to_value(json!({ "id": id.to_string() })).map_err(|e| json_error(&e))
+        }
+        "ncui.window.close" => {
+            let id = window_id_param(&request.params)?;
+            let closed = runtime.windows.close(id).map_err(window_rejection)?;
+            if closed {
+                serde_json::to_value(json!({ "closed": true })).map_err(|e| json_error(&e))
+            } else {
+                Err(NcError::new(ErrorKind::NotFound {
+                    kind: "window".to_owned(),
+                    id: id.to_string(),
+                })
+                .operation("dispatch::window_close"))
+            }
+        }
+        "ncui.components.list" => {
+            let components = runtime.windows.manifests().map_err(window_rejection)?;
+            serde_json::to_value(json!({ "components": components })).map_err(|e| json_error(&e))
+        }
         "ncui.metrics.query" => {
             let series = runtime.metrics.snapshot();
             serde_json::to_value(json!({
@@ -286,7 +347,96 @@ fn invoke(
     }
 }
 
-/// Reads and bounds the `limit` parameter.
+/// Reads the `url` parameter of a window request.
+fn url_param(params: &Value) -> Result<String> {
+    params
+        .get("url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            validation("url", "must be a string")
+                .operation("dispatch::url_param")
+        })
+        .and_then(|url| {
+            if url.is_empty() {
+                Err(validation("url", "must not be empty").operation("dispatch::url_param"))
+            } else {
+                Ok(url.to_owned())
+            }
+        })
+}
+
+/// Reads and narrows the `grant` parameter of a window request.
+///
+/// Absent means the default grant; a caller may only narrow down, never widen.
+fn grant_param(params: &Value) -> Result<Option<CapabilitySet>> {
+    match params.get("grant") {
+        None => Ok(None),
+        Some(value) => {
+            let names: Vec<String> = value
+                .as_array()
+                .ok_or_else(|| {
+                    validation("grant", "must be an array of capability strings")
+                        .operation("dispatch::grant_param")
+                })?
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .ok_or_else(|| {
+                            validation("grant", "each entry must be a capability string")
+                                .operation("dispatch::grant_param")
+                        })
+                        .map(ToOwned::to_owned)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let mut set = CapabilitySet::empty();
+            for name in names {
+                set = set.with(name.parse::<Capability>().map_err(|e| {
+                    validation(
+                        "grant",
+                        format!("unknown capability `{name}`: {e}"),
+                    )
+                    .operation("dispatch::grant_param")
+                })?);
+            }
+            Ok(Some(set))
+        }
+    }
+}
+
+/// Reads and parses a `window` identifier parameter.
+fn window_id_param(params: &Value) -> Result<WindowId> {
+    params
+        .get("window")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            validation("window", "must be a window id string")
+                .operation("dispatch::window_id_param")
+        })?
+        .parse::<WindowId>()
+        .map_err(|e| {
+            validation("window", e.to_string()).operation("dispatch::window_id_param")
+        })
+}
+
+/// Converts a [`WindowRejection`] into the error class dispatch reports.
+fn window_rejection(rejection: WindowRejection) -> NcError {
+    match rejection {
+        WindowRejection::AtCapacity { open } => NcError::new(ErrorKind::Conflict {
+            reason: format!("at capacity: {open} windows are open and the limit is {MAX_WINDOWS}"),
+        })
+        .operation("dispatch::window"),
+        WindowRejection::Ungrantable { capability } => NcError::new(ErrorKind::CapabilityDenied {
+            capability: capability.to_string(),
+            subject: "page".to_owned(),
+        })
+        .operation("dispatch::window"),
+        WindowRejection::EngineUnavailable { reason } => NcError::new(ErrorKind::NotFound {
+            kind: "webview_host".to_owned(),
+            id: reason.unwrap_or_else(|| "engine unavailable".to_owned()),
+        })
+        .operation("dispatch::window"),
+    }
+}
 ///
 /// Exceeding the maximum is a refusal, not a silent clamp: a silently clamped result reads
 /// as "this is everything", which is worse than an error.
@@ -437,16 +587,30 @@ mod tests {
 
     #[test]
     fn every_role_can_reach_the_diagnostic_surface_when_consenting() {
-        // Every role holds the read-only diagnostics, so all of them must be usable. The
-        // one destructive method additionally requires consent, which is supplied here
-        // because this test is about role coverage rather than about the consent gate
-        // (that is asserted separately, in agent_surface.rs).
+        // The window methods require `Window`, which only Administrator holds; every other
+        // role must be denied. A host is installed so the Administrator's window calls reach
+        // their handlers rather than being refused for want of a factory.
         let registry = json!({"schema_version":1,"features":[]});
         for role in AgentRole::ALL {
             let mut runtime = runtime();
+            if *role == AgentRole::Administrator {
+                runtime.windows = runtime
+                    .windows
+                    .with_registry(ncui_webview::WindowRegistry::new())
+                    .with_factory(Box::new(AlwaysReady));
+            }
             let mut session = session(*role);
+            let mut created_window: Option<WindowId> = None;
             for method in method_table() {
-                let request = Request::new(json!(1), &method.name, json!({ "consent": true }));
+                let params = match method.name.as_str() {
+                    "ncui.window.create" => json!({ "url": "https://example.com" }),
+                    "ncui.window.close" => match created_window {
+                        Some(id) => json!({ "window": id.to_string() }),
+                        None => json!({ "window": "00000000000000000000000000000001" }),
+                    },
+                    _ => json!({ "consent": true }),
+                };
+                let request = Request::new(json!(1), &method.name, params);
                 let response = dispatch_with(
                     &mut runtime,
                     &mut session,
@@ -456,12 +620,33 @@ mod tests {
                     &method_table(),
                 )
                 .expect("response");
-                assert!(
-                    response.error.is_none(),
-                    "role {role:?} could not call {}: {:?}",
-                    method.name,
-                    response.error
-                );
+                let authorized = method.requires.is_subset_of(session.granted);
+                if authorized {
+                    let ok = response.error.is_none();
+                    let closed_not_found = method.name == "ncui.window.close"
+                        && response.error.as_ref().map(|e| e.data.ncui_code.as_str())
+                            == Some("not_found");
+                    assert!(
+                        ok || closed_not_found,
+                        "role {role:?} holds the grant for {} but was refused: {:?}",
+                        method.name,
+                        response.error
+                    );
+                    if method.name == "ncui.window.create"
+                        && let Some(id) = response
+                            .result
+                            .as_ref()
+                            .and_then(|value| value.get("id").and_then(|value| value.as_str()))
+                            .and_then(|text| text.parse::<WindowId>().ok())
+                    {
+                        created_window = Some(id);
+                    }
+                } else {
+                    let error = response.error.expect(
+                        "a role without the grant must be denied",
+                    );
+                    assert_eq!(error.data.ncui_code, "capability_denied");
+                }
             }
         }
     }
@@ -660,14 +845,27 @@ mod tests {
     #[test]
     fn every_advertised_method_has_a_handler() {
         let mut runtime = runtime();
+        // Install a host so the window methods reach their handlers instead of being refused
+        // for want of a factory; a registry with no windows makes `window.list` succeed empty.
+        runtime.windows = runtime
+            .windows
+            .with_registry(ncui_webview::WindowRegistry::new())
+            .with_factory(Box::new(AlwaysReady));
         let mut session = session(AgentRole::Administrator);
         let registry = json!({ "schema_version": 1, "features": [] });
+        // `ncui.window.create` is listed before `ncui.window.close`, so its id can be reused.
+        let mut created_window: Option<WindowId> = None;
         for method in method_table() {
-            let request = Request::new(
-                json!(1),
-                &method.name,
-                json!({ "deep": true, "consent": true }),
-            );
+            let params = match method.name.as_str() {
+                "ncui.window.create" => json!({ "url": "https://example.com" }),
+                "ncui.window.close" => json!({
+                    "window": created_window
+                        .expect("create is listed before close")
+                        .to_string()
+                }),
+                _ => json!({ "deep": true, "consent": true }),
+            };
+            let request = Request::new(json!(1), &method.name, params);
             let response = dispatch(
                 &mut runtime,
                 &mut session,
@@ -676,12 +874,47 @@ mod tests {
                 Some(&registry),
             )
             .expect("response");
+            if method.name == "ncui.window.create"
+                && let Some(id) = response
+                    .result
+                    .as_ref()
+                    .and_then(|value| value.get("id").and_then(|value| value.as_str()))
+                    .and_then(|text| text.parse::<WindowId>().ok())
+            {
+                created_window = Some(id);
+            }
             assert!(
                 response.error.is_none(),
                 "advertised method `{}` failed: {:?}",
                 method.name,
                 response.error
             );
+        }
+    }
+
+    /// A test factory whose hosts always come up alive.
+    #[derive(Debug, Default)]
+    struct AlwaysReady;
+
+    impl ncui_webview::HostFactory for AlwaysReady {
+        fn spawn(
+            &self,
+            _window: WindowId,
+            _url: &str,
+        ) -> Option<Box<dyn ncui_webview::WebViewBackend>> {
+            Some(Box::new(AlwaysAlive))
+        }
+    }
+
+    #[derive(Debug)]
+    struct AlwaysAlive;
+
+    impl ncui_webview::WebViewBackend for AlwaysAlive {
+        fn last_error(&self) -> Option<String> {
+            None
+        }
+        fn is_alive(&self) -> bool {
+            true
         }
     }
 }

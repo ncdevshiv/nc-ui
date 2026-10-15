@@ -36,18 +36,23 @@ pub mod capability;
 pub mod lifecycle;
 pub mod navigation;
 pub mod seam;
+pub mod windows;
 
 pub use capability::{CapabilityGrant, CapabilityRequest};
 pub use lifecycle::{HostState, IllegalTransition, WindowLifecycle};
 pub use navigation::{NavigationPolicy, NavigationRequest, Origin, Scheme, Verdict};
 pub use seam::{HostSeam, SeamMessage, SeamResponse};
+pub use windows::{
+    HostFactory, MAX_WINDOWS, MountedComponent, Window, WindowRegistry, WindowRejection,
+    WindowSummary,
+};
 
 /// The native binding behind this host.
 ///
 /// Implementations wrap the platform embedding layer. Everything above this trait is policy
 /// and is testable without one, which is why the crate compiles and tests on a machine with
 /// no display.
-pub trait WebViewBackend {
+pub trait WebViewBackend: core::fmt::Debug + Send {
     /// The error a backend reports when the engine itself fails — a crash, a lost
     /// connection, a process that will not start.
     fn last_error(&self) -> Option<String>;
@@ -55,4 +60,19 @@ pub trait WebViewBackend {
     /// Whether the engine is still usable. A host that cannot answer this after a crash must
     /// report it rather than continuing to serve requests from a dead page.
     fn is_alive(&self) -> bool;
+}
+
+/// Lifts an owned backend into a boxed one, so the registry can hold heterogeneous engines.
+///
+/// `?Sized` is what makes `Box<dyn WebViewBackend>` itself a backend: without it a registry
+/// storing `Box<dyn WebViewBackend>` could not store that box again in another box, and every
+/// call site would have to reach through the box by hand.
+impl<T: WebViewBackend + ?Sized> WebViewBackend for Box<T> {
+    fn last_error(&self) -> Option<String> {
+        T::last_error(self)
+    }
+
+    fn is_alive(&self) -> bool {
+        T::is_alive(self)
+    }
 }

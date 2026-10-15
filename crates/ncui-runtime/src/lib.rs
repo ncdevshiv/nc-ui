@@ -53,6 +53,7 @@ pub mod health;
 pub mod mcp;
 pub mod rpc;
 pub mod transport;
+pub mod window;
 
 use std::sync::Arc;
 
@@ -83,6 +84,8 @@ pub struct Runtime {
     pub scheduler: Scheduler,
     /// The native worker pool.
     pub workers: Arc<WorkerPool>,
+    /// The window surface. Empty until a host is installed.
+    pub windows: window::Windows,
 }
 
 impl Runtime {
@@ -111,6 +114,7 @@ impl Runtime {
             audit,
             scheduler,
             workers,
+            windows: window::Windows::new(),
         })
     }
 

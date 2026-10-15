@@ -365,13 +365,13 @@ impl CapabilitySet {
 
     /// The number of granted capabilities.
     #[must_use]
-    pub const fn len(self) -> u32 {
+    pub const fn len(&self) -> u32 {
         self.bits.count_ones()
     }
 
     /// Whether no capabilities are granted.
     #[must_use]
-    pub const fn is_empty(self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.bits == 0
     }
 

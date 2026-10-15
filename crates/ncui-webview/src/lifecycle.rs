@@ -12,7 +12,12 @@
 use core::fmt;
 
 /// Where a host is in its life.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serialised with its lowercase wire name, which is what [`Display`](fmt::Display) already
+/// produces: an agent reading a window's state from `ncui.window.list` should see the same
+/// spelling a log line uses, so one string can be searched across both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HostState {
     /// Created, no engine attached yet.
     Created,

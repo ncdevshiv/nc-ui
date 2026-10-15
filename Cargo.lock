@@ -1403,6 +1403,7 @@ dependencies = [
  "ncui-scheduler",
  "ncui-security",
  "ncui-state",
+ "ncui-webview",
  "ncui-workers",
  "serde",
  "serde_json",

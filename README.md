@@ -593,4 +593,3 @@ Contributors should read the relevant ADRs in `docs/adr/` before changing archit
 This project is almost entirely AI-written and AI-tested. Read
 [`DISCLAIMER.md`](DISCLAIMER.md) for what that does and does not mean, and for how
 to report a problem or propose an improvement.
-

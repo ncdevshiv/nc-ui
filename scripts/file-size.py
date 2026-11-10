@@ -32,7 +32,13 @@ SCOPES: tuple[str, ...] = ("crates", "examples", "tools/ncui-tools/src", "packag
 TESTFILE_RE: re.Pattern[str] = re.compile(
     r"(^|/)tests?\.rs$|_tests?\.rs$|_test\.rs$|/tests/"
 )
-CFG_TEST_RE: re.Pattern[str] = re.compile(r"^[ \t]*#\[cfg\(test\)\]")
+# A test item is gated by a cfg predicate that names `test`, either bare
+# (`#[cfg(test)]`) or inside a combinator (`#[cfg(all(test, feature = "…"))]`).
+# The lookahead requires `test` to be followed by `,` or `)`, so a *string*
+# value such as `feature = "test"` does not count as a test gate.
+CFG_TEST_RE: re.Pattern[str] = re.compile(
+    r"^[ \t]*#\[cfg\((?=[^)]*\btest\s*[,)])"
+)
 ATTR_RE: re.Pattern[str] = re.compile(r"^[ \t]*#\[")
 USAGE: str = (
     "Usage: python3 scripts/file-size.py [--warn-only] "

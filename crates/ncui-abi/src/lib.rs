@@ -1,9 +1,9 @@
 //! The language-neutral component ABI: wire format, version negotiation, capability declarations.
 //!
-//! `docs/remaining-work.md` records the split for this capability: "the wire format, version
-//! negotiation and capability declarations are testable here; execution is not". This crate is
-//! the testable half, and it is the half that decides whether execution would be *safe*, not
-//! merely whether it would work.
+//! This crate decides whether execution would be *safe*; `ncui-component` is the crate that
+//! executes. The split is deliberate: the rules below are security-relevant and must be
+//! testable without an interpreter in the dependency graph, and the interpreter must not be
+//! able to make a policy decision of its own.
 //!
 //! # Why the wire format is the interesting part
 //!
@@ -22,19 +22,22 @@
 //!   is refused, because a host that resolved it from somewhere else would be inventing a
 //!   capability.
 //!
-//! # What this crate is not
-//!
-//! It does not execute WASM. Execution needs a component-model runtime, which is a large
-//! dependency and cannot be verified here; `docs/known-gaps.md` records that. What this crate
-//! provides is the gate every such runtime would sit behind, testable without one.
+//! This crate does not execute WASM: it is the gate every such runtime sits behind, and the
+//! rules that gate applies. `ncui-component` is the executor — it parses a module, reads the
+//! manifest out of the artifact through [`wire`], calls [`negotiate`] and only then links the
+//! imports the negotiation allowed. Splitting the two keeps the security-relevant decision
+//! testable without an interpreter in the dependency graph, and keeps the interpreter from
+//! being able to make a decision of its own.
 
 pub mod manifest;
 pub mod negotiation;
 pub mod surface;
+pub mod wire;
 
 pub use manifest::{ComponentManifest, HostProfile};
 pub use negotiation::{Negotiated, NegotiationError, negotiate};
 pub use surface::{Export, ExportKind, Import, ImportKind, Surface};
+pub use wire::{HOST_MODULE, WireError, WireExport, WireImport, WireManifest};
 
 /// The ABI revision this host implements.
 ///

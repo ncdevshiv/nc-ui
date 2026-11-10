@@ -356,8 +356,108 @@ fn record(scenarios: &mut Vec<Repeated>) {
     workers(scenarios);
     mcp(scenarios);
     webview(scenarios);
+    page_commands(scenarios);
+    application(scenarios);
+    native(scenarios);
     a11y(scenarios);
     abi(scenarios);
+    glyphs(scenarios);
+}
+
+/// Scenarios for the text path a GPU island draws its rows with.
+///
+/// The workload is a real line of type: the machine's own font, shaped and rasterised at a size a
+/// row uses. A machine with no font this runtime can read has nothing to measure, so the scenarios
+/// are left out rather than measured against nothing.
+fn glyphs(scenarios: &mut Vec<Repeated>) {
+    let Ok(font) = ncui_gpu_renderer::text::default_font() else {
+        return;
+    };
+    let Ok(shaped) = font.shape("Hello, world", 16.0) else {
+        return;
+    };
+    let Some(glyph) = shaped.glyphs.first().copied() else {
+        return;
+    };
+
+    scenarios.push(
+        measure(
+            "text.shape_line",
+            "shape a twelve-character line at 16 pixels with the machine's own font",
+            200,
+            5_000,
+            || {
+                font.shape("Hello, world", 16.0)
+                    .map_or(0, |text| text.len())
+            },
+        )
+        .unwrap_or_else(|e| fail(&e)),
+    );
+
+    scenarios.push(
+        measure(
+            "text.rasterise_glyph",
+            "rasterise one 16-pixel glyph outline into per-pixel coverage",
+            200,
+            5_000,
+            || {
+                usize::from(
+                    font.glyph_coverage(glyph.glyph_id, 16.0)
+                        .ok()
+                        .flatten()
+                        .is_some(),
+                )
+            },
+        )
+        .unwrap_or_else(|e| fail(&e)),
+    );
+
+    // The same workload with the glyphs already rasterised, which is what every frame after the
+    // first pays: a page redraws the same text, and the coverage of a glyph does not change.
+    let cache = ncui_gpu_renderer::atlas::GlyphCache::new(font.clone());
+    scenarios.push(
+        measure(
+            "text.draw_line_cached",
+            "shape a twelve-character line and draw it from the glyph cache, as every frame after the first is",
+            200,
+            2_000,
+            || {
+                let Ok(line) = font.shape("Hello, world", 16.0) else {
+                    return 0;
+                };
+                line.glyphs
+                    .iter()
+                    .filter(|glyph| cache.coverage(glyph.glyph_id, 16.0).is_some())
+                    .count()
+            },
+        )
+        .unwrap_or_else(|e| fail(&e)),
+    );
+
+    // The island's own workload: every glyph of a line, shaped once and rasterised each.
+    scenarios.push(
+        measure(
+            "text.draw_line",
+            "shape and rasterise every glyph of a twelve-character line, as an island row does",
+            200,
+            2_000,
+            || {
+                let Ok(line) = font.shape("Hello, world", 16.0) else {
+                    return 0;
+                };
+                line.glyphs
+                    .iter()
+                    .filter(|glyph| {
+                        font.glyph_coverage(glyph.glyph_id, 16.0)
+                            .ok()
+                            .flatten()
+                            .is_some()
+                    })
+                    .count()
+            },
+        )
+        .unwrap_or_else(|e| fail(&e)),
+    );
 }
 
 /// Scenarios for `ncui-core`.
@@ -974,7 +1074,7 @@ fn webview(scenarios: &mut Vec<Repeated>) {
     }
     let policy = NavigationPolicy::new(&origins);
 
-    let mut lifecycle = WindowLifecycle::new();
+    let lifecycle = WindowLifecycle::new();
     lifecycle
         .transition(HostState::Created)
         .unwrap_or_else(|e| fail(&format!("{e}")));
@@ -1039,14 +1139,506 @@ fn webview(scenarios: &mut Vec<Repeated>) {
                 let response = seam.handle(
                     &SeamMessage::Perform {
                         name: "describe_metrics".to_owned(),
+                        payload: serde_json::json!({ "probe": 1 }),
                     },
-                    &|_, _| Ok(serde_json::Value::Null),
+                    &mut |_, _| Ok(serde_json::Value::Null),
                 );
                 usize::from(response.ok)
             },
         )
         .unwrap_or_else(|e| fail(&e)),
     );
+
+    // The wire cost of a page call: the request as the bridge posts it, parsed and
+    // validated by the host. This is paid on every call a page makes, before any
+    // capability check happens, so it is the floor of the page path.
+    let wire =
+        r#"{"id":"p1-abc","action":"perform","name":"describe_metrics","payload":{"deep":true}}"#;
+    scenarios.push(
+        measure(
+            "webview.bridge_request_parse",
+            "parse and validate one bridge request from the page",
+            500,
+            20_000,
+            || {
+                let request = ncui_webview::SeamRequest::parse(wire)
+                    .unwrap_or_else(|_| fail("the benchmark fixture must be a valid request"));
+                request.id.len()
+            },
+        )
+        .unwrap_or_else(|e| fail(&e)),
+    );
+}
+
+/// Scenarios for the application command path.
+///
+/// An application command is the call a page makes into the application's own code. The
+/// measured work is the whole path: the page's request is parsed, the capability is
+/// checked against the window's grant, and the handler runs.
+fn page_commands(scenarios: &mut Vec<Repeated>) {
+    use ncui_webview::capability::CapabilityRequest;
+    use ncui_webview::lifecycle::{HostState, WindowLifecycle};
+    use ncui_webview::navigation::NavigationPolicy;
+    use ncui_webview::seam::{HostSeam, SeamMessage};
+
+    let lifecycle = WindowLifecycle::new();
+    lifecycle
+        .transition(HostState::Created)
+        .unwrap_or_else(|e| fail(&format!("{e}")));
+    lifecycle
+        .transition(HostState::Attaching)
+        .unwrap_or_else(|e| fail(&format!("{e}")));
+    lifecycle
+        .transition(HostState::Running)
+        .unwrap_or_else(|e| fail(&format!("{e}")));
+
+    let seam = HostSeam::new(
+        lifecycle,
+        ncui_webview::CapabilityGrant::of(&[Capability::InspectRuntime]),
+        NavigationPolicy::new(&[]),
+    )
+    .with_action(
+        "app_command",
+        CapabilitySet::empty().with(Capability::InspectRuntime),
+    );
+
+    scenarios.push(
+        measure(
+            "runtime.page_command_dispatch",
+            "handle one application command through the capability check and the handler",
+            500,
+            20_000,
+            || {
+                let response = seam.handle(
+                    &SeamMessage::Perform {
+                        name: "app_command".to_owned(),
+                        payload: serde_json::json!({ "n": 1 }),
+                    },
+                    &mut |request: &CapabilityRequest, payload| {
+                        let _ = request;
+                        Ok(serde_json::json!({ "echoed": payload }))
+                    },
+                );
+                usize::from(response.ok)
+            },
+        )
+        .unwrap_or_else(|e| fail(&e)),
+    );
+}
+
+/// Scenarios for the application layer.
+///
+/// Both measure something on the path a user waits on. `app.manifest_parse` is the cost of
+/// reading an application's manifest, which every start pays once. `app.asset_resolve` is
+/// the cost of turning a request path into a file inside the root, which is paid on every
+/// asset the page asks for — the hot path of serving an application.
+///
+/// The manifest is parsed from real text rather than a pre-built value, because parsing is
+/// what the scenario is named for. The path resolution uses the same containment check the
+/// server uses, so the measurement includes the check the security argument rests on.
+fn application(scenarios: &mut Vec<Repeated>) {
+    use ncui_app::AppManifest;
+    use ncui_security::path::SafePath;
+    use std::path::Path;
+
+    const MANIFEST: &str = r#"{
+        "name": "benchmark",
+        "version": "1.0.0",
+        "entry": "index.html",
+        "assets": "public",
+        "window": { "title": "Benchmark", "width": 900, "height": 640 },
+        "capabilities": ["read.metrics", "read.logs"]
+    }"#;
+
+    scenarios.push(
+        measure(
+            "app.manifest_parse",
+            "read and validate an application's manifest",
+            500,
+            20_000,
+            || {
+                let manifest = AppManifest::parse(MANIFEST, Path::new("ncui.app.json"))
+                    .unwrap_or_else(|e| fail(&e.to_string()));
+                manifest.name.len()
+            },
+        )
+        .unwrap_or_else(|e| fail(&e)),
+    );
+
+    // The reload loop polls the assets directory on every pump. The tree here is the shape
+    // of a small application: an entry page, a script, a stylesheet and a directory of
+    // pages, written once and measured on every poll.
+    let watch_root = std::env::temp_dir().join(format!("ncui-bench-watch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&watch_root);
+    if std::fs::create_dir_all(watch_root.join("pages")).is_err() {
+        fail("the watch benchmark's directory could not be created");
+    }
+    for index in 0..200 {
+        if std::fs::write(
+            watch_root.join("pages").join(format!("page-{index}.html")),
+            "x",
+        )
+        .is_err()
+        {
+            fail("the watch benchmark's fixture could not be written");
+        }
+    }
+    let mut watcher = ncui_app::DirectoryWatcher::new(&watch_root)
+        .unwrap_or_else(|error| fail(&format!("the watch benchmark could not start: {error}")));
+    scenarios.push(
+        measure(
+            "app.watch_poll",
+            "scan an application's files for a change",
+            50,
+            500,
+            || {
+                let changed = watcher
+                    .changed()
+                    .unwrap_or_else(|error| fail(&error.to_string()));
+                usize::from(changed)
+            },
+        )
+        .unwrap_or_else(|e| fail(&e)),
+    );
+    let _ = std::fs::remove_dir_all(&watch_root);
+
+    let root = Path::new("/srv/app/public");
+    scenarios.push(
+        measure(
+            "app.asset_resolve",
+            "resolve a request path to a file inside the served root",
+            500,
+            20_000,
+            || {
+                let resolved = SafePath::resolve(root, "assets/app.js")
+                    .unwrap_or_else(|e| fail(&e.to_string()));
+                resolved.components().count()
+            },
+        )
+        .unwrap_or_else(|e| fail(&e)),
+    );
+}
+
+/// Scenarios for `ncui-native`.
+///
+/// A page's filesystem call pays for the containment check and a real read. Both are
+/// measured against a file that exists, because the interesting cost is serving a call
+/// that succeeds — a refusal is cheaper and would understate the path a real application
+/// takes.
+fn native(scenarios: &mut Vec<Repeated>) {
+    use ncui_native::{FileSystem, scrubbed_from};
+
+    let root = std::env::temp_dir().join(format!("ncui-bench-native-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    if std::fs::create_dir_all(&root).is_err() {
+        fail("the benchmark's filesystem root could not be created");
+    }
+    if std::fs::write(root.join("note.txt"), "a note the page reads").is_err() {
+        fail("the benchmark's fixture could not be written");
+    }
+    let filesystem = FileSystem::new(&root).unwrap_or_else(|error| {
+        fail(&format!(
+            "the benchmark's filesystem root is unusable: {error}"
+        ))
+    });
+
+    scenarios.push(
+        measure(
+            "native.fs_read_text",
+            "read a file through the containment check a page's call pays",
+            50,
+            1_000,
+            || {
+                let content = filesystem
+                    .read_text("note.txt")
+                    .unwrap_or_else(|error| fail(&error.to_string()));
+                content.text.len()
+            },
+        )
+        .unwrap_or_else(|e| fail(&e)),
+    );
+
+    // The scrub runs once per spawn, over the whole ambient environment. Measuring it on a
+    // synthetic environment of the size a real machine has keeps the result meaningful on
+    // a CI runner with a small one.
+    let ambient: Vec<(String, String)> = (0..200)
+        .map(|index| {
+            let name = if index % 7 == 0 {
+                format!("SERVICE_SECRET_{index}")
+            } else {
+                format!("ORDINARY_VARIABLE_{index}")
+            };
+            (name, format!("value-{index}"))
+        })
+        .collect();
+    scenarios.push(
+        measure(
+            "native.environment_scrub",
+            "filter a child's environment for secret-shaped names",
+            500,
+            20_000,
+            || scrubbed_from(ambient.clone()).len(),
+        )
+        .unwrap_or_else(|e| fail(&e)),
+    );
+
+    // The clipboard is read and written by starting the platform's own tool, so its cost is
+    // a process start plus a pipe. That is what this measures — with a program that exits
+    // immediately, so the figure is the framework's overhead rather than the clipboard
+    // tool's own work.
+    let runner = ncui_native::ProcessRunner::new(&root)
+        .unwrap_or_else(|error| fail(&format!("the process runner could not start: {error}")));
+    let (tool, arguments): (&str, Vec<String>) = if cfg!(windows) {
+        ("cmd", vec!["/C".to_owned(), "exit".to_owned()])
+    } else {
+        ("sh", vec!["-c".to_owned(), "exit".to_owned()])
+    };
+    scenarios.push(instance_handoff());
+    scenarios.push(window_state_round_trip());
+    scenarios.push(window_places_round_trip());
+    scenarios.push(window_presentation_parse());
+    scenarios.push(window_shape_validate());
+    scenarios.push(page_state_round_trip());
+
+    scenarios.push(
+        measure(
+            "native.tool_spawn_overhead",
+            "start a program and collect its output, the cost a clipboard call pays",
+            2,
+            20,
+            || {
+                let output = runner
+                    .run(&ncui_native::RunRequest {
+                        program: tool.to_owned(),
+                        args: arguments.clone(),
+                        stdin: None,
+                        timeout_ms: Some(5_000),
+                    })
+                    .unwrap_or_else(|error| fail(&error.to_string()));
+                usize::try_from(output.status).unwrap_or(0)
+            },
+        )
+        .unwrap_or_else(|e| fail(&e)),
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// What a page's preference costs: one read at launch, and one write per save.
+///
+/// A page saves on its own schedule — a theme change, a column drag, a document open — so this
+/// is the figure that decides whether saving on every keystroke is affordable or whether a page
+/// should coalesce.
+fn page_state_round_trip() -> Repeated {
+    let root = std::env::temp_dir().join("ncui-bench-page-state");
+    let _ = std::fs::remove_dir_all(&root);
+    let path = root.join("state.json");
+    let mut state = ncui_runtime::page_state::PageState::open(&path);
+    let scenario = measure(
+        "app.state_round_trip",
+        "store a page's preference and read it back, the cost of remembering one",
+        2,
+        500,
+        || {
+            state
+                .save("theme", serde_json::json!("dark"))
+                .unwrap_or_else(|error| fail(&error.to_string()));
+            let loaded = state.load("theme");
+            usize::from(loaded["found"].as_bool().unwrap_or(false))
+        },
+    )
+    .unwrap_or_else(|e| fail(&e));
+    let _ = std::fs::remove_dir_all(&root);
+    scenario
+}
+
+/// What remembering a window costs: one file read at launch and one write at shutdown.
+///
+/// The platform's own geometry comes back over the host's channel, which needs a window and is
+/// therefore not measurable here; the file either side of it is, and it is the part that runs on
+/// every launch whether or not the window moved.
+fn window_state_round_trip() -> Repeated {
+    let root = std::env::temp_dir().join("ncui-bench-window-state");
+    let _ = std::fs::create_dir_all(&root);
+    let path = root.join("window.json");
+    let geometry = ncui_webview::WindowGeometry {
+        x: 120,
+        y: 90,
+        width: 1280,
+        height: 800,
+    };
+    let encoded = serde_json::to_vec_pretty(&geometry)
+        .unwrap_or_else(|error| fail(&format!("the geometry could not be encoded: {error}")));
+    let scenario = measure(
+        "app.window_state_round_trip",
+        "write a window's geometry and read it back, the cost of remembering a window",
+        2,
+        2000,
+        || {
+            std::fs::write(&path, &encoded).unwrap_or_else(|error| fail(&error.to_string()));
+            let read = std::fs::read(&path).unwrap_or_else(|error| fail(&error.to_string()));
+            read.len()
+        },
+    )
+    .unwrap_or_else(|e| fail(&e));
+    let _ = std::fs::remove_dir_all(&root);
+    scenario
+}
+
+/// What a named window costs at launch: one read of the file holding every place, and one lookup
+/// by the name the page uses.
+///
+/// A page that opens a window under a name pays the lookup on every open; the file is read once,
+/// when the runtime is told where places live. Both are here, because a place re-read from disk on
+/// every open would be a disk access nobody asked for, and this is the figure that would show it.
+fn window_places_round_trip() -> Repeated {
+    let root = std::env::temp_dir().join("ncui-bench-window-places");
+    let _ = std::fs::create_dir_all(&root);
+    let path = root.join("windows.json");
+    let places: std::collections::BTreeMap<String, ncui_webview::WindowGeometry> = (0..16u32)
+        .map(|index| {
+            (
+                format!("window-{index}"),
+                ncui_webview::WindowGeometry {
+                    x: i32::try_from(index * 40).unwrap_or(0),
+                    y: i32::try_from(index * 30).unwrap_or(0),
+                    width: 1280,
+                    height: 800,
+                },
+            )
+        })
+        .collect();
+    let encoded = serde_json::to_vec_pretty(&places)
+        .unwrap_or_else(|error| fail(&format!("the places could not be encoded: {error}")));
+    std::fs::write(&path, &encoded).unwrap_or_else(|error| fail(&error.to_string()));
+    let windows = ncui_runtime::window::Windows::new();
+    let scenario = measure(
+        "app.window_places_round_trip",
+        "read the file of remembered window places and look one up, the cost a page pays at launch",
+        2,
+        500,
+        || {
+            windows.remember_windows_in(&path);
+            usize::from(windows.place_for("window-7").is_some())
+        },
+    )
+    .unwrap_or_else(|e| fail(&e));
+    let _ = std::fs::remove_dir_all(&root);
+    scenario
+}
+
+/// What a presentation request costs before the platform is asked: the rule that reads a change off
+/// a payload.
+///
+/// The round trip to the engine's event loop is what dominates a real call, and it needs a window,
+/// so it is not measurable here. This is the part that runs on every call and that a hostile caller
+/// controls the input to, which is the part worth having a figure for: it is pure, and it either
+/// accepts a change or names the field that is wrong.
+fn window_presentation_parse() -> Repeated {
+    let payloads: Vec<serde_json::Value> = [
+        "{}",
+        r#"{"fullscreen":true}"#,
+        r#"{"minimized":true}"#,
+        r#"{"visible":false}"#,
+        r#"{"focus":true}"#,
+        r#"{"fullscreen":true,"maximized":true}"#,
+    ]
+    .into_iter()
+    .map(|json| serde_json::from_str(json).unwrap_or(serde_json::Value::Null))
+    .collect();
+    measure(
+        "webview.window_presentation_parse",
+        "read one presentation change off a caller's payload, the validation every call pays",
+        2,
+        5000,
+        || {
+            payloads
+                .iter()
+                .filter(|payload| ncui_webview::WindowChange::from_payload(payload).is_ok())
+                .count()
+        },
+    )
+    .unwrap_or_else(|e| fail(&e))
+}
+/// What a reshape request costs before the platform is asked: the rule that says a shape holds
+/// together.
+///
+/// The same reasoning the presentation parse follows: the round trip to the engine's event loop
+/// dominates a real call and needs a window, so what is measured here is the part that runs on every
+/// call and whose input a hostile caller controls. A shape is a set of optional fields, and the
+/// expensive mistake it guards against is a caller naming half of a position or half of a size.
+fn window_shape_validate() -> Repeated {
+    let shapes: Vec<ncui_webview::WindowShape> = [
+        r#"{"title":"notes"}"#,
+        r#"{"x":10,"y":20}"#,
+        r#"{"width":900,"height":700}"#,
+        r#"{"x":10}"#,
+        r#"{"always_on_top":true,"resizable":false}"#,
+    ]
+    .into_iter()
+    .filter_map(|json| serde_json::from_str(json).ok())
+    .collect();
+    measure(
+        "webview.window_shape_validate",
+        "check one window shape, the validation every reshape pays",
+        2,
+        5000,
+        || {
+            shapes
+                .iter()
+                .filter(|shape| shape.validate().is_ok())
+                .count()
+        },
+    )
+    .unwrap_or_else(|e| fail(&e))
+}
+
+/// What a second launch costs the instance that is already running.
+///
+/// The lock is read, the port is connected to, the arguments cross a loopback socket, and the
+/// instance wakes up and answers. It is the figure that decides whether handing a link to the
+/// running window is cheaper than starting a second process — which is the choice the
+/// single-instance capability exists to make.
+fn instance_handoff() -> Repeated {
+    let root = std::env::temp_dir().join("ncui-bench-instance");
+    let _ = std::fs::create_dir_all(&root);
+    let state = root.join("instance-bench");
+    let _ = std::fs::remove_dir_all(&state);
+    let guard = match ncui_native::InstanceGuard::acquire(&state, "bench") {
+        Ok(ncui_native::Acquired::First(guard)) => *guard,
+        Ok(ncui_native::Acquired::AlreadyRunning { port, .. }) => fail(&format!(
+            "a fresh state directory named a running instance on {port}"
+        )),
+        Err(error) => fail(&format!("the instance guard could not be taken: {error}")),
+    };
+    let port = guard
+        .port()
+        .unwrap_or_else(|error| fail(&error.to_string()));
+    let token = guard.token().to_owned();
+    let scenario = measure(
+        "app.instance_handoff",
+        "hand a second launch's arguments to the running instance and receive them",
+        2,
+        200,
+        || {
+            let arguments = vec!["--open".to_owned(), "notes.txt".to_owned()];
+            let sender = std::thread::spawn({
+                let token = token.clone();
+                move || ncui_native::hand_over(port, &token, &arguments)
+            });
+            let received = guard
+                .receive()
+                .unwrap_or_else(|error| fail(&error.to_string()));
+            sender
+                .join()
+                .unwrap_or_else(|_| fail("the hand-off sender panicked"))
+                .unwrap_or_else(|error| fail(&error.to_string()));
+            received.len()
+        },
+    )
+    .unwrap_or_else(|e| fail(&e));
+    let _ = std::fs::remove_dir_all(&state);
+    scenario
 }
 
 /// Scenarios for `ncui-a11y`.

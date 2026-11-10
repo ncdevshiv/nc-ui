@@ -1,0 +1,27 @@
+{
+  "name": "counter",
+  "identity": "com.ncui.counter",
+  "scheme": "ncui-counter",
+  "version": "1.0.0",
+  "entry": "index.html",
+  "assets": "public",
+  "window": {
+    "title": "NC-UI Counter",
+    "width": 900,
+    "height": 640,
+    "min_width": 420,
+    "min_height": 320
+  },
+  "capabilities": [
+    "read.metrics",
+    "filesystem.read",
+    "run.components",
+    "window"
+  ],
+  "shortcuts": [
+    {
+      "accelerator": "Ctrl+Alt+N",
+      "command": "increment"
+    }
+  ]
+}

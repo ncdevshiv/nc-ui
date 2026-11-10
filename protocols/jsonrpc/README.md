@@ -42,8 +42,11 @@ Standard JSON-RPC 2.0. NC-UI reserves the `ncui.` prefix for its own methods.
 }
 ```
 
-`params` is always an object. Positional parameters are not accepted, because they make a
-method's signature unreadable and are incompatible with adding optional fields.
+`params` is an object, or absent. Positional parameters are not accepted, because they make a
+method's signature unreadable and are incompatible with adding optional fields — and a request that
+sends one is refused with `-32602` rather than read as a request that named no parameters, so a
+caller learns its arguments were not understood instead of receiving an answer to a different
+question.
 
 ## Response shape
 
@@ -51,9 +54,11 @@ method's signature unreadable and are incompatible with adding optional fields.
 {
   "jsonrpc": "2.0",
   "id": 7,
-  "result": { "status": "ok", "checks": [ ... ] }
+  "result": { "status": "healthy", "checks": [ ... ] }
 }
 ```
+
+`status` is one of `healthy`, `degraded` or `unhealthy`.
 
 or
 
@@ -76,6 +81,30 @@ or
 
 `error.data.ncui_code` is the stable machine-readable code. `error.data.correlation` joins the
 failure to its trace.
+
+### Parameters
+
+Every parameter the surface documents. A parameter that reaches a method's payload without being
+listed here is undocumented; one that is listed here and read by nothing is a claim with nothing
+behind it, which is why `protocol_conformance.rs` checks this table against the runtime's source.
+
+| Parameter | Methods | Meaning |
+| --- | --- | --- |
+| `consent` | every destructive method | The caller states that it means to do the thing; absent is treated as withholding it |
+| `deadline_ms` | every method | The budget the caller gives the call, in milliseconds |
+| `deep` | `ncui.health` | Ask every subsystem for its detail rather than a summary |
+| `limit` | every method that returns a collection | How many records to return: 100 by default, 10 000 at most |
+| `cursor` | `ncui.logs.query` | An opaque value from a previous `next_cursor`; absent means the first page |
+| `role` | `ncui.describe`, `ncui.serve` | The role whose grants are described or served |
+| `package`, `filter` | `ncui.test.run`, `ncui.benchmark.run` | Which package to run, and which test or benchmark within it |
+| `url` | `ncui.window.create`, `ncui.window.post` | The page to open, or the page to evaluate a script in |
+| `window` | every method that names one window | The window's identity |
+| `title`, `width`, `height`, `x`, `y` | `ncui.window.create` | What the window is called, how big it is and where it sits |
+| `always_on_top`, `decorations`, `transparent`, `resizable` | `ncui.window.create` | How the window is framed, floated, made see-through and resized |
+| `min_width`, `min_height` | `ncui.window.create` | The floor the user may drag the window to |
+| `remember` | `ncui.window.create` | The name a window's place is remembered under |
+| `fullscreen`, `maximized`, `minimized`, `visible`, `focus` | `ncui.window.state` | The one change to make to a window's presentation: fill the display, maximise, minimise, show or hide, or take focus |
+| `script` | `ncui.window.post` | The script to evaluate in the page |
 
 ### Error codes
 
@@ -119,7 +148,25 @@ is the one actually enforced.
 | `ncui.logs.query` | `read.logs` | no | Bounded log ring, filtered by level and correlation |
 | `ncui.logs.purge` | `read.logs` | **yes** | Discards the log ring; requires `consent: true` |
 | `ncui.metrics.query` | `read.metrics` | no | Metric snapshot with percentiles |
-
+| `ncui.window.list` | `inspect.runtime` | no | Every open window, with its lifecycle state and page grant |
+| `ncui.window.create` | `window` | no | Open a window on a URL; requires a host to be installed |
+| `ncui.window.post` | `window` | no | Evaluate a script in a window's page; the host-to-page half of the bridge |
+| `ncui.window.close` | `window` | no | Close a window by identity |
+| `ncui.window.state` | `window` | no | How a window is presented, and how to change it: fullscreen, maximised, minimised, shown or hidden, or focused. The answer also reports the platform's frame — decorated, resizable, always on top — as the platform has it. A page is told when its window is resized or moved, through `resized` and `moved` events |
+| `ncui.window.theme` | `window` | no | Whether the platform is drawing its interface light or dark, and a `theme` event when it changes |
+| `ncui.window.shape` | `window` | no | Change a window's title, place, size, always-on-top or resizability |
+| `ncui.components.list` | `inspect.runtime` | no | Every component declared by mounted windows' manifests |
+| `ncui.gpu.inspect` | `inspect.gpu` | no | GPU islands, their render modes, the input contract they demonstrate, and the device's health |
+| `ncui.capabilities.describe` | none | no | Every capability, grouped by scope |
+| `ncui.component.inspect` | `inspect.runtime` | no | One mounted component, by identity, with its window and grant |
+| `ncui.state.inspect` | `inspect.runtime` | no | A snapshot of the runtime's observable state |
+| `ncui.ipc.inspect` | `inspect.runtime` | no | The IPC protocol version and frame limits |
+| `ncui.trace.start` | `inspect.runtime` | no | Begin verbose tracing of operations |
+| `ncui.trace.stop` | `inspect.runtime` | no | End verbose tracing of operations |
+| `ncui.profile.start` | `inspect.runtime` | no | Begin profiling: record per-method timing |
+| `ncui.profile.stop` | `inspect.runtime` | no | End profiling |
+| `ncui.test.run` | `run.tests` | no | Run the project's test suite |
+| `ncui.benchmark.run` | `run.benchmarks` | no | Run the project's benchmark suite |
 ### Planned, not implemented
 
 These are specified so the interface is stable, but **they do not exist**. Each is recorded
@@ -128,18 +175,30 @@ agrees with the other.
 
 | Method | Required capability | Blocked on |
 | --- | --- | --- |
-| `ncui.capabilities.describe` | none | — |
-| `ncui.components.list`, `ncui.component.inspect` | `inspect.runtime` | `webview.host` — there is no component tree to inspect yet |
-| `ncui.window.list` | `inspect.runtime` | `webview.host` |
-| `ncui.state.inspect` | `inspect.runtime` | — |
-| `ncui.gpu.inspect` | `inspect.gpu` | `gpu.islands` — no GPU surface exists yet |
-| `ncui.ipc.inspect` | `inspect.runtime` | — |
-| `ncui.trace.start` / `.stop`, `ncui.profile.start` / `.stop` | `inspect.runtime` | — |
-| `ncui.test.run`, `ncui.benchmark.run` | `run.tests`, `run.benchmarks` | — |
+| (none) | - | - |
 
-The "Blocked on" column is deliberate: `components.list` and `window.list` are not merely
-unwritten, they have nothing to report until a WebView host exists, and `gpu.inspect` until
-a GPU surface does. Publishing them as merely "planned" would hide that dependency.
+The "Blocked on" column is deliberate: `component.inspect` is not merely unwritten, it has
+nothing to report until a component tree exists. Publishing it as merely "planned" would
+hide that dependency.
+
+### The page bridge
+
+A page is not an agent, but it is a caller. The runtime exposes a narrow seam to the
+document in a window: the page names an **action**, never a method, and the host maps the
+action to a method and checks the page's grant.
+
+| Action | Method | Requires |
+| --- | --- | --- |
+| `describe` | `ncui.describe` | none |
+| `health` | `ncui.health` | none |
+| `describe_metrics` | `ncui.metrics.query` | `read.metrics` |
+| `query_logs` | `ncui.logs.query` | `read.logs` |
+| `list_windows` | `ncui.window.list` | `inspect.runtime` |
+| `list_components` | `ncui.components.list` | `inspect.runtime` |
+
+An action the host did not declare is refused. A page's request is rate limited,
+authorized and audited exactly as an agent's is, and it appears in the audit trail under
+the identity `page:<window-id>`.
 
 ## Pagination and limits
 
@@ -147,14 +206,26 @@ Every method that returns a collection accepts `limit` (default 100, maximum 10 
 Exceeding the maximum is a `validation` error, not a silent clamp — a silently clamped result
 reads as "this is everything" and is worse than a refusal.
 
-An opaque `cursor` for paginating past the first page is **not yet implemented**. It is
-specified here so the interface is stable when it lands; no method reads it today.
+An opaque `cursor` paginates past the first page: pass the `next_cursor` value returned by
+a previous response to fetch the next page. Absent means the first page. `ncui.logs.query`
+honours it today; other collection methods will follow.
 
-## Cancellation
+## Deadlines
 
-Long-running methods accept an optional `deadline_ms`. On expiry the operation is cancelled and
-the request returns `-32003`. A timeout must generate observable diagnostics; a timeout is never
-used to conceal a correctness problem.
+Long-running methods accept an optional `deadline_ms`: a budget in milliseconds, between `1` and
+`3600000`. The runtime measures the call against it and answers `-32003` when the budget was
+exceeded, with `elapsed_ms` in the error and a `request.timeouts` count and a warning in the log. A
+timeout must generate observable diagnostics; a timeout is never used to conceal a correctness
+problem.
+
+The pipeline is synchronous, so the handler runs to completion: what a budget buys a caller is the
+truth about how long the call took, not an interruption. A caller that asked for a millisecond and
+was answered with a success ten seconds later has been told something untrue by that success — and a
+failure is never rewritten as a timeout, because the failure is the more useful answer.
+
+A budget that is not a budget — zero, a year, a value that is not a whole number — is refused with
+`-32602` rather than read as "no deadline" or "no limit". A call that names no `deadline_ms` is not
+bounded by one.
 
 ## Audit
 

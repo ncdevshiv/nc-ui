@@ -1,0 +1,169 @@
+{
+  "schema_version": 1,
+  "platform": "windows",
+  "repeats": 5,
+  "rounds": 200,
+  "configs": [
+    {
+      "label": "electron-quick-start on Electron",
+      "app": "electron-quick-start",
+      "framework": "electron",
+      "startup_ms": {
+        "min": 256.8025999935344,
+        "p50": 308.7955999944825,
+        "p90": 462.7016000158619,
+        "max": 462.7016000158619
+      },
+      "memory_bytes": {
+        "min": 312307712.0,
+        "p50": 315965440.0,
+        "p90": 323006464.0,
+        "max": 323006464.0
+      },
+      "cpu_percent": {
+        "min": 0.0,
+        "p50": 0.0,
+        "p90": 0.78125,
+        "max": 0.78125
+      },
+      "ipc": {
+        "rounds": 200,
+        "completed": 200,
+        "elapsed_ms": 44.599999994039536,
+        "per_round_ms": 0.1875,
+        "framework": "electron",
+        "per_round_ms_samples": [
+          0.165,
+          0.20700000002980232,
+          0.1875,
+          0.18,
+          0.22299999997019768
+        ],
+        "per_round_ms_min": 0.165,
+        "per_round_ms_max": 0.22299999997019768
+      },
+      "size_bytes": 374119882
+    },
+    {
+      "label": "electron-quick-start on ncui",
+      "app": "electron-quick-start",
+      "framework": "ncui",
+      "startup_ms": {
+        "min": 51.56780002289452,
+        "p50": 51.88829998951405,
+        "p90": 52.465899992967024,
+        "max": 52.465899992967024
+      },
+      "memory_bytes": {
+        "min": 365703168.0,
+        "p50": 366108672.0,
+        "p90": 368529408.0,
+        "max": 368529408.0
+      },
+      "cpu_percent": {
+        "min": 0.0,
+        "p50": 0.0,
+        "p90": 0.78125,
+        "max": 0.78125
+      },
+      "ipc": {
+        "rounds": 200,
+        "completed": 200,
+        "elapsed_ms": 58.20000001788139,
+        "per_round_ms": 0.3754999999701977,
+        "runtime_version": "0.1.0",
+        "framework": "ncui",
+        "per_round_ms_samples": [
+          0.4920000000298023,
+          0.28649999991059305,
+          0.3754999999701977,
+          0.431499999910593,
+          0.29100000008940696
+        ],
+        "per_round_ms_min": 0.28649999991059305,
+        "per_round_ms_max": 0.4920000000298023
+      },
+      "size_bytes": 11816762
+    },
+    {
+      "label": "example-tauri-app on Tauri",
+      "app": "example-tauri-app",
+      "framework": "tauri",
+      "startup_ms": {
+        "min": 51.50649999268353,
+        "p50": 52.36460000742227,
+        "p90": 52.959199994802475,
+        "max": 52.959199994802475
+      },
+      "memory_bytes": {
+        "min": 350617600.0,
+        "p50": 352264192.0,
+        "p90": 355684352.0,
+        "max": 355684352.0
+      },
+      "cpu_percent": {
+        "min": 0.0,
+        "p50": 0.0,
+        "p90": 0.0,
+        "max": 0.0
+      },
+      "ipc": {
+        "rounds": 200,
+        "completed": 200,
+        "elapsed_ms": 58.79999998211861,
+        "per_round_ms": 0.2809999999403954,
+        "framework": "tauri",
+        "per_round_ms_samples": [
+          0.24,
+          0.25150000005960466,
+          0.2809999999403954,
+          0.28650000005960463,
+          0.29399999991059306
+        ],
+        "per_round_ms_min": 0.24,
+        "per_round_ms_max": 0.29399999991059306
+      },
+      "size_bytes": 3395200
+    },
+    {
+      "label": "example-tauri-app on ncui",
+      "app": "example-tauri-app",
+      "framework": "ncui",
+      "startup_ms": {
+        "min": 51.34549998911098,
+        "p50": 51.75969999982044,
+        "p90": 52.03510000137612,
+        "max": 52.03510000137612
+      },
+      "memory_bytes": {
+        "min": 365207552.0,
+        "p50": 367919104.0,
+        "p90": 368533504.0,
+        "max": 368533504.0
+      },
+      "cpu_percent": {
+        "min": 0.0,
+        "p50": 0.0,
+        "p90": 0.0,
+        "max": 0.0
+      },
+      "ipc": {
+        "rounds": 200,
+        "completed": 200,
+        "elapsed_ms": 55,
+        "per_round_ms": 0.32899999991059303,
+        "framework": "ncui",
+        "per_round_ms_samples": [
+          0.32899999991059303,
+          0.3204999999701977,
+          0.38950000002980234,
+          0.37700000002980233,
+          0.275
+        ],
+        "per_round_ms_min": 0.275,
+        "per_round_ms_max": 0.38950000002980234
+      },
+      "size_bytes": 11820703
+    }
+  ]
+}

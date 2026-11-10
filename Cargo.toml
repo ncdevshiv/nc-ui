@@ -1,12 +1,19 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# The comparison harness clones third-party applications into `comparison/.originals/`,
+# and one of them is a Cargo package. A package inside the workspace root that is not a
+# member makes every cargo command run from it fail with "current package believes it's
+# in a workspace when it's not" — which is how the Tauri side of the comparison failed
+# until this line was added. Excluding the clones' directory keeps the harness's default
+# location working rather than requiring the clones to live outside the repository.
+exclude = ["comparison/.originals"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"
-repository = "https://github.com/nc-ui/nc-ui"
+repository = "https://github.com/ncdevshiv/nc-ui"
 authors = ["NC-UI Contributors"]
 
 [workspace.dependencies]
@@ -22,10 +29,24 @@ ncui-scheduler = { path = "crates/ncui-scheduler" }
 ncui-workers = { path = "crates/ncui-workers" }
 ncui-runtime = { path = "crates/ncui-runtime" }
 ncui-webview = { path = "crates/ncui-webview" }
+ncui-app = { path = "crates/ncui-app" }
+ncui-native = { path = "crates/ncui-native" }
+ncui-component = { path = "crates/ncui-component" }
 ncui-webview-wry = { path = "crates/ncui-webview-wry" }
+ncui-gpu = { path = "crates/ncui-gpu" }
+ncui-gpu-renderer = { path = "crates/ncui-gpu-renderer" }
 ncui-cli = { path = "crates/ncui-cli" }
 # External dependencies. Kept deliberately small; see ADR-012 (dependency policy).
 serde = { version = "1.0.229", features = ["derive"] }
+# A digest per bundled file. Already in the graph as a transitive dependency.
+sha2 = "0.10"
+# ADR-012 sixth exception: the platform call for a global shortcut is RegisterHotKey,
+# XGrabKey or RegisterEventHotKey, all foreign functions, and `unsafe_code = "forbid"`
+# rejects calling them. Confined to ncui-native and behind a feature.
+global-hotkey = "0.9"
+# ADR-012 seventh exception: a tray icon is Shell_NotifyIcon, an AppIndicator or an
+# NSStatusBar, all foreign functions. Confined to the window host and behind a feature.
+tray-icon = "0.26"
 serde_json = "1.0.145"
 thiserror = "2.0.17"
 tracing = "0.1.44"
@@ -39,6 +60,30 @@ proptest = "1.7.0"
 # obtain a bearer token on Windows: BCryptGenRandom needs FFI, which the workspace
 # forbids, and a predictable fallback would be worse than no token.
 getrandom = "0.4.3"
+# GPU renderer dependency. Feature-gated off by default so the workspace compiles on any
+# machine without pulling in a graphics dependency. ADR-012 records this as a deliberate
+# exception, confined to `ncui-gpu-renderer` for one purpose: talking to the GPU driver.
+# The backends are all enabled because `wgpu` gates each one on its own platform
+# internally, so a Windows build never compiles the Metal backend; what it does compile
+# is `naga`, which every backend needs.
+# ADR-012's third exception: the WASM interpreter that makes `ncui-component` execute real
+# components instead of only specifying the ABI around them. An interpreter is the only way to
+# run a third-party artifact without `unsafe`, which the workspace forbids; wasmi is pure Rust,
+# so this adds no platform FFI, and it is confined to that one crate for that one purpose.
+wasmi = "2.0.0"
+wgpu = { version = "29", default-features = false, features = [
+    "std",
+    "parking_lot",
+    "wgsl",
+    "dx12",
+    "metal",
+    "vulkan",
+    "gles",
+] }
+# The text layout path. `rustybuzz` is a pure-Rust port of HarfBuzz and `ttf-parser` is
+# its font reader; neither performs FFI, so the `unsafe_code = "forbid"` ban holds. ADR-012
+# records this as a deliberate exception, confined to `ncui-gpu-renderer`.
+rustybuzz = { version = "0.20", default-features = false, features = ["std"] }
 
 [workspace.lints.rust]
 # Warnings are defects. This is the project's core quality mandate (spec 4.5, 48).

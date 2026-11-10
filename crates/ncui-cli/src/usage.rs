@@ -29,11 +29,18 @@ OPTIONS:
     --deep, -d          Include per-subsystem detail (health)
     --registry <path>   Load a feature registry (status, serve)
     --role <name>       Agent role for the served socket (serve)
+    --watch             Reload the page when the application's files change (run)
+    --root <dir>        Where applications are installed (install, update, uninstall, installed)
 
 AGENT API:
     `ncui serve` binds the JSON-RPC surface to an ephemeral loopback port and prints
     the address and a one-time bearer token. Frames are a 4-byte big-endian length
     followed by that many bytes of JSON; the first frame must carry the token.
+
+APPLICATIONS:
+    `ncui run <directory>` reads the application's `ncui.app.json`, serves its assets
+    over loopback HTTP, opens a window at its entry page, and serves the page's calls
+    to the runtime until the window closes.
 
 EXIT CODES:
     0   the command succeeded and nothing is wrong
@@ -47,6 +54,13 @@ NOTES:
 EXAMPLE:
     ncui health --deep
     ncui status --registry protocols/feature-registry.json --json
+    ncui run examples/counter
+    ncui run examples/counter --watch
+    ncui install dist/counter
+    ncui update dist/counter
+    ncui installed
+    ncui uninstall counter
+    ncui launch counter
 ",
     );
     out

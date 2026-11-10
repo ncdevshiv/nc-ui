@@ -53,6 +53,70 @@ jobs:
           cargo clippy --all-targets -- -D warnings
 
   # ---------------------------------------------------------------------------
+  # Feature-gated builds. The platform adapters — `wry`, `tao`, `wgpu` and `rustybuzz` —
+  # are behind feature flags so the workspace builds on a machine with no display and no
+  # graphics stack. That has a cost: without this job, the code that actually reaches a
+  # user's machine is never compiled, never linted and never tested.
+  # ---------------------------------------------------------------------------
+  adapters:
+    name: adapters / feature-gated code compiles and tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install 1.98.1 --profile minimal --component rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The GPU and the window host both need system libraries that the runners do not
+      # have. They are installed rather than skipped, because a job that only runs on the
+      # machines that happen to have the libraries is a job that stops running the day
+      # one of them is rebuilt.
+      - name: Install the graphics and webview system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan-dev libwayland-dev libxkbcommon-dev \
+            libwebkit2gtk-4.1-dev
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy over every feature
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Tests over every feature
+        run: cargo test --workspace --all-targets --all-features
+
+      - name: Documentation builds without warnings
+        run: cargo doc --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # ---------------------------------------------------------------------------
+  # The page-side package. The host injects the very file this package ships, so
+  # the package's suite is a test of the runtime's own transport, not of a copy.
+  # ---------------------------------------------------------------------------
+  client:
+    name: client / the page bridge's own suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: The injected bridge passes its suite
+        run: node --test packages/ncui-client/tests/
+
+  # ---------------------------------------------------------------------------
   # Policy gates. These encode the project's own rules as executable checks.
   # ---------------------------------------------------------------------------
   policy:
@@ -82,6 +146,18 @@ jobs:
       - name: No markers of unfinished work in fuzz targets
         run: ./tools/target/release/ncui-placeholders fuzz
 
+      - name: No markers of unfinished work in the page-side package
+        run: ./tools/target/release/ncui-placeholders packages
+      - name: The example application carries no placeholders
+        run: ./tools/target/release/ncui-placeholders examples
+      - name: The comparison ports carry no placeholders
+        run: ./tools/target/release/ncui-placeholders comparison/ports comparison/bench/instrumentation
+
+      - name: Generated component artifacts match their generators
+        run: |
+          python tools/make_greeter_component.py --check
+          python comparison/tools/make_word_signal_component.py --check
+
       - name: Crate layering and dependency direction
         run: ./tools/target/release/ncui-arch .
 
@@ -94,6 +170,17 @@ jobs:
       # can be checked mechanically today.
       - name: Registry test counts match the files they cite
         run: python tools/correct_test_counts.py --check
+
+      # Tier 1 guards (docs/tier1-plan.md). Python cores are stdlib-only, so no
+      # new runner cost; failures sit beside ncui-placeholders failures.
+      - name: File size and folder shape (Tier 1)
+        run: bash scripts/file-size.sh
+
+      - name: Changelog fragments are well-formed
+        run: python3 scripts/changelog-fold.py --check
+
+      - name: Hygiene scan (secrets, absolute paths)
+        run: bash scripts/hygiene-scan.sh --tree
 
   # ---------------------------------------------------------------------------
   # Performance. Benchmarks are reported evidence; they do not block merges on a
@@ -138,6 +225,39 @@ jobs:
         with:
           name: latency-report
           path: benches/results/latency.json
+
+  # ---------------------------------------------------------------------------
+  # Cross-framework comparison. The claim NC-UI makes against Electron and Tauri is a
+  # measured one, so the measurement is runnable by a reader rather than only describable.
+  # The harness is Windows-only — it finds a visible window with EnumWindows and walks the
+  # process tree with Toolhelp — and it needs Node, npm and MSVC, which this runner has.
+  # It is a benchmark, so it reports rather than gates: a timing that moves on a shared
+  # runner is not a regression, and the committed report stays the artifact of record.
+  # ---------------------------------------------------------------------------
+  comparison:
+    name: comparison / ncui against electron and tauri
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install 1.98.1 --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Measure both applications on both frameworks
+        run: python comparison/bench/compare.py
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: comparison-report
+          path: comparison/bench/results/windows.json
 
 
 # ---------------------------------------------------------------------------

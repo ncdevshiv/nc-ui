@@ -28,12 +28,229 @@
 
 use core::fmt;
 use ncui_core::capability::CapabilityScope;
-use ncui_core::{Capability, CapabilitySet, ErrorKind, NcError, Result};
+use ncui_core::{Capability, CapabilitySet, CorrelationId, ErrorKind, NcError, Result};
 
 /// The operation name recorded on authorization failures.
 const OP_AUTHORIZE: &str = "security::authz::authorize";
 /// The operation name recorded when a destructive call lacks per-call consent.
 const OP_REQUIRE_DESTRUCTIVE: &str = "security::authz::require_destructive";
+/// The operation name recorded when a destructive call lacks a consent token.
+const OP_REQUIRE_TOKEN: &str = "security::authz::require_destructive_with_token";
+/// The operation name recorded when a consent token fails to parse.
+const OP_CONSENT_PARSE: &str = "security::authz::ConsentToken::from_value";
+
+/// An opaque, consume-once proof that the user approved one destructive invocation.
+///
+/// Minted **only by the runtime** — never by a client, never by a test in another
+/// crate that pretends to be one — at the moment the user confirms the action. The
+/// token is bound to the [`CorrelationId`] of the logical operation, the method
+/// name, and the capability set it authorizes, and carries a fresh 128-bit
+/// `nonce`. The runtime keeps a ledger of minted nonces and marks each spent on
+/// first use, so a token can authorize exactly one call, for exactly one method,
+/// exactly once.
+///
+/// The wire form is a JSON object (`correlation`, `method`, `capability`, `nonce`
+/// as hex). The wire form alone proves nothing: a client can fabricate any JSON,
+/// but a fabricated nonce is in no ledger and is refused. The ledger is the
+/// authority; the token is the claim.
+///
+/// There is deliberately no `Clone`, no `Serialize`/`Deserialize` derive, and no
+/// public constructor apart from [`ConsentToken::mint`]: a consent that can be
+/// copied, printed, or stored is a consent that can be replayed.
+pub struct ConsentToken {
+    correlation: CorrelationId,
+    method: String,
+    capability: CapabilitySet,
+    nonce: u128,
+}
+
+impl ConsentToken {
+    /// Mints a token. Called **only by the runtime** at user-confirmation time.
+    ///
+    /// `nonce` must be 128 bits of OS entropy supplied by the caller (the runtime
+    /// draws it via [`crate::token::SecretToken::from_os_entropy`]); a predictable
+    /// nonce is guessable and therefore forgeable. The binding is exact: a token
+    /// minted for one method, one correlation, or a narrower capability does not
+    /// authorize another.
+    #[must_use]
+    pub fn mint(
+        correlation: CorrelationId,
+        method: impl Into<String>,
+        capability: CapabilitySet,
+        nonce: u128,
+    ) -> Self {
+        Self {
+            correlation,
+            method: method.into(),
+            capability,
+            nonce,
+        }
+    }
+
+    /// The logical operation this token was minted for.
+    #[must_use]
+    pub const fn correlation(&self) -> CorrelationId {
+        self.correlation
+    }
+
+    /// The method this token was minted for.
+    #[must_use]
+    pub fn method(&self) -> &str {
+        &self.method
+    }
+
+    /// The capability set this token authorizes.
+    #[must_use]
+    pub const fn capability(&self) -> CapabilitySet {
+        self.capability
+    }
+
+    /// The 128-bit nonce identifying this token in the runtime's ledger.
+    #[must_use]
+    pub const fn nonce(&self) -> u128 {
+        self.nonce
+    }
+
+    /// Whether this token authorizes `method`, invoked under `correlation`,
+    /// requiring `required`.
+    ///
+    /// The method and correlation must match exactly, and `required` must be a
+    /// subset of the token's capability. A token for `ncui.logs.purge` does not
+    /// authorize `ncui.data.purge`, and a token for one correlation does not
+    /// authorize a different operation.
+    #[must_use]
+    pub fn matches(
+        &self,
+        correlation: CorrelationId,
+        method: &str,
+        required: CapabilitySet,
+    ) -> bool {
+        self.correlation == correlation
+            && self.method == method
+            && required.is_subset_of(self.capability)
+    }
+
+    /// Serializes the token to its wire JSON object.
+    #[must_use]
+    pub fn to_value(&self) -> serde_json::Value {
+        let capabilities: Vec<&str> = self.capability.iter().map(Capability::as_str).collect();
+        serde_json::json!({
+            "correlation": self.correlation.to_string(),
+            "method": self.method,
+            "capability": capabilities,
+            "nonce": format!("{:#034x}", self.nonce),
+        })
+    }
+
+    /// Parses the wire JSON object into a token.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Validation`] if any field is missing or malformed.
+    pub fn from_value(value: &serde_json::Value) -> Result<Self> {
+        let correlation_text = value
+            .get("correlation")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                NcError::new(ErrorKind::Validation {
+                    field: "consent_token.correlation".to_owned(),
+                    reason: "must be a correlation id string".to_owned(),
+                })
+                .operation(OP_CONSENT_PARSE)
+            })?;
+        let correlation = correlation_text.parse::<CorrelationId>().map_err(|error| {
+            NcError::new(ErrorKind::Validation {
+                field: "consent_token.correlation".to_owned(),
+                reason: error.to_string(),
+            })
+            .operation(OP_CONSENT_PARSE)
+        })?;
+        let method = value
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                NcError::new(ErrorKind::Validation {
+                    field: "consent_token.method".to_owned(),
+                    reason: "must be a method name string".to_owned(),
+                })
+                .operation(OP_CONSENT_PARSE)
+            })?
+            .to_owned();
+        if method.trim().is_empty() {
+            return Err(NcError::new(ErrorKind::Validation {
+                field: "consent_token.method".to_owned(),
+                reason: "must not be empty".to_owned(),
+            })
+            .operation(OP_CONSENT_PARSE));
+        }
+        let capability_value = value.get("capability").ok_or_else(|| {
+            NcError::new(ErrorKind::Validation {
+                field: "consent_token.capability".to_owned(),
+                reason: "must be an array of capability strings".to_owned(),
+            })
+            .operation(OP_CONSENT_PARSE)
+        })?;
+        let names = capability_value.as_array().ok_or_else(|| {
+            NcError::new(ErrorKind::Validation {
+                field: "consent_token.capability".to_owned(),
+                reason: "must be an array of capability strings".to_owned(),
+            })
+            .operation(OP_CONSENT_PARSE)
+        })?;
+        let mut capability = CapabilitySet::empty();
+        for name in names {
+            let text = name.as_str().ok_or_else(|| {
+                NcError::new(ErrorKind::Validation {
+                    field: "consent_token.capability".to_owned(),
+                    reason: "each entry must be a capability string".to_owned(),
+                })
+                .operation(OP_CONSENT_PARSE)
+            })?;
+            let parsed = text.parse::<Capability>().map_err(|error| {
+                NcError::new(ErrorKind::Validation {
+                    field: "consent_token.capability".to_owned(),
+                    reason: format!("unknown capability `{text}`: {error}"),
+                })
+                .operation(OP_CONSENT_PARSE)
+            })?;
+            capability = capability.with(parsed);
+        }
+        let nonce_text = value
+            .get("nonce")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                NcError::new(ErrorKind::Validation {
+                    field: "consent_token.nonce".to_owned(),
+                    reason: "must be a hex nonce string".to_owned(),
+                })
+                .operation(OP_CONSENT_PARSE)
+            })?;
+        let stripped = nonce_text
+            .strip_prefix("0x")
+            .or_else(|| nonce_text.strip_prefix("0X"))
+            .unwrap_or(nonce_text);
+        let padded = format!("{stripped:0>32}");
+        let nonce = u128::from_str_radix(&padded, 16).map_err(|_| {
+            NcError::new(ErrorKind::Validation {
+                field: "consent_token.nonce".to_owned(),
+                reason: "must be 32 hex digits".to_owned(),
+            })
+            .operation(OP_CONSENT_PARSE)
+        })?;
+        Ok(Self::mint(correlation, method, capability, nonce))
+    }
+}
+
+impl fmt::Debug for ConsentToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConsentToken")
+            .field("correlation", &self.correlation)
+            .field("method", &self.method)
+            .field("capability", &self.capability)
+            .field("nonce", &" <redacted>")
+            .finish()
+    }
+}
 
 /// A named bundle of standing capability grants (spec 36).
 ///
@@ -296,12 +513,12 @@ impl Authorizer {
     /// manufacture authority that was never granted.
     ///
     /// `authorized` is a plain `bool` and that is a deliberate weakness of the signature:
-    /// a caller who writes `true` unconditionally has opted out. The alternative — an
-    /// unforgeable consent token minted by the runtime at the point of user
-    /// confirmation — is the right long-term design and belongs in the runtime, not in a
-    /// pure predicate. Until then the gate is correct for every caller that passes a real
-    /// consent signal, and it fails closed (`false` is the default for any code path that
-    /// cannot produce a signal at all).
+    /// a caller who writes `true` unconditionally has opted out. Prefer
+    /// [`Authorizer::require_destructive_with_token`], which takes the runtime-minted
+    /// [`ConsentToken`] and fails closed whenever the token is absent or mismatched.
+    /// This bool form fails closed on `false` and is kept for callers that cannot yet
+    /// produce a token; the runtime path always consumes the token form, so a bare
+    /// `consent: true` in a JSON-RPC request is refused there.
     ///
     /// # Errors
     ///
@@ -324,6 +541,43 @@ impl Authorizer {
                 subject: subject.to_owned(),
             })
             .operation(OP_REQUIRE_DESTRUCTIVE));
+        }
+        Ok(())
+    }
+
+    /// Authorizes `required` for `subject`, requiring a minted [`ConsentToken`]
+    /// whenever any part of `required` is destructive.
+    ///
+    /// The token must match `correlation`, `method`, and `required`. When it does
+    /// not — or when no token is supplied at all — the call is denied with a
+    /// migration message pointing at `consent_token`. A bare `consent: true`
+    /// therefore authorizes nothing destructive.
+    ///
+    /// # Errors
+    ///
+    /// * [`ErrorKind::Validation`] if `subject` is empty.
+    /// * [`ErrorKind::CapabilityDenied`] if `required` is not a subset of
+    ///   `granted`, or if `required` is destructive and `token` is `None` or does
+    ///   not match.
+    pub fn require_destructive_with_token(
+        &self,
+        subject: &str,
+        required: CapabilitySet,
+        granted: CapabilitySet,
+        token: Option<&ConsentToken>,
+        correlation: CorrelationId,
+        method: &str,
+    ) -> Result<()> {
+        self.authorize(subject, required, granted)?;
+        if let Some(destructive) = first_destructive(required) {
+            let valid = token.is_some_and(|t| t.matches(correlation, method, required));
+            if !valid {
+                return Err(NcError::new(ErrorKind::CapabilityDenied {
+                    capability: destructive.as_str().to_owned(),
+                    subject: subject.to_owned(),
+                })
+                .operation(OP_REQUIRE_TOKEN));
+            }
         }
         Ok(())
     }
@@ -733,5 +987,100 @@ mod tests {
         assert!(!AgentRole::Debugger.has_destructive());
         assert!(AgentRole::Tester.has_destructive());
         assert!(AgentRole::Administrator.has_destructive());
+    }
+
+    #[test]
+    fn a_token_for_method_a_does_not_authorize_method_b() {
+        let authorizer = Authorizer::new();
+        let granted = AgentRole::Administrator.capabilities();
+        let required = CapabilitySet::empty().with(Capability::DeleteData);
+        let correlation = CorrelationId::new();
+        let token = ConsentToken::mint(
+            correlation,
+            "ncui.data.purge",
+            required,
+            0x1234_5678_9abc_def0_1234_5678_9abc_def0,
+        );
+        // Correct method + correlation succeeds.
+        assert!(
+            authorizer
+                .require_destructive_with_token(
+                    "admin-1",
+                    required,
+                    granted,
+                    Some(&token),
+                    correlation,
+                    "ncui.data.purge"
+                )
+                .is_ok()
+        );
+        // Replaying the same token for a different method is refused.
+        let err = authorizer
+            .require_destructive_with_token(
+                "admin-1",
+                required,
+                granted,
+                Some(&token),
+                correlation,
+                "ncui.logs.purge",
+            )
+            .expect_err("a token must not authorize a different method");
+        assert_eq!(err.operation_name(), OP_REQUIRE_TOKEN);
+    }
+
+    #[test]
+    fn a_token_bound_to_a_different_correlation_is_refused() {
+        let authorizer = Authorizer::new();
+        let granted = AgentRole::Administrator.capabilities();
+        let required = CapabilitySet::empty().with(Capability::DeleteData);
+        let minted = CorrelationId::new();
+        let other = CorrelationId::new();
+        let token = ConsentToken::mint(minted, "ncui.data.purge", required, 1);
+        assert!(
+            authorizer
+                .require_destructive_with_token(
+                    "admin-1",
+                    required,
+                    granted,
+                    Some(&token),
+                    other,
+                    "ncui.data.purge"
+                )
+                .is_err(),
+            "a token must not authorize a different correlation"
+        );
+    }
+
+    #[test]
+    fn a_destructive_call_without_a_token_is_refused() {
+        let authorizer = Authorizer::new();
+        let granted = AgentRole::Administrator.capabilities();
+        let required = CapabilitySet::empty().with(Capability::DeleteData);
+        let err = authorizer
+            .require_destructive_with_token(
+                "admin-1",
+                required,
+                granted,
+                None,
+                CorrelationId::new(),
+                "ncui.data.purge",
+            )
+            .expect_err("a destructive call without a token must be refused");
+        assert_eq!(err.operation_name(), OP_REQUIRE_TOKEN);
+    }
+
+    #[test]
+    fn a_consent_token_round_trips_through_its_wire_form() {
+        let correlation = CorrelationId::new();
+        let required = CapabilitySet::empty()
+            .with(Capability::DeleteData)
+            .with(Capability::ReadLogs);
+        let token = ConsentToken::mint(correlation, "ncui.data.purge", required, 0xbeef);
+        let value = token.to_value();
+        let back = ConsentToken::from_value(&value).expect("a minted token parses back");
+        assert_eq!(back.correlation(), correlation);
+        assert_eq!(back.method(), "ncui.data.purge");
+        assert_eq!(back.capability(), required);
+        assert_eq!(back.nonce(), 0xbeef);
     }
 }

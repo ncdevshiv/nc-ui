@@ -1,0 +1,14 @@
+{
+  "name": "tauri-word-signal-port",
+  "identity": "com.ncui.tauri-word-signal-port",
+  "scheme": "ncui-tws-port",
+  "version": "1.0.0",
+  "entry": "index.html",
+  "assets": "public",
+  "window": {
+    "title": "exampleapp",
+    "width": 800,
+    "height": 600
+  },
+  "capabilities": ["run.components", "filesystem.read", "filesystem.write"]
+}

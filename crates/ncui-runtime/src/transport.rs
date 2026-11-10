@@ -252,6 +252,29 @@ impl AgentServer {
         let limits = self.limits;
         let bump = Arc::clone(&self.stats);
 
+        // The page pump. A page's messages are served even when no agent is connected,
+        // because the page is the *application* and the agent is the observer — an
+        // application that only ran when something was watching it would not be an
+        // application. The pump stops when the server does.
+        {
+            let runtime = Arc::clone(&shared.runtime);
+            let shutdown = Arc::clone(&shutdown);
+            std::thread::spawn(move || {
+                while !shutdown.load(Ordering::Acquire) {
+                    let mut runtime = runtime
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let now = runtime.elapsed();
+                    runtime.pump_pages(now);
+                    drop(runtime);
+                    // A short sleep rather than a busy loop: the pump is idle most of the
+                    // time, and a busy loop would burn a core for the sake of a page that
+                    // has nothing to say.
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            });
+        }
+
         for incoming in self.listener.incoming() {
             if shutdown.load(Ordering::Acquire) {
                 break;

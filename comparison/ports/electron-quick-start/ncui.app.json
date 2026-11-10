@@ -1,0 +1,14 @@
+{
+  "name": "electron-quick-start-port",
+  "identity": "com.ncui.electron-quick-start-port",
+  "scheme": "ncui-eqs-port",
+  "version": "1.0.0",
+  "entry": "index.html",
+  "assets": "public",
+  "window": {
+    "title": "Hello World!",
+    "width": 800,
+    "height": 600
+  },
+  "capabilities": ["read.metrics", "filesystem.read", "filesystem.write"]
+}

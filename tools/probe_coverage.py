@@ -76,7 +76,7 @@ def patch_arm(text: str, item: str, body: str) -> str:
 
 
 def run(cmd: list[str], cwd: Path) -> int:
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True).returncode
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, encoding="utf-8").returncode
 
 
 def first_failing_test(output: str) -> str | None:
@@ -140,7 +140,7 @@ def battery(direction: str) -> dict[str, dict[str, object]]:
                 ["cargo", "test", "-p", "ncui-gpu"],
                 cwd=scratch,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
             )
             # A compile error is NOT a kill. Reporting it as one would make an unbuildable
             # mutation look like a covered one — which is exactly how the first version of this

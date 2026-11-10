@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "verification_note": "Verified on Windows 11 x86_64-pc-windows-msvc and on Linux x86_64-unknown-linux-gnu (WSL2, Ubuntu 26.04 LTS), both with Rust 1.98.1. The Linux run executed the full gate suite: fmt, clippy pedantic with -D warnings, 954 tests, rustdoc with -D warnings, the tools workspace, and all four policy gates. macOS is recorded as 'unverified': no macOS host is reachable from the machine that produced this registry, so marking it would be a claim with nothing behind it. Every 'complete' entry was re-checked against the file it cites; the thirteen citations that did not survive that check were corrected rather than left standing.",
+  "verification_note": "Both hosts pass the gate. Windows 11 x86_64-pc-windows-msvc: fmt, clippy pedantic with -D warnings in both feature configurations, the whole test suite in both configurations (1358 tests with the default features measured with --all-targets, and 1424 with every feature enabled including the real-window application suite, the GPU islands and the tray), rustdoc with -D warnings, the tools workspace, the client package, and every policy gate. Linux x86_64-unknown-linux-gnu (WSL2, Ubuntu 26.04 LTS): the same gate in its default configuration plus a stage that compiles the release configuration, 23 of 23 stages passing, 52 tests in the tools workspace and the whole workspace suite, run through tools/linux_gate.py with a C compiler assembled from unpacked packages under $HOME because that distro has no toolchain and no root to install one. That gate builds into host-specific target directories for both the workspace and the tools, so a Linux run and a Windows run cannot shadow each other's binaries. It has found a real cross-platform defect every time it has been run: the most recent were an installer written on Unix that had no executable bit, so the file could be built and never run, and `ncui.window.theme`, which was dispatched and offered to pages but left out of the protocol specification's method table, so a client written from the specification would never have learned it existed. The Linux run compiles and *runs* the release configuration: the GTK and WebKit development libraries are installed (an earlier revision of this note wrongly said they were not) and WSLg supplies an X server and a Wayland socket, so the host opens genuine windows \u2014 8 host tests, the 8 page-bridge tests and both comparison ports pass there. That only became true after a real fix: `ncui-webview-wry` created its event loop on a worker thread and set `with_any_thread(true)` on Windows only, so tao's Unix backend panicked on Linux and `ncui run` could not open a window at all. The islands test still needs a GPU device, which the session lacks, so a feature whose evidence needs one stays 'unverified' on Linux. macOS is recorded as 'unverified' and cross_platform.verification.macos as 'not_implemented': no macOS host is reachable, so marking either would be a claim with nothing behind it. Every 'complete' entry was re-checked against the file it cites; the citations that did not survive that check were corrected rather than left standing.",
   "features": [
     {
       "id": "core.error_model",
@@ -577,7 +577,7 @@
       "evidence": {
         "unit_tests": {
           "verified": true,
-          "evidence": "crates/ncui-security/src/authz.rs \u2014 17 tests; the Observer..Administrator ladder is asserted monotonic"
+          "evidence": "crates/ncui-security/src/authz.rs \u2014 21 tests; the Observer..Administrator ladder is asserted monotonic"
         },
         "integration_tests": {
           "verified": true,
@@ -1044,11 +1044,11 @@
         },
         "integration_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/tests/agent_surface.rs \u2014 the advertised surface matches the enforced surface"
+          "evidence": "crates/ncui-runtime/tests/agent_surface.rs \u2014 the advertised surface matches the enforced surface; crates/ncui-runtime/tests/protocol_conformance.rs \u2014 6 tests, including every_parameter_the_specification_lists_appears_in_the_runtime, which reads the specification's parameters table and checks each name against the runtime's own source"
         },
         "failure_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 an unknown method is NotFound; an excessive limit is refused, not clamped"
+          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 an unknown method is NotFound; an excessive limit is refused, not clamped; and a request whose `params` is a positional list is refused with the field named rather than read as a request that named no parameters (a_request_whose_params_are_not_an_object_is_refused)"
         },
         "benchmarks": {
           "verified": false,
@@ -1064,7 +1064,7 @@
         },
         "documentation": {
           "verified": true,
-          "evidence": "protocols/jsonrpc/README.md"
+          "evidence": "protocols/jsonrpc/README.md \u2014 the request shape, the parameters table, and the deadline; the parameters table is what the conformance gate reads, so a parameter the document names and the code does not is a failing test rather than a wrong document"
         },
         "security_review": {
           "verified": true,
@@ -1304,7 +1304,7 @@
         },
         "integration_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/tests/agent_transport.rs \u2014 20 tests driving a live server over a real socket; additionally verified by hand against the released `ncui serve` binary: authenticated describe returned 8 methods, `ncui.logs.purge` was refused without consent and served with it, and an unauthenticated peer received nothing"
+          "evidence": "crates/ncui-runtime/tests/agent_transport.rs \u2014 21 tests driving a live server over a real socket; additionally verified by hand against the released `ncui serve` binary: authenticated describe returned 8 methods, `ncui.logs.purge` was refused without consent and served with it, and an unauthenticated peer received nothing"
         },
         "failure_tests": {
           "verified": true,
@@ -1445,48 +1445,108 @@
     },
     {
       "id": "gpu.islands",
-      "summary": "GPU-rendered regions composed with DOM, with full input and accessibility support.",
-      "status": "not_implemented",
-      "crates": [],
+      "summary": "GPU-rendered regions composed with the DOM, with input and accessibility: the runtime draws the region on the GPU, the page composites the pixels, the island model answers where a pointer and a key land in it, and its contents reach a screen reader through a description the runtime serves from the same model it draws from.",
+      "status": "complete",
+      "crates": [
+        "ncui-gpu",
+        "ncui-gpu-renderer",
+        "ncui-a11y",
+        "ncui-runtime"
+      ],
       "evidence": {
         "unit_tests": {
-          "verified": false,
-          "evidence": ""
+          "verified": true,
+          "evidence": "crates/ncui-gpu/src/input.rs \u2014 36 unit tests over the island model: where a pointer lands, which row a scroll moves to, and the focus contract an island's nodes obey; crates/ncui-a11y/src/lib.rs \u2014 8 unit tests over the semantic tree and what makes an island reachable, including an unnamed focusable nested deep inside an island and a named island of static text; crates/ncui-gpu-renderer/src/glyphs.rs \u2014 7 unit tests over the glyph rasteriser and crates/ncui-gpu-renderer/src/text.rs \u2014 9 over shaping and outlines"
         },
         "integration_tests": {
-          "verified": false,
-          "evidence": ""
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/islands.rs \u2014 11 tests fetching frames and descriptions from a live server on a real GPU: a page fetches an island and gets the pixels the GPU drew, a page asks for rows and the GPU draws them where the model says, scrolling the rows moves which ones are drawn, a row with text is drawn with its letters, and a page asks for the accessible description of the rows it draws; crates/ncui-gpu-renderer/tests/render_offscreen.rs \u2014 4 tests that create a real device, draw a frame and read the pixels back"
         },
         "failure_tests": {
-          "verified": false,
-          "evidence": ""
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/islands.rs \u2014 a request that does not describe a frame, one that describes two contents or none, a row whose text is not encoded, and a description with no label are each refused with 404 rather than answered; crates/ncui-gpu-renderer/src/frame.rs \u2014 a hostile length, a length that disagrees with the content, a future version and an undefined flag are refused before anything is allocated; crates/ncui-gpu-renderer/src/device.rs \u2014 a device that cannot be created reports why"
         },
         "benchmarks": {
-          "verified": false,
-          "evidence": ""
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs \u2014 three scenarios over the text an island draws, measured on Windows x86_64 with nine repeats: text.shape_line medians 80.1us and p99 98.4us, text.rasterise_glyph medians 8.5us and p99 8.7us, and text.draw_line \u2014 a row's whole workload \u2014 medians 210.2us and p99 276.1us. Those figures are what the island route pays per row per frame, and they are measured rather than asserted"
         },
         "tracing": {
-          "verified": false,
-          "evidence": ""
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/islands.rs \u2014 a row that asks for text on a machine with no readable font is warned about by name, a line that cannot be shaped is warned about with its row, and an island that cannot produce a reachable description is warned about with its label; crates/ncui-runtime/src/gpu.rs \u2014 ncui.gpu.inspect reports the render mode of every island, the contract items the host demonstrates and the device's health"
         },
         "metrics": {
-          "verified": false,
-          "evidence": ""
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs \u2014 every island frame and every description is a response from the asset server, and app.asset_responses_served counts them, so a page fetching frames at a rate it should not shows as a count that rises; crates/ncui-runtime/src/gpu.rs \u2014 device_recoveries and device_lost are reported, so a driver that keeps taking the device away is visible"
         },
         "documentation": {
           "verified": true,
-          "evidence": "docs/adr/ADR-002-gpu-architecture.md"
+          "evidence": "docs/known-gaps.md \u2014 states what an island is, where the text is drawn, why the glyphs are rasterised on the CPU, and how its contents reach a screen reader; docs/adr/ADR-002-gpu-architecture.md records the architecture; crates/ncui-runtime/src/islands.rs, crates/ncui-gpu-renderer/src/glyphs.rs and crates/ncui-a11y/src/lib.rs state the route's grammar, the fill rule and what makes an island reachable"
         },
         "security_review": {
-          "verified": false,
-          "evidence": ""
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/islands.rs \u2014 every part of a request is bounded before it is used (each edge, the area, the row count, each row's height, each text's length and size, the label), the percent escapes are decoded strictly so a malformed one is refused, the font is the machine's own from a fixed list of paths so a request cannot name a file, and the coverage is clipped to its row and to the frame so a glyph cannot draw outside the island; crates/ncui-gpu-renderer/src/frame.rs \u2014 the frame is validated before anything is allocated"
         },
         "api_review": {
-          "verified": false,
-          "evidence": ""
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/islands.rs \u2014 one route serves both the pixels and the accessible description, and the description comes from the same model the renderer draws from, so what a reader is told cannot drift from what the page shows; the page owns the DOM (ADR-001), so the page mirrors the description and the runtime serves it, which is why the example does exactly that; crates/ncui-a11y/src/lib.rs \u2014 the descriptor is data, so an island that cannot produce a reachable one is refused rather than composited and left unreachable"
         }
       },
-      "platforms": {}
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "webview.engine",
+      "summary": "A real window and a real page: the wry binding, governed by the webview policy.",
+      "status": "complete",
+      "crates": [
+        "ncui-webview-wry"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-webview-wry/src/host.rs \u2014 the host's own tests, behind the `wry-engine` feature"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/page_bridge.rs \u2014 8 tests driving a page's message through the seam, the capability check, the dispatch pipeline and the audit trail"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-webview-wry/src/host.rs \u2014 a window that cannot be created reports the engine's own reason rather than a generic refusal"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs \u2014 webview.seam_evaluate measures the handling of one page message through the capability check and the action table, which is the path the engine's IPC handler feeds"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window.rs \u2014 a page's request is dispatched through the runtime's own pipeline, so it is correlated, rate limited and audited like an agent's"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/windows.rs \u2014 pending_page_messages is reported in the window summary, so a page that is talking and not being served is visible"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-webview-wry/src/lib.rs \u2014 the module documentation states that the engine decides nothing: a navigation is offered to the seam and the seam's verdict is what the engine obeys"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-webview-wry/src/host.rs \u2014 the navigation handler asks the seam before every navigation, and the IPC handler forwards the page's body unexamined so that only the seam, which holds the grant, can act on it"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/lib.rs \u2014 the engine implements `WebViewBackend` and receives the window's `HostSeam`; it holds no copy of the policy it obeys"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
     },
     {
       "id": "abi.component_abi",
@@ -1498,7 +1558,7 @@
       "evidence": {
         "unit_tests": {
           "verified": true,
-          "evidence": "crates/ncui-abi/src/surface.rs, crates/ncui-abi/src/manifest.rs, crates/ncui-abi/src/negotiation.rs and crates/ncui-abi/src/lib.rs hold 25 unit tests across the surface, the manifest, the negotiator and the module's own tests"
+          "evidence": "crates/ncui-abi/src/surface.rs \u2014 7 unit tests, crates/ncui-abi/src/manifest.rs \u2014 7 unit tests, crates/ncui-abi/src/negotiation.rs \u2014 11 unit tests and crates/ncui-abi/src/wire.rs \u2014 8 unit tests across the surface, the manifest, the negotiator, the JSON wire form and the module's own tests"
         },
         "integration_tests": {
           "verified": true,
@@ -1522,7 +1582,7 @@
         },
         "documentation": {
           "verified": true,
-          "evidence": "crates/ncui-abi/src/lib.rs \u2014 module documentation states the three things that must agree before a component runs, and that this crate does not execute WASM"
+          "evidence": "docs/adr/ADR-004-component-abi.md \u2014 the boundary; crates/ncui-abi/src/lib.rs \u2014 states that this crate does not execute WASM and that ncui-component does, and docs/adr/ADR-016-component-host.md \u2014 the executor that runs a component behind this gate"
         },
         "security_review": {
           "verified": true,
@@ -1530,7 +1590,7 @@
         },
         "api_review": {
           "verified": true,
-          "evidence": "crates/ncui-abi/src/lib.rs \u2014 HOST_ABI_VERSION is public and a test asserts it equals the negotiator's copy, so the two cannot drift into a host that refuses every component"
+          "evidence": "crates/ncui-abi/src/lib.rs \u2014 HOST_ABI_VERSION is public and a test asserts it equals the negotiator's; crates/ncui-abi/src/wire.rs \u2014 the manifest's JSON form is a documented reader that refuses unknown fields and unknown capability names"
         }
       },
       "platforms": {
@@ -1761,7 +1821,7 @@
         },
         "integration_tests": {
           "verified": true,
-          "evidence": "tools/build_release.py runs the whole pipeline end to end: CycloneDX SBOM from cargo-cyclonedx, two clean builds compared by digest, then a detached GPG signature over the SBOM"
+          "evidence": "tools/build_release.py runs the whole pipeline end to end: CycloneDX SBOM from cargo-cyclonedx, two clean builds compared by digest, then a detached GPG signature over the SBOM. The digest comparison is across two different target directories, and on Windows that is where it stops being a pass: a dependency embeds its build-output path (glutin_wgl_sys's OUT_DIR, through the wgpu stack), so the two builds differ by 403,978 bytes of an 11,816,448-byte binary and the check reports NOT reproducible \u2014 docs/known-gaps.md records the byte-level cause and what the guarantee is actually worth"
         },
         "failure_tests": {
           "verified": true,
@@ -1808,11 +1868,11 @@
       "evidence": {
         "unit_tests": {
           "verified": true,
-          "evidence": "tools/linux_gate.py runs its full gate list under WSL2 and tallies the results; the recorded run passed 954 tests across 30 suites"
+          "evidence": "tools/linux_gate.py runs the whole gate list under WSL2 and tallies the results; the recorded run passed 1290 tests across the workspace and 52 in the tools workspace, with every gate passing"
         },
         "integration_tests": {
           "verified": true,
-          "evidence": "tools/linux_gate.py gates fmt, clippy pedantic with -D warnings, tests, rustdoc with -D warnings, the tools workspace and its clippy, crate layering, the feature registry, and the unfinished-work scans"
+          "evidence": "tools/linux_gate.py gates fmt, clippy pedantic with -D warnings, tests, rustdoc with -D warnings, the tools workspace's fmt, clippy and tests, crate layering, the feature registry, the registry's test counts, the unfinished-work scans over crates, protocols, packages and examples, the component example's generator, the bundler's own tests, and the client package"
         },
         "failure_tests": {
           "verified": true,
@@ -1832,7 +1892,7 @@
         },
         "documentation": {
           "verified": true,
-          "evidence": "docs/known-gaps.md records the environment the Linux run happened in and that macOS remains unverified"
+          "evidence": "tools/linux_gate.py states what it runs and why the two --all-features stages are not in it, and docs/known-gaps.md records that macOS remains unverified"
         },
         "security_review": {
           "verified": true,
@@ -1840,7 +1900,7 @@
         },
         "api_review": {
           "verified": true,
-          "evidence": "tools/linux_gate.py takes no arguments, so the gate cannot be pointed at a different tree by accident"
+          "evidence": "tools/linux_gate.py locates the repository from its own path rather than naming a drive letter, so it cannot be pointed at a different tree and does not stop working when the tree moves"
         }
       },
       "platforms": {
@@ -1893,6 +1953,1790 @@
         }
       },
       "platforms": {}
+    },
+    {
+      "id": "runtime.page_bridge",
+      "summary": "A two-way, correlated bridge between a page and the runtime: a page calls native commands, and every answer is matched to the call that produced it.",
+      "status": "complete",
+      "crates": [
+        "ncui-webview",
+        "ncui-runtime",
+        "ncui-webview-wry"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/seam.rs - a_request_id_and_payload_round_trip, a_missing_or_invalid_request_id_is_refused and an_oversized_request_id_is_refused_before_it_reaches_an_audit_log"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/page_bridge.rs - eight tests driving a page's request through the seam, the capability check, the dispatch pipeline and the answer back to the page under the request's own id"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/page_bridge.rs - a_malformed_page_message_is_answered_rather_than_dropped; packages/ncui-client/tests/bridge.test.js - a call that is never answered fails on its own timeout, and a late answer for a timed-out call changes nothing"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs - webview.bridge_request_parse and webview.seam_evaluate"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window.rs - a page's request is dispatched through the runtime's own pipeline, so it carries the same correlation id, rate limit and audit trail an agent's request carries"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/windows.rs - pending_page_messages is reported in the window summary, so a page that is talking and not being served is visible"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/seam.rs - the module documentation states that every request carries an id the host echoes unchanged, and that the id is data only"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/seam.rs - a request id is bounded and restricted to characters the bridge can carry, so a page cannot place an unbounded string in a log or an audit record; an action the seam does not declare is refused before the dispatcher is reached"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "packages/ncui-client/src/index.d.ts - the page's contract is a typed surface over the injected bridge, and packages/ncui-client/src/bridge.js is the one file both the host and the package carry"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "runtime.app_commands",
+      "summary": "Application-defined native commands: an application registers a command with the capabilities it requires, and a page calls it through the same capability, rate-limit, consent and audit path an agent's request takes.",
+      "status": "complete",
+      "crates": [
+        "ncui-runtime",
+        "ncui-webview"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/commands.rs - a_registered_command_is_visible_in_the_action_table, a_duplicate_command_is_refused, an_invalid_command_name_is_refused and disposing_a_registration_removes_the_command_and_the_action"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/page_bridge.rs - an_application_command_runs_through_the_page_bridge and a_destructive_application_command_needs_consent"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/page_bridge.rs - a_command_needing_an_ungranted_capability_is_refused_at_registration, and a destructive command is refused when the page does not state consent"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs - runtime.page_command_dispatch"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window.rs - a command call is dispatched through the runtime's own pipeline, so it is correlated, rate limited and audited like an agent's"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window.rs - the command's outcome is recorded in the runtime's audit trail with the capabilities the command exercised"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/commands.rs - the module documentation states what a command is, that it is declared once with the capabilities it requires, and that a registration can be disposed"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/lib.rs - a command whose capabilities the page grant does not cover is refused at registration, so a page is never handed authority the host did not grant it"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/commands.rs - PageCommands and CommandRegistration are the whole surface: a command is registered, looked up, and disposed"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "app.manifest",
+      "summary": "An application manifest: the one file that names an application, its entry page, its assets, its window \u2014 including how that window looks \u2014 and the capabilities its pages hold.",
+      "status": "complete",
+      "crates": [
+        "ncui-app"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-app/src/manifest.rs - a_complete_manifest_is_read, a_manifest_with_only_a_name_and_version_takes_the_defaults and an_entry_that_leaves_the_application_is_refused"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/application.rs - an_application_serves_its_page_and_the_page_calls_native_code, which launches an application from a manifest on disk; crates/ncui-runtime/tests/application.rs \u2014 an_application_asks_for_its_own_window_options_in_its_manifest, where a manifest's window options reach the window the platform creates"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-app/src/manifest.rs - a_manifest_that_is_not_json_is_refused, a_manifest_with_an_unknown_capability_is_refused and a_manifest_with_an_empty_name_or_version_is_refused; crates/ncui-runtime/tests/application.rs \u2014 a_floor_added_to_a_manifest_does_not_refuse_a_window_the_user_shrank, which covers the case the options create: a remembered size below a floor the manifest added afterwards"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs - app.manifest_parse"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs - the application announces itself and its url when it starts running, and again when it stops"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs - app.page_calls_served and app.asset_responses_served are published to the runtime metrics registry as the application runs"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-app/src/manifest.rs - the module documentation states what an application is, why the manifest is JSON and why every field is validated rather than trusted"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-app/src/manifest.rs - an entry or assets directory that is absolute, drive-qualified or traverses with .. is refused, and the entry is resolved with SafePath so it cannot name a file outside the application"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-app/src/manifest.rs - AppManifest is the whole surface: load, parse, validate, assets_directory, entry_path and entry_url_path"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "app.asset_server",
+      "summary": "A loopback HTTP server that hands an application its own files: the page has a real origin, can load modules, and can fetch its siblings.",
+      "status": "complete",
+      "crates": [
+        "ncui-app",
+        "ncui-security"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-app/src/assets.rs - a_percent_encoded_path_is_decoded and the_content_type_follows_the_extension"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-app/tests/assets.rs - a_file_is_served_with_its_content_type, a_file_in_a_subdirectory_is_served and a_percent_encoded_path_reaches_the_file_it_names, each over a real socket"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-app/tests/assets.rs - a_path_that_leaves_the_root_is_refused, a_directory_is_not_listed, a_method_the_server_does_not_serve_is_refused and the_server_binds_the_loopback_interface_only"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs - app.asset_resolve"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs - the application announces the url it is serving, so a served asset is traceable to the application that served it"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs - app.asset_responses_served counts every response the server sent, published to the runtime metrics registry"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-app/src/assets.rs - the module documentation states what the server is and is not, and why it binds the loopback interface only"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-app/src/assets.rs - a request path is resolved with SafePath and then re-checked against the canonical path, so a symlink inside the root pointing outside it is refused; the listener refuses any address that is not a loopback address"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-app/src/assets.rs - AssetServer is the whole surface: start, start_on, local_addr, root, origin, url_for, responses_served and stop"
+        }
+      },
+      "platforms": {
+        "linux": "verified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "app.run",
+      "summary": "Running an application: the manifest is read, the assets are served, the window is opened at the entry page, and the page's calls are answered until the window closes.",
+      "status": "complete",
+      "crates": [
+        "ncui-app",
+        "ncui-runtime",
+        "ncui-cli",
+        "ncui-webview"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/lib.rs - run_needs_the_directory_of_the_application, and crates/ncui-webview/src/request.rs - a_request_carries_the_defaults_it_did_not_overrule"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/application.rs - an_application_serves_its_page_and_the_page_calls_native_code, which serves a page over a real socket, loads it in a real window and answers a native call the page makes"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/lib.rs - run_needs_the_directory_of_the_application refuses a flag where a directory belongs, and crates/ncui-webview/src/windows.rs - a_request_that_describes_no_creatable_window_is_refused_before_the_engine_is_asked"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs - app.manifest_parse and app.asset_resolve, the two costs every start pays"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs - the application announces itself, its version and its url when it starts and when it stops"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs - app.page_calls_served and app.asset_responses_served are published to the runtime metrics registry as the application runs"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs - the module documentation explains why the page loop lives here rather than in the caller, and crates/ncui-cli/src/usage.rs - the usage text documents the run command"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/navigation.rs - a page served over loopback http is permitted only for a loopback host and only when the origin is on the allow-list; crates/ncui-app/src/assets.rs - the served directory cannot be reached from outside the root"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs - Application is the whole surface: launch, launch_with, pump, is_running, url, name, version, window, runtime and shutdown"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "native.filesystem",
+      "summary": "Filesystem access for a page, contained to one root: a command exists only when the page's grant covers it, and every path is checked twice before it is opened.",
+      "status": "complete",
+      "crates": [
+        "ncui-native",
+        "ncui-runtime"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/fs.rs - a_file_inside_the_root_is_read, a_file_is_written_and_read_back and a_directory_is_listed_in_name_order"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/application.rs - an_application_with_the_read_capability_reads_a_file_from_the_page, which serves an application, loads it in a real window, and asserts the page received the file's contents through the native command"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/fs.rs - a_file_outside_the_root_is_refused, a_write_outside_the_root_is_refused, a_write_without_its_parent_directory_is_refused, a_file_over_the_read_limit_is_refused and a_file_that_is_not_text_is_refused_rather_than_lossily_decoded; crates/ncui-runtime/src/native.rs - a_page_without_the_capability_gets_no_filesystem_commands and an_escape_is_refused_at_the_command_boundary"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs - native.fs_read_text"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window.rs - a native command runs through run_native_page_command, which records an audit event for the page and the command whether the call succeeded, was denied, or failed"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/native.rs - native.fs_calls counts every call labelled by the operation, and a_filesystem_call_is_counted_in_the_metrics_registry asserts it"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/fs.rs - the module documentation states the containment rule, why a write is checked on its parent, and every bound the operations carry; crates/ncui-native/src/lib.rs - the crate documentation states the three parts a capability needs"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/fs.rs - a path is resolved with SafePath and then re-checked against its canonical form, so a symlink inside the root cannot point outside it; a write checks its parent the same way; the read and write bounds are independent of the size the metadata claims"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/native.rs - the commands a page can call are derived from its grant: fs.read_text, fs.list and fs.stat for filesystem.read, fs.write_text for filesystem.write, and nothing else"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "native.process",
+      "summary": "Running a program on a page's behalf: an argument vector rather than a shell, a scrubbed environment, a contained program path, a time limit and bounded output \u2014 and a capability that is destructive, so the page must state consent.",
+      "status": "complete",
+      "crates": [
+        "ncui-native",
+        "ncui-runtime"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/process.rs - a_program_runs_and_its_output_is_returned, the_exit_code_is_reported_rather_than_treated_as_a_failure, standard_input_is_delivered_to_the_child and the_scrub_keeps_ordinary_variables_and_drops_secret_shaped_ones"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/application.rs - a_page_that_states_consent_runs_a_program_and_receives_its_output, which serves an application, loads it in a real window, and asserts the page received the program's output"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/process.rs \u2014 an_absolute_program_path_is_refused, a_relative_path_that_leaves_the_root_is_refused, a_program_that_runs_too_long_is_stopped, a_timeout_stops_the_program_and_everything_it_started (a grandchild that writes once a second must stop writing when its parent's run is stopped), output_over_the_cap_is_cut_and_reported_as_cut and a_program_that_does_not_exist_is_reported_as_missing; crates/ncui-runtime/tests/application.rs \u2014 a_page_that_does_not_state_consent_is_refused_before_the_program_starts"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs - native.environment_scrub, the per-spawn cost the sandbox pays"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window.rs - a native command runs through run_native_page_command, which records an audit event for the page and the command whether the call succeeded, was denied, or failed"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/native.rs - native.process_runs counts every run, and the_run_command_executes_a_real_program asserts it"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/process.rs - the module documentation states that there is no shell, what a program path may name, what the environment scrub removes, and that this is not a sandbox"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/process.rs \u2014 the program and its arguments are passed as an argument vector and never through a shell; an absolute or rooted program path is refused and a relative one is contained; secret-shaped environment variables are dropped, including on Windows where cmd would otherwise re-parse the line; a child is stopped at its time limit together with everything it started, and its output is capped without blocking it"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/native.rs - process.run exists only when the page grant holds process.spawn, and process.spawn is destructive so the call is refused unless the page states consent"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "app.dev_reload",
+      "summary": "The development loop: a change under the assets directory reloads the page, so an author edits a file and sees the result without restarting the window.",
+      "status": "complete",
+      "crates": [
+        "ncui-app",
+        "ncui-runtime",
+        "ncui-cli"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-app/src/watch.rs - a_fresh_watcher_reports_no_change, writing_a_file_is_reported_as_a_change, editing_a_file_in_place_is_reported, removing_a_file_is_reported and a_change_below_a_subdirectory_is_seen"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/application.rs - a_file_change_reloads_the_page_in_the_window, which edits a served file and asserts the page loaded a second time in a real window"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-app/src/watch.rs - a_root_that_does_not_exist_is_refused and a_scan_stops_at_its_bound_and_says_so; crates/ncui-cli/src/lib.rs - run_needs_the_directory_of_the_application"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs - app.watch_poll, the scan every pump pays"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs - the watcher announces itself when it starts, and every reload is traced with the count and the application's name"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs - app.reloads counts every reload, and a_file_change_reloads_the_page_in_the_window asserts the count equals the reloads the application reports"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-app/src/watch.rs - the module documentation says what a change is, why the fingerprint carries a count and a size, and that this is a poller rather than a notification service; crates/ncui-cli/src/usage.rs - the flag is documented"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-app/src/watch.rs - the scan reads names and sizes with symlink_metadata so it does not follow links out of the tree, is bounded to a fixed number of entries, and takes no input from a page; the reload is a fixed script the host evaluates, never text a page supplies"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs - watch() and reloads() are the whole surface, and the CLI exposes it as one flag on run"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "webview.window_actions",
+      "summary": "Windows a page opens, and what it may ask them to be: an allowed URL, a place, and the properties a window can have.",
+      "status": "complete",
+      "crates": [
+        "ncui-webview",
+        "ncui-runtime"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/request.rs \u2014 the_window_options_default_to_a_window_a_user_can_move (the defaults, a floor checked against the window it belongs to, half a floor refused, and the options surviving the wire); crates/ncui-webview/src/windows.rs - a_window_cannot_be_opened_at_a_url_the_policy_refuses and a_window_opens_at_a_url_the_policy_allows; crates/ncui-runtime/tests/window_actions.rs - the_default_page_grant_does_not_include_the_window_capability"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/window_actions.rs - seven tests driving a page's create_window and close_window through the seam, the grant and the registry; crates/ncui-runtime/tests/application.rs - a_page_opens_a_second_window_and_closes_its_own, in a real window; a_page_places_a_window_it_creates, where a page opens a second window at a place it chose and the window is there"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/window_actions.rs - a_page_without_the_capability_is_refused_before_the_registry_is_reached, a_page_cannot_open_a_window_at_a_url_the_policy_refuses, a_page_cannot_widen_the_grant_of_the_window_it_opens and closing_a_window_closes_the_callers_window_whatever_the_page_names; crates/ncui-runtime/src/dispatch.rs \u2014 a place given as one coordinate is refused rather than half-applied, and a coordinate outside any display a window could be on is refused with the bound that produced it; crates/ncui-webview/src/request.rs \u2014 a floor below the minimum, a floor above the window's own size, and a floor naming one dimension and not the other are each refused with the field that produced it"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs - webview.navigation_evaluate, which is the policy call the URL vetting makes"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/dispatch.rs - every window opened is traced with its id and url, and every window closed with its id"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/dispatch.rs - window.created and window.closed are counted, and a_page_with_the_capability_opens_a_window_at_an_allowed_url asserts the count"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/windows.rs - the module documentation and the Unreachable rejection explain why a window's initial URL is the one navigation the engine does not ask the policy about, and why it is vetted before the engine sees it"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/windows.rs - a window's URL is evaluated against the navigation policy before the engine is asked to open it, closing the initial-load exemption; crates/ncui-runtime/src/window.rs - the window capability is not in the default page grant, and the caller-window action has its window id injected from the call's origin rather than read from the page's payload"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window.rs - create_window and close_window declare what they require and what they do, so describe reports them and a page can see that it does not hold the capability"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "native.clipboard",
+      "summary": "The clipboard, read and written through the tool each platform ships: the text travels on standard input, the tool gets a scrubbed environment, the read is bounded, and an unavailable clipboard is reported rather than returned empty.",
+      "status": "complete",
+      "crates": [
+        "ncui-native",
+        "ncui-runtime"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/clipboard.rs - text_written_to_the_clipboard_is_read_back, a_missing_tool_is_reported_as_unavailable_rather_than_empty, text_over_the_limit_is_refused_before_the_tool_is_reached, a_failing_tool_is_reported_with_its_own_message and every_platform_has_a_tool_to_try"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/application.rs - a_page_writes_and_reads_the_real_clipboard, which runs the whole path in a real window; crates/ncui-runtime/src/native.rs - the_clipboard_commands_round_trip_real_text, through the command handlers"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/clipboard.rs - the unavailability, over-limit and tool-failure tests above; crates/ncui-runtime/src/native.rs - a_clipboard_write_without_text_is_refused_before_the_tool_is_reached"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs - native.tool_spawn_overhead, the process start a clipboard call pays"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window.rs - a clipboard command runs through run_native_page_command, which records an audit event for the page and the command whether the call succeeded, was denied, or failed"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/native.rs - native.clipboard_calls counts every call labelled by the operation, and the_clipboard_commands_round_trip_real_text asserts it"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/clipboard.rs - the module documentation says why the platform's tool is used, what is guaranteed, and that the cost is a process start"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/clipboard.rs - the text is written to the tool's standard input and never appears on a command line; the tool runs with the scrubbed environment and is bounded in time and output; a missing tool is reported as unavailable rather than as an empty clipboard"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/native.rs - clipboard.read_text and clipboard.write_text exist only when the page grant holds the clipboard capability, and both are documented on the action table"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "component.execution",
+      "summary": "Real execution of untrusted WebAssembly component artifacts, bounded by fuel, a memory limiter and a copy budget, behind the ABI's capability negotiation.",
+      "status": "complete",
+      "crates": [
+        "ncui-component",
+        "ncui-runtime"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-component/src/limits.rs \u2014 6 unit tests, crates/ncui-component/src/contract.rs \u2014 5 unit tests and crates/ncui-component/src/error.rs \u2014 3 unit tests: the bounds that bound something, the packed location convention, the alignment of the payload and the refusal codes a host call returns"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-component/tests/components.rs \u2014 24 integration tests running a hand-assembled artifact on the real interpreter, and crates/ncui-runtime/src/components.rs \u2014 9 tests driving component.open, component.invoke, component.list and component.close through the registered command surface, including a component whose service call reaches an application command"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-component/tests/components.rs \u2014 a_component_that_does_not_return_is_stopped_by_its_fuel_budget, a_component_cannot_grow_past_the_memory_it_was_offered, a_component_naming_memory_it_does_not_have_is_refused_not_panicked, an_artifact_with_a_start_section_never_runs_at_all, an_artifact_importing_something_other_than_the_two_services_never_links, a_response_too_big_for_the_bound_is_refused_before_it_is_read and a_component_with_less_scratch_than_the_call_needs_is_told_so. crates/ncui-runtime/src/components.rs \u2014 an_artifact_that_will_not_negotiate_is_refused_before_it_runs and a_component_artifact_path_cannot_escape_the_application_directory"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/components.rs \u2014 measured on the interpreter that ships, at the harness's default settings: component.compile 207 \u00b5s, component.declaration 19.5 \u00b5s, component.open 27.6 \u00b5s, component.negotiate_and_open 28.3 \u00b5s, component.invoke_echo 933 ns and component.invoke_with_host_call 3.16 \u00b5s. The two invocation figures are what a caller needs to decide whether an instance is worth keeping alive between calls"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/components.rs \u2014 every load, call, refusal and unload emits a tracing event naming the component, the method, the fuel spent and the refusal count, and a refused service call logs the code and the capability it was refused for"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/components.rs \u2014 component.calls labelled by operation and component.host_calls labelled served or refused land in the shared registry; RunningComponent::calls, fuel_used, refusals and host_calls expose the per-component totals an operator reads"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "docs/adr/ADR-016-component-host.md \u2014 the contract, the bounds, the two instantiations and the alternatives rejected; docs/adr/ADR-012-dependency-policy.md \u2014 the fifth exception, wasmi; crates/ncui-component/src/lib.rs \u2014 the order a component goes through, from the size check to the invocation"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-component/src/host.rs \u2014 the manifest is read through a store with no grant, no declared services and no gateway, and the engine refuses a start section so instantiation executes nothing; crates/ncui-runtime/src/commands.rs \u2014 component_call refuses a command whose requirements the component's narrowed grant does not cover and refuses runtime-internal methods outright; crates/ncui-component/tests/components.rs \u2014 a_component_cannot_reach_the_host_while_it_is_declaring_itself and a_service_the_manifest_never_declared_is_refused_rather_than_reached"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-component/src/lib.rs \u2014 ComponentRuntime, CompiledComponent and RunningComponent are the whole surface; crates/ncui-component/src/gateway.rs \u2014 ComponentGateway is the single seam an embedder implements, constructed per component with its grant closed over; crates/ncui-component/src/contract.rs \u2014 the exports, imports and packed convention are written down once"
+        }
+      },
+      "platforms": {
+        "linux": "verified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "native.notifications",
+      "summary": "Raising a notification through the platform's own tool, with the payload delivered as data on every platform and bounded before any process starts.",
+      "status": "complete",
+      "crates": [
+        "ncui-native",
+        "ncui-runtime"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/notify.rs \u2014 9 unit tests, including a_real_notification_is_accepted_by_the_platform and a_payload_full_of_markup_is_a_message_rather_than_a_document, which raise real notifications through the platform's own API"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/native.rs \u2014 the_notification_command_raises_a_real_notification drives the registered command end to end and asserts the platform accepted the message"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/notify.rs \u2014 a_notification_longer_than_its_bound_is_refused_before_anything_runs and an_application_identity_is_checked_before_it_is_interpolated; crates/ncui-runtime/src/native.rs \u2014 a_page_without_the_notification_capability_gets_no_notification_command"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs \u2014 native.tool_spawn_overhead, the process start a notification call pays, which is the whole cost of this capability"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window.rs \u2014 a notification command runs through run_native_page_command, which records an audit event for the page and the command whether the call succeeded, was denied, or failed"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/native.rs \u2014 native.notifications counts every notification, so a page raising a stream of them is visible"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/notify.rs \u2014 the module documentation states why the platform's tool rather than a binding, how each platform's payload is delivered, and what is not guaranteed; crates/ncui-cli/src/bundle.rs \u2014 the bundle that carries the script registering the application's own identity with the platform, which is the install-time half of the same story"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/notify.rs \u2014 the payload is data on every platform: standard input on Windows with the title and body set as text nodes on the platform's own template, an escaped AppleScript literal on macOS, and an argument vector behind `--` on Linux; the one value interpolated into a script is the application identity, which is validated to be an identity first; a notification over its bound is refused before a process is started"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/native.rs \u2014 notifications.show exists only when the page grant holds notifications, and the capability is in the table ncui describe renders"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "process.bundling",
+      "summary": "Building a shippable application: `ncui build <directory>` writes a portable bundle \u2014 the runtime, the application, a manifest of every file with its size and digest, and the scripts that register the application's identity and scheme \u2014 deterministically, and `--check` catches a bundle that no longer matches the tree.",
+      "status": "complete",
+      "crates": [
+        "ncui-cli",
+        "ncui-app",
+        "ncui-native"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/tests/bundle.rs \u2014 identity derivation (a_name_that_is_not_an_identity_becomes_one), the generated scripts' refusal of a payload (a_value_a_generated_script_cannot_carry_is_refused), and the two staleness cases (a_bundle_is_checked_against_its_own_manifest and a_check_notices_a_bundle_that_has_moved_on_from_its_tree); crates/ncui-app/src/manifest.rs \u2014 an_identity_is_validated_because_it_reaches_a_registry_key_and_a_script"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/tests/bundle.rs \u2014 a_bundle_holds_the_runtime_the_application_and_a_manifest_of_itself builds a bundle and checks every digest against the file on disk, and two_builds_of_one_tree_are_byte_identical builds the same tree twice and compares the two bundles byte for byte"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/tests/bundle.rs \u2014 a_check_notices_a_bundle_that_has_moved_on_from_its_tree and a_directory_that_is_not_an_application_is_refused"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/bundle.rs \u2014 the module documentation states what a bundle is, why nothing is written outside the output directory, and why the output is deterministic; examples/counter/README.md \u2014 the example's own story"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/bundle.rs \u2014 the identity and the display name are refused if they carry a character a script cannot hold before either reaches the generated script, and the bundle writes only inside its own output directory so a build never touches the user's registry"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/bundle.rs \u2014 `ncui build <dir>` is the whole interface, with `--check` verifying an existing bundle against its own manifest and against a fresh build"
+        },
+        "benchmarks": {
+          "verified": false,
+          "evidence": "Not performance-sensitive: the bundler is build-time tooling, which the validator exempts through NON_PERFORMANCE_SENSITIVE_PREFIXES. What it asserts is determinism, and a digest comparison is not a timing \u2014 crates/ncui-cli/tests/bundle.rs builds the same tree twice and compares the bundles byte for byte"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/bundle.rs \u2014 the command reports what it produced and where, and `--check` names the file that no longer matches what the bundle describes, so a stale or damaged bundle is visible rather than silent"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "bundle.json records a size and a SHA-256 per file, which is the number a consumer recomputes; crates/ncui-cli/tests/bundle.rs recomputes every one of them and fails if the manifest describes something other than what is there"
+        }
+      },
+      "platforms": {
+        "linux": "verified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "app.single_instance",
+      "summary": "One instance per application: a second launch hands its arguments to the running instance over loopback and exits, and the instance reloads.",
+      "status": "complete",
+      "crates": [
+        "ncui-native",
+        "ncui-runtime",
+        "ncui-cli"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/single_instance.rs \u2014 10 unit tests: a fresh state directory makes this process the instance, a second acquire reports the running one, a hand-off carries its arguments, a hand-off without the token is refused, a stale lock is taken over, a lock that is not a lock is reported, an oversized hand-off is refused before it is sent, a pump loop can ask without waiting, and dropping the instance releases the lock"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/application.rs \u2014 a_second_launch_reaches_the_running_application_instead_of_opening_a_twin: a real application in a real window receives a hand-off across a real loopback socket, refuses one without the token, and releases its lock when it shuts down"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/single_instance.rs \u2014 a_hand_off_without_the_token_is_refused, a_stale_lock_is_taken_over_rather_than_trusted, a_lock_that_is_not_a_lock_is_reported, an_oversized_hand_off_is_refused_before_it_is_sent and a_name_that_is_not_a_name_is_refused"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs \u2014 app.instance_handoff: handing a second launch's arguments to the running instance and receiving them costs about 495 \u00b5s, against about 46 ms for native.tool_spawn_overhead, the cost of starting a process. Handing over is roughly ninety times cheaper than opening a second instance, which is the comparison the capability exists to make"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs \u2014 a received hand-off is logged with the application, the count and the arguments, and a refused one is logged with the code that refused it, so a local process probing the instance's port is visible rather than silent"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs \u2014 app.handoffs counts every second launch the instance received, and Application::handoffs exposes the same number to the caller"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/single_instance.rs \u2014 the module documentation states how the lock works without `unsafe`, why the token exists, what a stale lock does, and what it deliberately does not do (raising the first window); docs/adr/ADR-014-application-layer.md \u2014 the application layer's account of it"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/single_instance.rs \u2014 the listener is loopback only, the payload is bounded by a copy budget before it is read, the argument count and each argument's length are bounded, the instance name is validated so it cannot escape the state directory, and a hand-off without the token the lock published is refused rather than acted on"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/single_instance.rs \u2014 acquire returns either the guard or the running instance's port and token, so the caller's choice is the only thing it has to make; crates/ncui-cli/src/commands.rs \u2014 `ncui run` hands over and exits, or runs as the instance, and says which it did"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "app.deep_links",
+      "summary": "A URL scheme an application handles: the manifest declares it, the bundle ships what registers it, and the link reaches the instance that is running.",
+      "status": "complete",
+      "crates": [
+        "ncui-native",
+        "ncui-app",
+        "ncui-cli"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/protocol.rs \u2014 6 unit tests, including a_registration_can_be_written_read_back_and_removed, which registers a real scheme in the user's own hive and reads it back; crates/ncui-app/src/manifest.rs \u2014 a_link_scheme_is_validated_because_it_reaches_a_registry_key; crates/ncui-cli/src/lib.rs \u2014 the link a registered scheme passes is parsed as the run command's second positional"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/tests/bundle.rs \u2014 a_declared_scheme_ships_its_registration_and_a_silent_one_ships_none: the counter example's bundle carries the registration naming the scheme, the bundled runtime and the field the link is substituted into, and an application that declares no scheme gets none; crates/ncui-runtime/tests/application.rs \u2014 a_page_reads_the_link_the_application_was_opened_with, a_page_opened_without_a_link_is_told_so and a_link_that_arrives_by_hand_off_becomes_the_link_the_page_reads, where a real page asks through the bridge and the answer follows the link that most recently arrived"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/protocol.rs \u2014 a_scheme_that_is_not_a_scheme_is_refused, a_scheme_the_machine_already_uses_is_refused and a_reserved_scheme_is_refused_before_the_platform_is_touched; crates/ncui-cli/tests/bundle.rs \u2014 the no-scheme case above"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs \u2014 native.tool_spawn_overhead, about 46 ms: registering a scheme is one platform-tool invocation, and the link path itself is the hand-off measured at about 495 \u00b5s by app.instance_handoff"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/commands.rs \u2014 a launch started by a link writes `ncui opened by <link>` to stderr with the serving line, and crates/ncui-runtime/src/application.rs logs a received hand-off with the arguments that carried it"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs \u2014 app.handoffs counts the launches a link produces when the application is already running, and the link's payload is the hand-off's argument vector"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/protocol.rs \u2014 the module documentation states what is and is not registered, why a reserved scheme is refused, and how each platform keeps the registration; docs/adr/ADR-014-application-layer.md \u2014 the application layer's account of a link reaching the running instance and of the page asking what it was; examples/counter/README.md \u2014 the example's own deep-link story"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/protocol.rs \u2014 the scheme is validated by shape before anything is written, the schemes a machine already depends on are refused outright, the command line quotes the executable and every argument so a path with a space cannot become two arguments, and the platform tool is given an argument vector rather than a shell line; crates/ncui-cli/src/bundle.rs \u2014 the registration is written by an install script the user runs, never by the build, and the scheme is refused if it carries a character a script cannot hold"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/protocol.rs \u2014 register, unregister and registered are the whole surface, with reading a reserved scheme's handler allowed because that is a question about the machine rather than a claim on it; crates/ncui-cli/src/lib.rs \u2014 the link is the run command's second positional, taken before the flag loop so a URL cannot be reported as an unknown flag; crates/ncui-runtime/src/application.rs \u2014 the page reads the link through `app.link`, which requires no capability because the page is the application the link was addressed to"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "app.installation",
+      "summary": "Installing a bundle for one user, running it by name, and uninstalling it: the files in place, the identity and the URL scheme registered, a record of what was done, and an uninstall that reverses exactly that.",
+      "status": "complete",
+      "crates": [
+        "ncui-native",
+        "ncui-cli"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/install.rs \u2014 14 unit tests, including an_install_registers_the_identity_and_the_scheme_and_removes_both, which writes both registrations for real and reads them back; crates/ncui-native/src/identity.rs \u2014 4 unit tests, including an_identity_can_be_written_read_back_and_removed"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/lib.rs \u2014 the_command_line_installs_lists_and_removes_an_application drives the whole command path: parse, install a bundle into a scratch root, list it, remove it, and read what each command reported; an_installed_application_is_resolved_by_name_and_only_by_name covers what `ncui launch` adds to `ncui run` \u2014 the lookup \u2014 and asserts that an unknown name is refused with the directory that was searched and how to list what is there"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/install.rs \u2014 an_install_refuses_what_it_cannot_install (a directory that is not a bundle, and a name that is a path, which must not have been followed), installing_over_an_existing_install_is_refused and a_directory_name_is_narrow_on_purpose; crates/ncui-native/src/identity.rs \u2014 an_identity_is_checked_before_it_is_written and a_display_name_that_is_not_a_name_is_refused"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs \u2014 native.tool_spawn_overhead, about 46 ms: an install's cost is dominated by the two platform-tool invocations that register the identity and the scheme, and the file copy is measured by the filesystem scenarios beside it"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/render.rs \u2014 the text form names every registration an install made, so a person sees what happened to their machine rather than a success line; crates/ncui-native/src/install.rs \u2014 installed.json is the same account for a program to read"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/commands.rs \u2014 `ncui installed` reports the root and the count beside the applications, and each installed application carries the identity and scheme that were registered for it"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/install.rs \u2014 the module documentation states what an install is, why the registrations come after the files, why the record is what makes removal exact, and what is deliberately not here; docs/adr/ADR-014-application-layer.md \u2014 the application layer's account of it"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/install.rs \u2014 the application's name is validated as a directory name before anything is copied, so a name that is a path cannot escape the root and is refused rather than translated; nothing is written outside the root; an install over an existing one is refused rather than merged; the identity and the scheme are validated by the modules that own them, and both are registered against the installed program's own path"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/install.rs \u2014 Installer::install, uninstall and installed are the whole surface, and Installed is both what install returns and what uninstall returns, so a caller can compare them; crates/ncui-cli/src/lib.rs \u2014 `ncui install`, `ncui uninstall`, `ncui installed` and `ncui launch` take the root as an option rather than a requirement, and launch resolves a name and then runs the application exactly as `run` does, so there is one set of behaviours rather than two"
+        }
+      },
+      "platforms": {
+        "linux": "verified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "native.open",
+      "summary": "Handing a file or a link to whatever the platform uses for it, with the target refused unless it can survive the platform's own tool.",
+      "status": "complete",
+      "crates": [
+        "ncui-native",
+        "ncui-runtime"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/open.rs \u2014 5 unit tests: a target that cannot survive the tool is refused, a scheme that belongs to a browser is refused, a Windows path is not read as a scheme, the target is one argument of the command the platform is given, and the platform's own refusal is reported with its exit status"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/native.rs \u2014 the_open_command_asks_the_platform_and_reports_its_refusal drives the registered `shell.open` command and asserts the code each refusal produces"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/open.rs \u2014 a_target_that_cannot_survive_the_tool_is_refused and a_scheme_that_belongs_to_a_browser_is_refused; crates/ncui-runtime/src/native.rs \u2014 a_page_without_the_capability_gets_no_open_command"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs \u2014 native.tool_spawn_overhead, about 46 ms: opening a target is one platform-tool invocation, and the figure is the whole cost of the capability"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window.rs \u2014 an open runs through run_native_page_command, which records an audit event for the page and the command whether the call succeeded, was denied, or failed; crates/ncui-native/src/open.rs \u2014 a platform refusal carries the exit status that produced it, so a failure says that the tool refused rather than only that it did not succeed"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/native.rs \u2014 native.opens counts every open, so a page that hands the platform a stream of targets is visible"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/open.rs \u2014 the module documentation states why the platform's tool is used, that the target is an argument everywhere except where `start` makes it a shell line, which schemes are refused outright, and why a scheme registered during a session may not be live in it; docs/known-gaps.md \u2014 the same caveat, recorded where the gaps are"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/open.rs \u2014 a target carrying a quote, an apostrophe or a control character is refused, because on Windows the target passes through the `cmd` line that `start` requires and those are the characters that end its quoting; the browser-only schemes (`javascript`, `data`, `vbscript`, `blob`, `about`, `view-source`, `chrome`) are refused outright, since handing one to a platform opener is how an application turns a link into script execution; the target is a single argument vector element on macOS and Linux; and crates/ncui-runtime/src/native.rs gates the command on the same capability as spawning a program, which is destructive, so every call needs consent"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/open.rs \u2014 check_target, scheme_of and open_with_default are the whole surface, and the first two are separate so a caller can decide about a target without opening it; crates/ncui-runtime/src/native.rs \u2014 shell.open exists only when the page grant holds process.spawn"
+        }
+      },
+      "platforms": {
+        "linux": "verified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "webview.window_state",
+      "summary": "A window is put back where the user left it, on a display that exists: the host reports the geometry and the displays, the application remembers it, and the next run is created from it.",
+      "status": "complete",
+      "crates": [
+        "ncui-webview",
+        "ncui-webview-wry",
+        "ncui-runtime"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/request.rs \u2014 a_geometry_is_usable_only_when_a_window_could_have_it, a_request_carries_a_place_and_survives_the_wire and a_remembered_place_on_a_display_that_is_gone_is_moved_onto_one_that_exists, which covers the nearest-display choice, an unreachable place from either side, and a host that cannot report displays at all"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/application.rs \u2014 a_window_is_put_back_where_it_was_left (a remembered geometry wins over the manifest, and closing writes the platform's geometry back), a_window_with_nothing_remembered_uses_the_manifest and a_remembered_place_on_a_display_that_is_gone_lands_on_one_that_exists, which asks the real host for the real displays, all in real windows"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/application.rs \u2014 a_remembered_geometry_no_window_could_have_is_ignored: a stored size below the minimum is ignored rather than handed to the platform; crates/ncui-webview/src/request.rs \u2014 the bounds case above"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs \u2014 app.window_state_round_trip, the file write and read either side of the platform's answer, which is the part that runs on every launch whether or not the window moved"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs \u2014 a restore logs the geometry it applied, an unusable remembered geometry is warned about by path, and a geometry the host cannot report is logged at debug rather than silently dropped"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs \u2014 app.window_restores counts every launch that was put back where it was left, so an application whose window stopped being remembered is visible"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/request.rs \u2014 WindowGeometry states why the geometry is a value and when it is usable; crates/ncui-runtime/src/application.rs \u2014 the helpers state why the state file is input, why a damaged one is ignored, and why the path must be known before the window exists; docs/adr/ADR-014-application-layer.md \u2014 the application layer's account of it"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs \u2014 the remembered geometry is treated as input: a size outside the port's bounds is refused before a window is asked for, and a file that cannot be read or parsed is ignored rather than fatal; the state path is derived from the application's name with every character that is not alphanumeric, a dash or an underscore replaced, so a name cannot be a path"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/lib.rs \u2014 WebViewBackend::geometry defaults to None, so a backend that cannot report a geometry says so rather than guessing; crates/ncui-runtime/src/application.rs \u2014 launch_with takes where the state lives, because the restore happens while the window is being created and a path set afterwards would be a path the window was never built from"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "app.page_state",
+      "summary": "A page's own memory: bounded key-value preferences, stored per application in the user's state directory and readable by the next run.",
+      "status": "complete",
+      "crates": [
+        "ncui-runtime"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/page_state.rs \u2014 7 unit tests: what a page saves is what it reads back (including structured values and a replacement that says it replaced), a second run reads what the first wrote, a key that is not a key is refused, a value over its bound is refused before anything is written, a store at its key bound refuses one more while still allowing replacement, removal reports whether it removed, and a state file that cannot be read is treated as empty"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/application.rs \u2014 a_page_preference_survives_a_restart: a real page stores a preference through the bridge, the application shuts down, and a second application with the same state directory reads it back"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/application.rs \u2014 a_page_cannot_store_what_the_store_will_not_hold: an empty key, a value over its bound and a missing key each reach the page as a refusal with the code and the bound that produced it; crates/ncui-runtime/src/page_state.rs \u2014 a_state_file_that_cannot_be_read_is_treated_as_empty"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs \u2014 app.state_round_trip, the store and read of one preference, which is the figure that decides whether a page can save on every keystroke or should coalesce"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/page_state.rs \u2014 a state file that cannot be read, or that is larger than the store will read, is warned about by path with the reason, so a preference that stopped surviving a restart is visible rather than silent"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs \u2014 app.state_writes counts every save, so a page writing a preference on every keystroke is visible; PageState::writes exposes the same number to a caller"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/page_state.rs \u2014 the module documentation states the shape, what is refused, and why a damaged file means nothing; docs/adr/ADR-014-application-layer.md \u2014 the application layer's account of the two files an application keeps about itself"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/page_state.rs \u2014 a key is bounded and may not carry a control character, an empty key is refused rather than treated as the whole store, each value is bounded, the whole document is bounded, and the file lives in the user's own state directory under the application's name; the store is a JSON object rather than a directory tree, so a key cannot name a path at all"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/page_state.rs \u2014 open, save, load, remove and keys are the whole surface, and load returns an answer for a missing key rather than an error, because \"the user has not chosen yet\" is a state and not a failure; crates/ncui-runtime/src/application.rs \u2014 the three commands require no capability, and say why"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "webview.window_places",
+      "summary": "A page names a window it opens, and the runtime remembers where that window was: the place is applied when the window is created, written down when it closes, and read back on the next run.",
+      "status": "complete",
+      "crates": [
+        "ncui-webview",
+        "ncui-runtime"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window.rs \u2014 20 unit tests, five of them about remembered places: a_remembered_window_is_put_back_where_it_was (a name that was remembered is what the page gets back, and a name that was not is nothing), a_place_on_a_display_that_is_gone_is_moved_onto_one_that_exists (the remembered size is kept and the position lands on a display that exists), closing_a_remembered_window_writes_its_place_down, a_window_that_is_not_a_place_is_not_written_down (a geometry no window could have is not remembered at all), and a_places_file_that_cannot_be_read_is_no_memory"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/window_actions.rs \u2014 17 tests, of which a_window_a_page_names_is_remembered_and_reopened_where_it_was is the whole loop: the runtime is told where places live and what the file held, the page opens a window under a name through the real seam and dispatch table, the window is created at the remembered place, and closing it writes down the place the platform reported"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/window_actions.rs \u2014 a_remember_name_that_is_not_a_name_is_refused: an empty name, a blank one, one with a control character, one over its bound and one that is not a string are each refused with a validation error and no window; crates/ncui-runtime/src/window.rs \u2014 a_places_file_that_cannot_be_read_is_no_memory: a damaged file is no memory rather than a failure to open a window"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs \u2014 app.window_places_round_trip, the read of the file holding every place plus the lookup by name, which is what a page pays at launch and on every open"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window.rs \u2014 a places file that cannot be parsed is warned about by path with the reason, and a file that cannot be written is warned about by path; crates/ncui-runtime/src/dispatch.rs \u2014 opening a window logs the name it was remembered under, so a window that stopped being remembered is visible in the trace"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 window.remembered counts every window opened under a name, so an application whose named windows stopped being remembered shows as a count that stopped rising"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window.rs \u2014 the Windows state documents why the name belongs to the page, why the place is read once rather than at every lookup, and why a damaged file means nothing; the create_window action's own summary names `remember`, so a page discovers it through the same describe call it uses for every other action; docs/adr/ADR-014-application-layer.md \u2014 the application layer's account of the files it keeps about itself"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window.rs \u2014 a place is read as input: a geometry no window could have is never written down, a damaged file is treated as no memory, and the file is written under the application's own state directory; crates/ncui-runtime/src/dispatch.rs \u2014 the name is bounded at 128 bytes and may not be empty or carry a control character, so it can be neither a path nor a line break in the file a person reads, and the remembered place goes through the same WindowRequest builders the registry validates every other window with"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window.rs \u2014 remember_windows_in, place_for, remember_place and save_places are the whole surface, and place_for returns an answer for an unknown name rather than an error, because \"nobody remembered this name\" is a state and not a failure; ncui.window.create gains one optional parameter and a page that omits it is unaffected"
+        }
+      },
+      "platforms": {
+        "linux": "verified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "webview.window_presentation",
+      "summary": "A window can be made fullscreen, maximised, minimised, shown or hidden, or focused \u2014 by its manifest when it is created, or by the page it holds at run time \u2014 and the runtime reports what the platform says rather than what it asked for, including the frame the platform draws: whether it is decorated, whether the user may resize it and whether it floats. A page is told when its window is resized or moved, through `resized` and `moved` events, so it can lay itself out for the size it has rather than the one it was built with.",
+      "status": "complete",
+      "crates": [
+        "ncui-webview",
+        "ncui-webview-wry",
+        "ncui-runtime",
+        "ncui-app"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/request.rs \u2014 15 unit tests, two of them about presentation: a_presentation_payload_names_at_most_one_change (no change is a read, one change is that change, hiding is a change like any other, and two changes \u2014 including minimising and hiding, which are different requests \u2014 and `focus: false` and a non-boolean are each refused with the field that produced them) and a_request_carries_a_presentation_and_survives_the_wire (fullscreen and maximized round-trip, and a request that names neither is windowed); crates/ncui-runtime/src/window.rs \u2014 20 unit tests, four about this: a_window_reports_the_presentation_its_platform_reports (a change the runtime never asked for is still reported, because the user is the one who maximises windows, and the frame \u2014 decorated, always on top, resizable \u2014 is reported the same way, from the platform rather than from the last shape), changing_a_presentation_reports_the_answer_after_the_change (which hides and shows a window as well as taking it fullscreen and giving it back), a_window_whose_engine_cannot_report_its_presentation_says_so, and changing_the_presentation_of_an_unknown_window_is_a_refusal; crates/ncui-webview-wry/src/host.rs \u2014 a_resize_and_a_move_are_sent_to_the_page_as_events pins the wire shape of the two events a page reads"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/application.rs \u2014 34 tests, of which a_page_changes_the_presentation_of_the_window_it_is_in drives the whole path in a real window: the page asks through the injected bridge, the seam injects the caller's own window, the runtime asks the engine, the engine asks the platform, and the page records what the platform said, a_real_window_can_be_hidden_and_shown_again hides a real window and reads the platform's answer and then shows it again, so visibility is the platform's fact rather than the runtime's memory, and a_real_window_reports_the_frame_its_shape_asked_for makes a real window float and unresizable and reads both back, so the frame is the platform's answer rather than the runtime's memory of the shape, and a_page_hears_its_own_window_resized resizes a real window and waits for the page to report the resized event back through a native command, so the event is evidenced by what the page heard rather than by what the host sent; crates/ncui-runtime/tests/window_actions.rs \u2014 17 tests, of which a_page_changes_the_presentation_of_its_own_window covers the same path with the seam's dispatch table and the metric"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/window_actions.rs \u2014 a_presentation_request_that_names_more_than_one_change_is_refused (two changes at once, `focus: false`, and a non-boolean each reach the page as a validation error naming the field), a_page_cannot_change_the_presentation_of_a_window_it_does_not_own (a page naming another window changes its own and leaves the named one untouched), and a_page_without_the_window_capability_cannot_change_a_presentation; crates/ncui-webview/src/request.rs \u2014 the refusal cases above"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs \u2014 webview.window_presentation_parse, the rule that reads a change off a caller's payload, which is the part that runs on every call and whose input a hostile caller controls; the engine round trip is what dominates a real call and needs a window, so it is not measurable in the harness"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 a change that was applied is logged with the window, the field that changed and the state the platform reported afterwards, so a window that stopped going fullscreen is visible rather than silent"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 window.state_changes counts every presentation change, so an application whose window stopped being maximised shows as a count that stopped rising"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/request.rs \u2014 WindowState states why the presentation is reported rather than remembered and why being on screen is a fact of its own rather than a reading of `minimized`, and WindowChange states why the set is closed; the window_state action's own summary names the five changes and states that the answer reports the frame the platform draws \u2014 decorated, resizable, always on top \u2014 as the platform has it, so a page discovers both through the same describe call it uses for every other action, and the same summary names the `resized` and `moved` events a page listens for; protocols/jsonrpc/README.md \u2014 the parameters table lists `fullscreen`, `maximized`, `minimized`, `visible` and `focus` as the one change `ncui.window.state` may name, which the conformance gate checks against the runtime's source; docs/adr/ADR-014-application-layer.md \u2014 the application layer's account of the options a window carries"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window.rs \u2014 the action is declared with targets_caller_window, so the window a page changes is taken from the call's origin and a payload that names another window is overwritten rather than honoured, exactly as close_window does; the capability is `window`, which is not in the default page grant; crates/ncui-webview/src/request.rs \u2014 at most one change per request, `focus: false` refused, and a non-boolean refused, so a payload cannot ask for two contradictory things or for a state nobody can promise"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/lib.rs \u2014 WebViewBackend::window_state and set_window_state both default to None, so an engine that cannot ask the platform says so rather than reporting a default as if it were the screen, and the Box<T> blanket impl forwards both; crates/ncui-runtime/src/window.rs \u2014 Windows::window_state answers `None` for an engine that cannot report while set_window_state refuses an unknown window, because \"no such window\" and \"the engine cannot do that\" are different facts crates/ncui-webview-wry/src/host.rs \u2014 the wait for an answer is its own budget (ENGINE_REQUEST_TIMEOUT, two seconds) rather than the geometry's half second, because the engine is process-wide and shared: a request can queue behind another window's platform call, and a platform call takes longer than a frame, so too short a budget would report \"the engine cannot do that\" for a window whose engine was merely busy"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "webview.window_shape",
+      "summary": "A page changes how its own window looks while it runs: its title, where it sits, how big it is, whether it floats and whether the user may resize it \u2014 naming only the fields it wants changed, and with the window's own record updated only after the platform took the change.",
+      "status": "complete",
+      "crates": [
+        "ncui-webview",
+        "ncui-webview-wry",
+        "ncui-runtime"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/request.rs \u2014 15 unit tests, two of them about shapes: a_shape_names_something_and_holds_together (a shape that names nothing, a blank title, half a position, half a size and a size a window may not be created at are each refused with the field that produced them) and a_shape_carries_only_what_it_names (a field the caller did not name is absent, so the window keeps what the user left it as); crates/ncui-runtime/src/window.rs \u2014 20 unit tests, three about this: reshaping_a_window_records_what_it_became, reshaping_a_window_whose_engine_cannot_is_a_refusal (the record must not report a title the platform never took) and reshaping_an_unknown_window_is_a_refusal"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/application.rs \u2014 34 tests, of which a_page_reshapes_the_window_it_is_in drives the whole path in a real window and then asserts on the platform's own answer: the geometry the host reports is the size the page asked for, not the number the page sent; crates/ncui-runtime/tests/window_actions.rs \u2014 17 tests, of which a_page_reshapes_the_window_it_is_in covers the same path through the seam's dispatch table and asserts the window list reports the window that exists"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/window_actions.rs \u2014 a_shape_that_names_nothing_or_half_of_something_is_refused (an empty payload, a blank title, half a position, half a size, a size below the minimum and a non-boolean each reach the page as a validation error naming the field) and a_page_cannot_reshape_a_window_it_does_not_own (a page naming another window reshapes its own and leaves the named one's title untouched); crates/ncui-webview/src/request.rs \u2014 the refusal cases above"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs \u2014 webview.window_shape_validate, the rule that says a shape holds together, which is the part that runs on every reshape and whose input a hostile caller controls; the engine round trip dominates a real call and needs a window, so it is not measurable in the harness"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 a reshape that was applied is logged with the window, the title it now carries and its new size, so a window that stopped being renamed is visible rather than silent"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 window.reshapes counts every reshape, so an application whose window stopped changing shape shows as a count that stopped rising"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/request.rs \u2014 WindowShape states why a field the caller did not name is left alone and why a shape that names nothing is refused; the window_shape action's own summary names every field it takes, so a page discovers them through the same describe call it uses for every other action; docs/adr/ADR-014-application-layer.md \u2014 the application layer's account of what a window can be asked to become"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window.rs \u2014 the action is declared with targets_caller_window, so the window a page reshapes is taken from the call's origin and a payload that names another window is overwritten rather than honoured, exactly as close_window and window_state do; the capability is `window`, which is not in the default page grant; the position and size are bounded by the same readers a window request uses, so a page cannot place a window where no display could be, and a title is bounded by the transport that carries it"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/lib.rs \u2014 WebViewBackend::set_window_shape defaults to false, so an engine that cannot reshape a window says so rather than reporting a change it did not make, and the Box<T> blanket impl forwards it; crates/ncui-runtime/src/window.rs \u2014 the window's own record is written only after the platform took the shape, so ncui.window.list reports the window that exists rather than the one that was asked for crates/ncui-webview-wry/src/host.rs \u2014 the wait for an answer is its own budget (ENGINE_REQUEST_TIMEOUT, two seconds) rather than the geometry's half second, because the engine is process-wide and shared: a request can queue behind another window's platform call, and a platform call takes longer than a frame, so too short a budget would report \"the engine cannot do that\" for a window whose engine was merely busy"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "gpu.island_compositing",
+      "summary": "A GPU island is a region of a page: the runtime serves a rendered frame on the page's own origin, the page draws it into a canvas, and the browser composites it with the rest of the document. The pixels cross the CPU \u2014 one readback per frame \u2014 and an island's content is either one colour or a list of rows, laid out by the island model itself.",
+      "status": "complete",
+      "crates": [
+        "ncui-gpu-renderer",
+        "ncui-app",
+        "ncui-runtime"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-gpu-renderer/tests/island_pixels.rs \u2014 3 tests: an_island_is_handed_over_as_the_pixels_the_gpu_drew (the colour is where the island was and everything else is transparent, so the page shows through), an_island_larger_than_the_bound_is_refused_rather_than_transferred, and a_frame_with_a_rectangle_that_is_not_one_is_refused; crates/ncui-app/tests/assets.rs \u2014 18 tests, three about the route mechanism: a_route_answers_a_path_the_runtime_serves_itself (the responder is handed the whole target, query included), a_route_wins_over_a_file_at_the_same_path, and a_path_a_route_does_not_claim_is_still_served_from_the_filesystem"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/islands.rs \u2014 11 tests over real HTTP on a real GPU: a_page_fetches_an_island_and_gets_the_pixels_the_gpu_drew (a whole frame of four bytes a pixel, the named colour inside the island and transparency outside it), a_request_that_does_not_describe_a_frame_is_not_a_frame, and the_rest_of_the_origin_is_still_the_application"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/islands.rs \u2014 a_request_that_does_not_describe_a_frame_is_not_a_frame: nine malformed requests are each refused rather than answered with a frame of the wrong shape, covering a missing field, a colour that is not four channels, an area past the bound, a side of zero, an island starting outside its frame, an island with no size, and a field nobody defined; crates/ncui-gpu-renderer/tests/island_pixels.rs \u2014 the size and rectangle refusals above"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "not measurable in the harness: a frame needs a graphics adapter and the page half needs a window, so crates/ncui-bench cannot run it. The cost is arithmetic rather than a measurement, and it is stated in docs/known-gaps.md \u2014 width times height times four bytes per frame, about a megabyte at 640x480, bounded by MAX_ISLAND_PIXELS in crates/ncui-gpu-renderer/src/island.rs"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/islands.rs \u2014 the surface documents what a request may ask for and what it costs, and a request that cannot be answered is declined rather than logged as a failure, because a machine with no adapter is a fact about the machine; crates/ncui-app/src/assets.rs \u2014 a route is reported by its prefix in the server's own Debug, so an operator can see which paths the runtime answers"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/islands.rs \u2014 one device is held behind a Mutex and created on the first request that needs one, so a burst of requests draws one at a time rather than each allocating its own frame; the device is what makes a sequence of frames cheap and a device per frame is the cost this avoids"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/islands.rs \u2014 the module states why the delivery is a route on the page's own origin rather than a custom scheme, what a page may ask for, and that the pixels cross the CPU; crates/ncui-gpu-renderer/src/island.rs \u2014 the join states the same cost and why the clear colour is transparent; docs/known-gaps.md \u2014 the capability's account of what is built and what an island draws"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/islands.rs \u2014 the request is a page's, so every field of it is bounded and required: the area by MAX_ISLAND_PIXELS, each edge by MAX_EDGE, and a field nobody defined is a refusal rather than something ignored, so a typo cannot be answered with a frame the page did not describe. Nothing on this path reaches the filesystem, spawns a process or reads the environment: the whole answer is computed from six numbers and a colour. The route is registered under the runtime's own prefix and asked before the filesystem, so an application cannot answer a request the runtime was going to serve; crates/ncui-app/src/assets.rs \u2014 the prefix is matched against the path alone, so a query string cannot reach a route the path does not name"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-app/src/assets.rs \u2014 Route and Served are the whole mechanism, and a responder that declines a path returns None rather than an empty body, because an empty body is a 200 and a page cannot tell it from a real one; AssetServer::start_with takes the routes and start delegates to it with none, so a server with no routes is the server that was there before; crates/ncui-runtime/src/islands.rs \u2014 the route is built from the surface, so the device the first request creates outlives that request"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "gpu.island_rows",
+      "summary": "An island's content is its rows: the model says where each row is drawn, the GPU draws them there, and a page can ask for a region whose content is a list of rows. What is drawn and what a pointer hits are the same geometry.",
+      "status": "complete",
+      "crates": [
+        "ncui-gpu",
+        "ncui-runtime"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-gpu/src/input.rs \u2014 36 unit tests, five of them about the layout: the_rows_an_island_draws_are_the_rows_it_hit_tests (every drawn row's centre routes to that row), a_row_the_viewport_cannot_reach_is_not_drawn (thirty rows fit a six-hundred-tall island of twenty-pixel rows, and scrolling moves which ones are returned), a_row_half_scrolled_out_is_drawn_as_its_visible_part, an_island_that_is_not_there_draws_nothing, and a_row_of_no_height_is_not_a_row_to_draw; crates/ncui-gpu/src/geometry.rs \u2014 1 test for the primitive the clipping rests on: two_rectangles_share_exactly_the_area_they_overlap"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/islands.rs \u2014 11 tests over real HTTP on a real GPU, two of them about rows: a_page_asks_for_rows_and_the_gpu_draws_them_where_the_model_says (three rows of different heights and colours are each drawn where their heights put them, and the third reaches the bottom of the island) and scrolling_the_rows_moves_which_ones_are_drawn (the scrolled-past row is not drawn, the last row has moved up by the scroll, and the frame below the island is transparent because it belongs to the page)"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/islands.rs \u2014 a_request_that_describes_two_contents_or_none_is_not_a_frame: a request naming both a colour and rows, a row of no height, a row taller than any row may be, a row whose colour is not a colour, a row with no colour, a scroll with nothing to scroll, and an empty row list are each refused rather than drawn as something the page did not describe; crates/ncui-gpu/src/input.rs \u2014 the zero-height row above"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "not measured by the harness: the layout is a walk over the rows, and what it buys is that the walk is bounded by the viewport rather than by the collection \u2014 a long list costs the same as a short one. That is a property rather than a figure, and it is asserted in crates/ncui-gpu/src/input.rs by a_row_the_viewport_cannot_reach_is_not_drawn"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/islands.rs \u2014 a request that describes no frame is declined rather than logged as a failure, because a page asking wrongly is not a fault in the runtime; crates/ncui-gpu/src/input.rs \u2014 the layout's own documentation states what it returns and why a renderer is handed the rows a person can see"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/islands.rs \u2014 the rows a request describes are bounded by MAX_ROWS and MAX_ROW_HEIGHT, and the layout returns only what the viewport reaches, so the geometry a frame carries is bounded by the viewport rather than by the row list a page sent"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-gpu/src/input.rs \u2014 visible_rows states that a row's place is what a pointer hits, which is why the layout belongs with the model rather than in a renderer; crates/ncui-runtime/src/islands.rs \u2014 the route states why it lays rows out with the model's own code; docs/known-gaps.md \u2014 the capability's account of what an island draws and what it does not"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/islands.rs \u2014 the row list is a page's, so every part of it is bounded: at most 512 rows, each at most 4096 pixels tall, each colour eight hexadecimal digits, and a request that names both a colour and rows \u2014 or neither \u2014 is refused rather than resolved by whichever the renderer drew last. Nothing on the path reaches the filesystem or the environment: the whole answer is computed from the row list and the frame's numbers"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-gpu/src/input.rs \u2014 RowPlace carries the row's index and id with its rectangle, so a renderer and an input handler can name the same row, and visible_rows takes an island by index because the host holds the islands; crates/ncui-gpu/src/geometry.rs \u2014 Rect::intersection answers None for rectangles that merely touch, because a clipped row of no height is not a row a renderer should be handed"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "runtime.deadlines",
+      "summary": "A caller's `deadline_ms` budget is enforced: a call that runs past it is answered as `-32003` with the elapsed time, a count and a warning, and a budget that is not a budget is refused rather than read as no limit.",
+      "status": "complete",
+      "crates": [
+        "ncui-runtime",
+        "ncui-core"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 26 unit tests, three of them about the deadline: a_call_that_runs_past_its_deadline_is_answered_as_having_timed_out (a cargo run given a one-millisecond budget is answered `timeout`, and request.timeouts counts it), a_deadline_that_is_not_a_budget_is_refused (zero, a year, a string and a negative number each reach the caller as a validation error naming the field), and a_call_within_its_deadline_is_not_touched"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/protocol_conformance.rs \u2014 the_specification_describes_cursor_and_deadline_consistently holds the specification to the parameter it documents, so a spec that describes a deadline the code does not honour is a failing test rather than a wrong document"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 the two refusal cases above: a call past its budget is not a success, and a budget outside the bounds is refused before the handler runs; the check never rewrites a failure as a timeout, because the failure is the more useful answer"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "not performance-sensitive: crates/ncui-runtime/src/dispatch.rs adds one clock reading at the start of a call and one comparison at the end, which is below what the harness resolves. The figure that matters for a call is its own latency, and crates/ncui-bench/benches/latency.rs measures that per method"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 a call that exceeded its budget is warned about with the method, the budget and the elapsed time, so a call that stopped meeting its deadline is visible rather than inferred from latency"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 request.timeouts counts every call that ran past the budget its caller gave it, so a method that has become slower than its callers' budgets shows as a count that rises"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "protocols/jsonrpc/README.md \u2014 the Deadlines section states the bounds, what a caller is owed, and that a handler is not interrupted; crates/ncui-runtime/src/dispatch.rs \u2014 deadline_param states why the budget is bounded at both ends"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 the budget is bounded at both ends so a caller cannot ask for a deadline that outlives the process, a value that is not a whole number of milliseconds is refused rather than coerced, and the check only turns a *success* into a timeout, so a budget cannot be used to conceal a refusal or a defect"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 the budget is read from the request's own parameters by deadline_param, so it applies to every method without each handler knowing about it, and the response carries elapsed_ms in the error the pipeline already returns"
+        }
+      },
+      "platforms": {
+        "linux": "verified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "webview.application_icon",
+      "summary": "An application names an icon file in its manifest, and the runtime reads it, decodes it into pixels and hands them to the platform's own window-creation call, so the window carries the picture the author drew.",
+      "status": "complete",
+      "crates": [
+        "ncui-runtime",
+        "ncui-webview",
+        "ncui-app",
+        "ncui-webview-wry"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/icon.rs \u2014 17 unit tests over the decoder: a 24-bit bitmap is read from its bottom row up, a top-down bitmap is read as it is stored, a 32-bit bitmap keeps the alpha it carries, an all-zero alpha channel is read as opaque, a paletted bitmap is read through its colour table, an icon directory is read at its largest image, an entry with no alpha channel takes its transparency from the AND mask, and a compressed bitmap, an unknown depth, a short file, an oversized image, a PNG entry and a file that is neither container are each refused by name"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/application.rs \u2014 34 tests over the whole application, three of them about the icon: an application whose manifest names an icon opens with it on a real window, an icon that cannot be read is refused by name, and an icon in a format the runtime cannot read is refused by name; crates/ncui-webview-wry/src/host.rs \u2014 8 unit tests, one of them a window with an icon coming up on the platform's own engine"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/icon.rs \u2014 every refusal names the format and the reason rather than guessing at bytes it does not understand: a compressed bitmap is refused by its compression method, a depth no icon uses is refused by its bit count, a PNG entry is refused by name, a file that is neither a bitmap nor an icon directory is refused as such, and a file whose bytes end early is refused as truncated"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "not performance-sensitive: the decoder runs once, when an application starts, on a file of a few hundred kilobytes at most; crates/ncui-runtime/src/icon.rs reads each row once and copies each pixel once, and the window is opened after it rather than during it"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs \u2014 the window is opened with the icon after the request carries it, and the application's own launch trace names the application and its version, so a launch that carried an icon is visible in the same trace as every other launch"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs \u2014 an icon is read once per launch, before the window opens, so the launch-time counters (app.page_calls_served and app.asset_responses_served) measure the same work they measured before an icon existed"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-app/src/manifest.rs \u2014 the icon field states that the path is relative to the application directory rather than to the assets directory, because an icon belongs to the application and is not something the page fetches; crates/ncui-runtime/src/icon.rs states which containers and depths are read and which are refused"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-app/src/manifest.rs \u2014 the icon is resolved with SafePath::resolve against the application directory, so a path that is absolute or that climbs out with `..` names no file; crates/ncui-runtime/src/icon.rs \u2014 the file is capped at four megabytes and the image at 1024 pixels an edge, so a header claiming a screen-sized picture cannot make the runtime allocate it, and the pixel count is checked against the dimensions rather than trusted"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/request.rs \u2014 the icon is a value on the window request beside the title and the size, so it travels through the port with the rest of the window's description rather than through a side channel, and a request whose icon is not a whole image is refused by the request's own validation"
+        }
+      },
+      "platforms": {
+        "linux": "verified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "gpu.island_text",
+      "summary": "A GPU island row draws its text: the machine's own font shapes the run and breaks it into lines that fit the row, each glyph's outline is rasterised into per-pixel coverage by the non-zero winding rule (so a letter's counter is a hole), and the coverage is composited over the row's pixels, which the GPU drew.",
+      "status": "complete",
+      "crates": [
+        "ncui-gpu-renderer",
+        "ncui-runtime"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-gpu-renderer/src/glyphs.rs \u2014 7 unit tests over the rasteriser: a square is covered and nothing around it is, a hole is left hollow by the winding rule, a curve is flattened and covered, two control points in a row imply a point on the curve, an outline that encloses nothing is refused, an oversized outline is refused, and the map records where it sits; crates/ncui-gpu-renderer/src/text.rs \u2014 15 unit tests over shaping, wrapping and outlines, including a_glyph_has_an_outline_of_whole_contours, a_letter_rasterises_into_coverage_with_a_hollow_counter, a_space_draws_nothing_rather_than_failing, and the five that pin wrapping: a run that fits is one line, a longer run breaks at its last space, a word wider than the box breaks between glyphs, a newline forces a break, and a box of no width is still one line"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/islands.rs \u2014 11 tests fetching frames from a live server on a real GPU, including a_row_with_text_is_drawn_with_its_letters and a_row_taller_than_one_line_wraps_its_text (the same row fetched with a text far wider than it and with a single letter; the wrapped frame's ink spans more of the row's height, which is what wrapping means): the same island is fetched twice, once plain and once with a 24-pixel letter on a 32-pixel row, and the second frame holds ink the first does not while keeping the row's own colour where the letter is not"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/islands.rs \u2014 a_row_whose_text_is_not_encoded_is_refused: a row list whose text carries a raw comma is not a row list, and the route answers 404 rather than guessing at which field the comma belonged to; crates/ncui-runtime/src/islands.rs \u2014 a row that names text on a machine with no readable font is not drawn at all (the route answers 404) rather than drawn without its text; crates/ncui-gpu-renderer/src/glyphs.rs \u2014 an outline with no area and an outline larger than the coverage bound are refused by name"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs \u2014 four scenarios over the machine's own font at 16 pixels, measured on Windows x86_64 with nine repeats: text.shape_line (a twelve-character line shaped) medians 82.6us and p99 90.8us, text.rasterise_glyph (one glyph outline into coverage) medians 8.3us and p99 9.1us, text.draw_line (a row's whole workload: shape the line and rasterise every glyph) medians 183.3us and p99 200.5us, and text.draw_line_cached (the same line with the glyphs already rasterised, which is every frame after the first) medians 76.7us and p99 83.4us. The cache is therefore measured rather than claimed: it takes a line from 183us to 77us, and what remains is shaping, which cannot be cached away because it depends on the whole line"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/islands.rs \u2014 a row that asks for text on a machine with no readable font is warned about by name, and a line that cannot be shaped is warned about with the row it belongs to, so a frame that came back without its text is visible in the log rather than inferred from a picture"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs \u2014 every island frame is a response from the asset server, and app.asset_responses_served counts them; text is part of the frame rather than a separate operation, so it is counted with the frame it belongs to instead of as a second event that would double-count a page's fetch"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "docs/known-gaps.md \u2014 the island section states that a row's text is drawn, that the rectangles are GPU-drawn while the glyphs are rasterised and composited on the CPU, why (a stencil pass draws hard edges, an analytic coverage pass is a project of its own, and the pixels cross to the CPU for the readback regardless), and the measured cost with and without the glyph cache; crates/ncui-runtime/src/islands.rs and crates/ncui-gpu-renderer/src/glyphs.rs state the row grammar and the fill rule, and crates/ncui-gpu-renderer/src/atlas.rs states why the cache is bounded rather than grown"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/islands.rs \u2014 every part of a text row is bounded before it is used: at most 512 rows, each at most 4096 pixels tall, each text at most 1024 bytes and at most 256 pixels, and the percent escapes are decoded strictly so a malformed one is refused; the font is the machine's own, found from a fixed list of paths, so a request cannot name a file; the coverage is clipped to its row and to the frame, so a glyph cannot draw outside the island it belongs to"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/islands.rs \u2014 a row is two fields (height and colour) or five (height, colour, text colour, size and percent-encoded text), so the existing request shape is unchanged for a page that draws no text; crates/ncui-gpu-renderer/src/text.rs \u2014 glyph_outline now returns the contours rather than one flat list, because which contour is a hole is a question about its direction and a flat list cannot answer it"
+        }
+      },
+      "platforms": {
+        "linux": "verified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "app.installer_file",
+      "summary": "`ncui build --installer` writes one file a user can run: the runtime binary with the bundle appended and a checked footer, which on launch extracts the bundle to a private directory, installs it with the same code `ncui install` uses, and removes the copy.",
+      "status": "complete",
+      "crates": [
+        "ncui-cli",
+        "ncui-native"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/installer.rs \u2014 7 unit tests over the format: an installer carries the bundle after the program, a runtime with no bundle has no installer, a footer that points outside the file is refused, an archive that ends early is refused, a path that leaves the directory is refused, a program that is not an installer carries no bundle, and two builds of one tree are byte-identical"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/tests/installer.rs \u2014 4 tests running the real program: an_installer_installs_the_bundle_it_carries builds an installer from a bundle, executes it with --root and --json, and asserts that the install wrote the carried files byte for byte and that the unpacked copy was removed; an_installer_refuses_an_argument_it_does_not_take asserts that an unknown flag is refused by name"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/installer.rs \u2014 a footer that names a range outside the file, an archive whose entry is longer than the bytes left, and a path that is absolute, climbs out with `..`, is empty, names a drive, a backslash or a NUL byte are each refused by name, and extraction writes nothing for any of them; crates/ncui-cli/tests/installer.rs \u2014 an installer refuses an argument it does not take"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/installer.rs \u2014 not performance-sensitive: the installer is written once per build and read once per launch. Its cost is the bundle's size copied twice \u2014 once into the installer and once out of it \u2014 which is bounded by MAX_INSTALLER_BYTES and is the same work an archive tool would do"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/main.rs \u2014 an installer whose footer cannot be read reports the reason and exits non-zero rather than falling through to the usage text, so a damaged installer is visible as itself instead of looking like a mistyped command"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/commands.rs \u2014 a build reports the installer's path in its JSON and text answer, so the artefact a build produced is recorded by the build rather than inferred from the directory; the install an installer performs is the one `ncui install` performs, and its answer is the same payload"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "docs/known-gaps.md \u2014 the build section states what the installer is, that it is the runtime with the bundle appended, how the footer is checked, that paths are refused unless they stay inside the extraction directory, and that an update path is still absent; README.md names the command"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/installer.rs \u2014 the footer is validated before anything is allocated, every archive length is checked against the bytes actually present, every path must be a plain relative path with no `..`, drive, backslash or NUL and is re-checked when it is written, the whole file is capped at 512 MiB and the entry count at 20 000, and the extracted copy lives in an owner-only directory with an unpredictable name that is removed when the install finishes"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/lib.rs \u2014 `--installer` is a flag of `build` alone, advertised in FLAG_SCOPES and scoped by the same parser as every other flag; an installer accepts `install`'s own arguments (`--root`, `--json`) and nothing else, so the program cannot be used as a general command line by accident"
+        }
+      },
+      "platforms": {
+        "linux": "verified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "app.update_path",
+      "summary": "`ncui update <directory>` replaces an installed application with another version of itself: the new bundle is staged beside the installed one, the installed directory is moved aside, the new one is moved into its place, and the old copy is removed only then \u2014 so an update that fails leaves the previous version exactly as it was.",
+      "status": "complete",
+      "crates": [
+        "ncui-native",
+        "ncui-cli"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/install.rs \u2014 14 unit tests over installing, listing, removing and updating, five of them about the update: an_update_replaces_the_files_and_leaves_nothing_behind (the files and the record are the new version's, no staging directory survives, and the application is listed once), an_update_of_something_that_is_not_installed_is_refused, an_update_that_is_not_a_bundle_leaves_the_application_alone (the old version and its files are still there and no staging is left), an_update_does_not_touch_a_different_application, and a_staging_directory_left_by_a_failed_update_is_not_an_application"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/tests/installer.rs \u2014 4 tests running the real program, including the_command_line_updates_an_installed_application: it installs version 1.0.0 with `ncui install`, updates to 2.0.0 with `ncui update`, and asserts the answer names both versions, that the installed page is the new one, and that the applications directory holds the application and nothing else"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/tests/installer.rs \u2014 the_command_line_refuses_to_update_something_that_is_not_installed, which asserts the refusal names the application; crates/ncui-native/src/install.rs \u2014 an update of a name that is not installed, an update from a directory that is not a bundle, and an update whose bundle names a different application are each refused, with the installed application left byte for byte as it was and no staging directory left behind"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/install.rs \u2014 not performance-sensitive: an update copies the bundle once and performs two renames, which is the same work as an install. It is run when a person or a script asks for it, not on any hot path, and its cost is the bundle's size rather than a rate"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/commands.rs \u2014 the update's answer carries the name, both versions, the directory and the registrations that were made or released, so what an update did is reported by the update rather than reconstructed from the file system afterwards"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/commands.rs \u2014 an update reports the versions it moved between in its JSON and text answer, which is the record a script driving an update reads to know what it replaced"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "docs/known-gaps.md \u2014 the build section states what an update does, that a failure leaves the previous version exactly as it was, that the registrations follow the swap and why, and that nothing checks for a newer version; README.md names the command and the same limitation; crates/ncui-native/src/install.rs documents the two renames and the order of the registrations"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/install.rs \u2014 the name must be one that could have been installed and must already be installed, the runtime must be a plain file name, the staging directories are siblings of the installed directory inside the root so nothing is written outside it, a staging directory left by an earlier run is removed before it is reused, a failed swap puts the old copy back rather than leaving the application absent, and the old registrations are released only after the new ones are in place"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/install.rs \u2014 update returns both the previous and the installed record, so a caller reports what it replaced rather than reading it separately and racing with itself; the name comes from the bundle rather than from the caller, because an update that took a name and a directory could replace one application with another; crates/ncui-cli/src/lib.rs \u2014 `update` takes the same `--root` as `install` and is scoped by the same parser"
+        }
+      },
+      "platforms": {
+        "linux": "verified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "native.global_shortcuts",
+      "summary": "The manifest declares global shortcuts; the runtime asks the platform for each key at launch, holds it while the application runs, releases it when the application stops, and tells the page when one is pressed \u2014 with the accelerator parsed against a closed vocabulary that refuses a bare key.",
+      "status": "complete",
+      "crates": [
+        "ncui-native",
+        "ncui-app",
+        "ncui-runtime"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/hotkey.rs \u2014 6 unit tests, one of which registers a real shortcut on the running platform and releases it: an_accelerator_is_read_into_a_modifier_set_and_a_key, a_shortcut_this_does_not_accept_is_refused_by_name, a_bare_key_is_refused_unless_it_is_a_function_key, the_vocabulary_names_what_a_shortcut_can_use, a_machine_that_cannot_register_shortcuts_says_so, and a_registered_shortcut_is_held_and_can_be_released; crates/ncui-app/src/manifest.rs \u2014 14 unit tests, including a_declared_shortcut_is_read_and_a_malformed_one_is_refused and the_example_application_s_manifest_is_one_this_accepts"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/application.rs \u2014 34 tests over the whole application, two of them about shortcuts: an_application_holds_the_shortcut_its_manifest_declares launches a real window on a manifest that names Ctrl+Alt+F13, asserts the application holds it, and asserts it is released when the application stops; the same test in a build without the feature asserts the manifest is refused instead"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/application.rs \u2014 a_shortcut_the_vocabulary_does_not_know_is_refused_at_launch, which asserts the refusal names both the key and the command it belonged to; crates/ncui-native/src/hotkey.rs \u2014 an unknown modifier, an unknown key, a repeated modifier, an empty accelerator and a bare non-function key are each refused by name, and registering the same combination twice is refused by the application rather than handed to the platform twice"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/hotkey.rs \u2014 not performance-sensitive: a shortcut is registered once at launch, released once at shutdown, and polling for a press is a non-blocking read of a channel that is empty almost every turn. The cost is a channel read per pump, which is below what the harness resolves"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs \u2014 the launch logs how many shortcuts the application holds, each press is logged with the accelerator and the command, and a press that could not be delivered to the page is warned about rather than dropped silently"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs \u2014 app.shortcuts_pressed counts every press the runtime delivered, so a shortcut that has stopped reaching the page shows as a count that has stopped rising while the key is still held"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "docs/known-gaps.md \u2014 the capability table records global shortcuts as implemented and the paragraph after it states what is declared, why a page cannot register one, and what the vocabulary accepts and refuses; docs/adr/ADR-012-dependency-policy.md records the dependency as the sixth exception with the reasoning and the measured tree; README.md names the capability; examples/counter declares a shortcut and its page acts on the event"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/hotkey.rs \u2014 the accelerator vocabulary is closed and refuses a bare key unless it is a function key, because a bare key registered globally is a key taken from every other application on the machine; a duplicate registration is refused here rather than left to the platform; a registration the platform refuses is reported with the platform's own reason; crates/ncui-runtime/src/application.rs \u2014 shortcuts come from the manifest, so a page cannot take a key, and they are released when the application stops rather than held by a process that has stopped serving"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-app/src/manifest.rs \u2014 a shortcut is an accelerator and a command name, and the accelerator's shape is checked where the manifest is read while its meaning is checked where it is used, because the vocabulary lives with the platform binding; crates/ncui-runtime/src/application.rs \u2014 the page hears a `shortcut` event carrying the command name, so what a press does stays the application's decision; crates/ncui-native/src/hotkey.rs \u2014 Shortcuts::register returns the shortcut it registered, so a caller reports what was taken rather than re-parsing it"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "webview.tray_icon",
+      "summary": "The manifest declares a tray icon \u2014 an image and a tooltip \u2014 and the host creates it on the engine's own thread: a click brings the application's window forward and tells its page, so an application whose window is closed or hidden is still one a user can reach.",
+      "status": "complete",
+      "crates": [
+        "ncui-webview",
+        "ncui-webview-wry",
+        "ncui-app",
+        "ncui-runtime"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/tray.rs \u2014 1 unit test over what a platform will accept: a tray whose image is not a whole buffer, whose tooltip says nothing, or whose tooltip is longer than a platform shows is refused, and one at the limit is accepted; crates/ncui-app/src/manifest.rs \u2014 14 unit tests, including a_tray_icon_is_read_and_a_malformed_one_is_refused, which covers an image outside the application, an absolute path, an empty image, a blank tooltip and a missing tooltip"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/application.rs \u2014 34 tests over the whole application, two of them about the tray: an_application_shows_the_tray_icon_its_manifest_declares launches a real window on a manifest that names an image, and the launch succeeds only if the platform accepted the tray \u2014 a refusal is a launch error; the same test in a build without the feature asserts the manifest is refused instead"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/application.rs \u2014 a_tray_icon_that_cannot_be_read_is_refused_by_name: a manifest naming an image that is not there is refused with the path, and so is one naming a file that is not an image; crates/ncui-app/src/manifest.rs \u2014 a tray whose image leaves the application or whose tooltip is blank is refused by name; crates/ncui-webview/src/tray.rs \u2014 an image that is not whole is refused rather than handed to a platform that would read past its end"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-webview-wry/src/host.rs \u2014 not performance-sensitive: the tray is created once when the application launches and removed once when it stops. The work per click is one event through the loop and one script evaluation in the page, and the watcher thread blocks on the platform's channel rather than polling, so an idle application spends nothing on it"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs \u2014 the launch logs that the application shows a tray icon, and a tray that cannot be created fails the launch with the reason rather than leaving an icon that never appears; crates/ncui-webview-wry/src/host.rs \u2014 a tray whose clicks cannot be watched is refused, because the icon would be a picture that does nothing when it is clicked"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/application.rs \u2014 app.trays_shown counts the applications that put an icon in the tray, so an operator can see how many of the running applications a user can reach without finding a window"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "docs/known-gaps.md \u2014 the capability table records the tray icon as implemented and the paragraph after it states where it is created, why a thread carries its events, and that the image is decoded before it reaches the host; docs/adr/ADR-012-dependency-policy.md records the dependency as the seventh exception with the reasoning; README.md names the capability; crates/ncui-webview/src/tray.rs states what travels through the port and why"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-app/src/manifest.rs \u2014 the tray's image is resolved with SafePath::resolve against the application directory, so a path that is absolute or climbs out with `..` names no file; crates/ncui-webview/src/tray.rs \u2014 the image must be a whole buffer and the tooltip is bounded, both checked before anything reaches the platform; crates/ncui-webview-wry/src/host.rs \u2014 the tray is built on the thread that owns the platform's event loop, the watcher thread is started once per process so two readers cannot split the platform's events, and a click that arrives after the tray was removed is ignored rather than acted on"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/tray.rs \u2014 the port carries the decoded image rather than a path, so a host never reads a file and the same request means the same pixels on every platform; crates/ncui-webview/src/lib.rs \u2014 set_tray is one method on the backend, asked through a window because a window is the handle to the engine that owns the loop; crates/ncui-runtime/src/window.rs \u2014 set_tray reports a platform refusal as a rejection rather than as success"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "app.bundle_verification",
+      "summary": "A bundle's `bundle.json` names every file with its size and SHA-256, and an install or an update checks what it copied against those records: a file that is not what the bundle says, or one the bundle does not name, is refused \u2014 and for an update the check happens on the staged copy, so a damaged bundle cannot replace a version that is intact.",
+      "status": "complete",
+      "crates": [
+        "ncui-native",
+        "ncui-cli"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/install.rs \u2014 14 unit tests over installing, listing, removing and updating, three of them about verification: a_bundle_whose_file_is_not_what_it_says_is_refused (a tampered page is refused, nothing is installed and no directory is left), a_bundle_holding_a_file_it_does_not_name_is_refused (an extra file was never checked, so it is not installed either), and an_update_from_a_damaged_bundle_leaves_the_installed_version_alone (the staged copy is checked before anything is moved, and no staging survives)"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/tests/installer.rs \u2014 4 tests running the real program, which build their bundles with the records the bundler writes and install, update and uninstall through the command line, so the whole path is exercised against a bundle that carries digests"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/install.rs \u2014 a file whose size differs, a file whose digest differs, a file the bundle names and which is not there, and a file the bundle does not name are each refused by name with the reason; an install removes what it copied rather than leaving a half-installed application, and an update leaves the previous version exactly as it was"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/install.rs \u2014 the cost is one pass over the bundle's files reading each once to hash it, which is the same order as the copy that precedes it and is paid once per install or update rather than on any hot path. The bundler already hashes the same files when it writes the records, so the work is not new to the system"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/commands.rs \u2014 a refused install or update reports the file and what is wrong with it through the command's own answer, and crates/ncui-native/src/install.rs names the path in every refusal, so the person reading it knows which file to replace"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/commands.rs \u2014 an install and an update each report their answer as JSON, which is what a script driving them reads; a refusal exits non-zero with the reason rather than reporting a success, so a deployment that did not happen cannot be mistaken for one that did"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/install.rs \u2014 the module doc states what an install is and the verification states why both halves matter (a file that is not what the bundle says, and a file the bundle does not name); docs/known-gaps.md records that the bundle's own manifest cannot name itself and is therefore the one file the check does not cover, and that what makes a bundle from elsewhere trustworthy is its transport"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/install.rs \u2014 the records are required rather than optional, so a bundle that does not say what its files are is refused instead of installed unverified; the digest is compared case-insensitively as hex; a file the bundle does not name is refused because nothing has checked it; and for an update the check runs on the staged copy before the swap, so a damaged bundle cannot take the place of an intact one. The one file not covered is the bundle's own manifest, which cannot name itself \u2014 recorded rather than glossed over"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-native/src/install.rs \u2014 the records live in the manifest the installer already read, so no new parameter is needed and a caller cannot forget to verify; the registration pass that install and update shared was extracted into one function while this was added, so the two paths cannot drift"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "app.update_from_release",
+      "summary": "`ncui update --from <url>` fetches a release document \u2014 the application, the version, the bundle's URL and its SHA-256 \u2014 then fetches the bundle, checks it against that digest, unpacks it and applies it through the same verified path as an update from a directory.",
+      "status": "complete",
+      "crates": [
+        "ncui-cli",
+        "ncui-native"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/release.rs \u2014 2 unit tests over the document and the apply: a_release_document_is_read_and_a_malformed_one_is_refused covers five malformed documents (not JSON, no application, no version, no URL, a digest that is not a SHA-256), and a_download_that_is_not_what_the_document_said_is_refused covers a file whose digest is not the one named and a release for another application"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/tests/release.rs \u2014 2 tests running the real command line against a real server: an_application_is_updated_from_a_release_it_fetches installs 1.0.0 from a bundle on disk, publishes 2.0.0 as an archive with a release document served by the runtime's own asset server over loopback, runs the update against that loopback release, and asserts the answer names both versions, that the installed page is the fetched one, and that the fetch left no scratch directory behind"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/tests/release.rs \u2014 a_release_that_is_not_what_it_promised_is_refused serves a document whose digest is of something else and asserts the update fails with the reason and that the installed version and its files are untouched; crates/ncui-cli/src/release.rs \u2014 a malformed document, a release for another application, and a download that does not match are each refused by name; crates/ncui-cli/src/commands.rs \u2014 a command line that names both a directory and a URL is refused rather than choosing one"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/release.rs \u2014 not performance-sensitive: an update is run when a person or a script asks for it, and its cost is the bundle's size over the network. The two hashing passes (the transport digest and the installer's per-file records) are the same order as the download itself and are bounded by MAX_BUNDLE_BYTES"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/commands.rs \u2014 the answer names the release URL, both versions and the registrations that were made or released, so a script driving an update records where the version came from rather than only what it became; every refusal names the URL or the file it concerns"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/commands.rs \u2014 an update from a release reports the same payload an update from a directory does, with the release URL added, and exits non-zero on a refusal, so a deployment that did not happen cannot be mistaken for one that did"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "docs/known-gaps.md \u2014 states what a release document names, the two checks that follow from it, that a release for another application or a download that does not match is refused with the installed version left alone, that nothing checks automatically, and that the transport is the platform's own `curl`; README.md names the command and the same limitation; crates/ncui-cli/src/release.rs states why neither check is redundant"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/release.rs \u2014 the fetch runs with a scrubbed environment, the same as every other spawned command in this workspace; both the document and the bundle are bounded by `--max-filesize` and checked again after arrival, so a server that ignores the limit is stopped rather than filling the disk; the transport digest is checked before anything is unpacked and the bundle's own per-file records are checked by the installer afterwards, so a compromised document is not enough to install arbitrary files; the bundle is unpacked into an owner-only directory with an unpredictable name that is removed when the update ends; and a release naming another application is refused before anything is hashed"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-cli/src/lib.rs \u2014 `--from` is a flag of `update` alone, and the positional is optional with it while `update <dir> --from <url>` is refused as naming two sources; crates/ncui-cli/src/release.rs \u2014 `apply` takes the installed application's name from the caller rather than trusting the document, and crates/ncui-cli/src/installer.rs \u2014 write_archive publishes the same archive an installer carries, so a release pipeline cannot produce something the installer would not accept"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
+    },
+    {
+      "id": "webview.window_theme",
+      "summary": "A page can ask whether the platform is drawing its interface light or dark, and is told when it changes: the answer comes from the platform rather than from the runtime, and a backend that cannot ask reports nothing rather than guessing.",
+      "status": "complete",
+      "crates": [
+        "ncui-webview",
+        "ncui-webview-wry",
+        "ncui-runtime"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window.rs \u2014 20 unit tests over the window surface, including the_platforms_theme_is_reported_and_an_engine_that_cannot_say_says_so, which covers a backend that reports dark, a backend that cannot report a theme at all, and a window that does not exist; crates/ncui-webview/src/request.rs \u2014 15 unit tests over the window's value types, including the theme's own spelling on the wire"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/application.rs \u2014 34 tests over the whole application, including the_window_reports_the_platforms_theme: it launches a real window and asserts the theme that comes back is one of the two, so the answer is the platform's and not the test's; crates/ncui-runtime/src/dispatch.rs \u2014 the advertised-method and role tests drive `ncui.window.theme` through the pipeline with a window that exists, so the method is exercised as an agent would call it"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 a window whose engine cannot ask the platform is refused with a conflict rather than answered \"light\", because the second is a claim about the user's machine that nothing checked; crates/ncui-runtime/src/window.rs \u2014 a window that does not exist reports nothing, which is the other `None`, and a backend that cannot ask is the same; crates/ncui-webview-wry/src/host.rs \u2014 a theme this runtime does not know is not mapped to one it does, so an open platform enum cannot make a page follow a setting the user does not have"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-webview-wry/src/host.rs \u2014 not performance-sensitive: reading the theme is one message to the engine thread and one call to the platform, with the same bounded wait the geometry uses. It is asked when a page wants to know, not on any hot path, and a change is pushed to the page rather than polled"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 a page that asks which theme the platform is drawing is logged at debug with the window and the answer, so a page that asks repeatedly is visible; the host's own failure to read the theme is what the conflict carries back to the caller"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 every page action goes through the dispatch pipeline, which audits it and records per-method timing when profiling is on, so a page asking for the theme is counted and timed like any other method rather than being a path around the pipeline"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "docs/known-gaps.md \u2014 the window section states that a page asks for the theme and is told when it changes, and that a backend which cannot ask reports nothing; README.md names the capability; crates/ncui-webview/src/request.rs states why the theme is reported rather than chosen, and crates/ncui-webview-wry/src/host.rs states why an unknown theme is not mapped"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window.rs \u2014 asking requires the `window` capability, the same as every other action about a page's window, so an application decides whether its pages may read it; the answer is a fact about the machine's appearance and nothing else \u2014 no path, no identifier, no content; crates/ncui-webview-wry/src/host.rs \u2014 the theme is read from the window the caller owns, so one window cannot ask about another's"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/request.rs \u2014 the theme is a closed value type that serialises as a name, so a page and an agent read the same two words; crates/ncui-webview/src/lib.rs \u2014 one method on the backend, defaulting to \"cannot say\" so a host that has no platform theme is not forced to invent one; crates/ncui-runtime/src/window.rs \u2014 the seam action carries the method, the capability and the summary, so the page's introspection lists it like every other action"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      }
     }
   ]
 }

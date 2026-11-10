@@ -11,7 +11,7 @@ authors = ["NC-UI Contributors"]
 [lints]
 workspace = true
 
-# No dependencies. The compositing boundary's decision logic is self-contained: hit testing and
-# routing need nothing from ncui-core. `ncui-a11y`'s semantic tree is NOT yet wired in, which is
-# part of why `gpu.islands` stays `not_implemented` — see docs/remaining-work.md.
+# `ncui-a11y` supplies the semantic tree that ADR-002 requires for the accessibility arm
+# of the input contract. ADR-011 permits the dependency (layer 2 -> layer 1).
 [dependencies]
+ncui-a11y = { workspace = true }

@@ -17,7 +17,7 @@ use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use ncui_core::{Limits, LimitsBuilder};
+use ncui_core::{Capability, CapabilitySet, Limits, LimitsBuilder};
 use ncui_runtime::Runtime;
 use ncui_runtime::agent::AgentSession;
 use ncui_runtime::rpc::{Request, Response};
@@ -384,9 +384,34 @@ fn a_capability_the_role_lacks_is_denied_across_the_socket_too() {
 }
 
 #[test]
+fn an_observer_may_list_windows_and_a_host_is_needed() {
+    let harness = Harness::start(AgentRole::Observer);
+    let response = harness.call("ncui.window.list", json!({}));
+    // The Observer holds inspect.runtime, so the call is authorized; with no host
+    // installed the runtime answers not_found rather than capability_denied.
+    let error = response.error.expect("no host is installed");
+    assert_eq!(error.data.ncui_code, "not_found", "{error:?}");
+}
+
+#[test]
 fn a_destructive_call_with_consent_is_served() {
     let harness = Harness::start(AgentRole::Administrator);
-    let response = harness.call("ncui.logs.purge", json!({ "consent": true }));
+    // The legacy `consent: true` authorizes nothing destructive; the token is the consent.
+    // It is minted by the runtime the server shares, bound to the method and its capability.
+    let mut runtime = harness.runtime.lock().expect("runtime lock");
+    let correlation = ncui_core::CorrelationId::new();
+    let token = runtime
+        .mint_consent(
+            correlation,
+            "ncui.logs.purge",
+            CapabilitySet::empty().with(Capability::ReadLogs),
+        )
+        .expect("mint");
+    drop(runtime);
+    let response = harness.call(
+        "ncui.logs.purge",
+        json!({ "consent_token": token.to_value() }),
+    );
     assert!(response.error.is_none(), "got: {:?}", response.error);
 }
 

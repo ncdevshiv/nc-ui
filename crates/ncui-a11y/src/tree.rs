@@ -15,6 +15,8 @@
 
 use core::fmt;
 
+use crate::IslandDescriptor;
+
 /// The ARIA role of a node, reduced to the roles this runtime emits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Role {
@@ -272,6 +274,38 @@ impl SemanticTree {
             render(root, 0, &mut out);
         }
         out
+    }
+
+    /// Merges a GPU island's nodes into the tree.
+    ///
+    /// ADR-002 requires a GPU island to be reachable by a keyboard and a screen reader, and
+    /// this is where that requirement is met: the island's nodes become nodes of the host's
+    /// tree, so they are in the same focus ring as everything else rather than in a
+    /// parallel one the user cannot escape.
+    ///
+    /// The island becomes a group node carrying the island's label, and the island's own
+    /// nodes become its children. The island's `order` places it among its siblings, so an
+    /// island's position in the page is its position in the tree.
+    ///
+    /// Returns whether the island was merged. An island that is not reachable — one with an
+    /// unnamed focusable inside it, or with no label of its own — is refused: compositing it
+    /// would put a focusable control in the tree that the user cannot hear, which is the
+    /// failure this crate exists to prevent.
+    pub fn merge_island(&mut self, island: &IslandDescriptor) -> bool {
+        if !island.is_reachable() {
+            return false;
+        }
+        let group = Node::with_children(Role::Group, &island.label, island.order, false);
+        let mut group = group;
+        for node in &island.nodes {
+            group = group.child(node.clone());
+        }
+        let at = self
+            .roots
+            .binary_search_by_key(&island.order, |r| r.order)
+            .unwrap_or_else(|index| index);
+        self.roots.insert(at, group);
+        true
     }
 }
 

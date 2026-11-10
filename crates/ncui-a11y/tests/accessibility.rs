@@ -143,7 +143,8 @@ fn shift_tabbing_all_the_way_round_returns_to_the_start() {
     }
     assert!(
         closed,
-        "stepping backwards {count} times from the last node never returned to it, so the          reverse ring does not close"
+        "stepping backwards {count} times from the last node never returned to it, so the \
+         reverse ring does not close"
     );
 }
 

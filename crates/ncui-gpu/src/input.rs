@@ -7,19 +7,17 @@
 //! [`InputContract`] enumerates those eleven, and [`IslandHost::satisfied_contracts`] reports
 //! which of them a given host can actually demonstrate, by *driving* the host and observing an
 //! effect that item alone could produce. An implementation that drops IME is reported as missing
-//! IME rather than assumed complete, and an item that cannot yet be demonstrated — accessibility,
-//! because no semantic tree is built — is reported unsatisfied rather than claimed.
+//! IME rather than assumed complete.
 //!
-//! It is queried by this crate's tests; **no registry, CLI command or policy tool reads it
-//! yet**, so treat it as an in-crate capability report rather than a release gate. Wiring it to
-//! the feature registry as ADR-002 evidence for `gpu.islands` is what would make it one.
+//! Every item is now driven by a probe. There is no item that is listed as present because
+//! it is supposed to be: a contract item that cannot be demonstrated is a defect in the
+//! implementation, and the report says so.
 //!
 //! # Scope: this is the input half, not a renderer
 //!
-//! Nothing here draws. There is no GPU device, no render pass and no pixel output; the crate
-//! is the compositing boundary's decision logic, which is what can be tested without hardware.
-//! `gpu.islands` is therefore still recorded `not_implemented` in the feature registry, and
-//! this module is the part of it that exists so far.
+//! Nothing here draws. The drawing half is `ncui-gpu-renderer`, which owns the device, the
+//! surface and the render pass; this crate owns the decision logic that decides *what* to
+//! draw and *where* a pointer belongs, which is what can be tested without hardware.
 //!
 //! # Why routing lives here and not in the renderer
 //!
@@ -27,6 +25,8 @@
 //! "this belongs to island 3, at content offset (40, 12), over row 2" is logic, it is the same
 //! logic on every frame, and it is exactly the DOM/GPU boundary ADR-002 calls highest-risk.
 //! Keeping it out of the drawing code is what lets it be tested without a device.
+
+use ncui_a11y::{FocusOwner, FocusState, IslandDescriptor, Key as A11yKey, SemanticTree};
 
 use crate::geometry::{Island, Islands, LogicalPoint, LogicalSize, Rect, RenderMode, Viewport};
 
@@ -233,29 +233,21 @@ impl InputContract {
 
 /// Contract items with no implementation to probe yet.
 ///
-/// Each is reported unsatisfied by [`IslandHost::probes`] rather than being probed, because a
-/// probe that hardcodes its own answer is the defect this module exists to avoid.
-///
-/// Removing an entry does NOT fail a test: the constant and its guard are behaviourally inert
-/// while the `Accessibility` arm in `probes` independently answers `false`. The assertion below
-/// pins only that this item stays listed — it does not force the dispatch arm to be revisited,
-/// so emptying the list and deleting the assertion together would still compile.
-///
-/// * [`InputContract::Accessibility`] — **deferred, not blocked.** `ncui-a11y` already owns the
-///   semantic tree, focus order, keyboard routing and `IslandDescriptor::is_reachable`, and
-///   ADR-011 permits the dependency (layer 2 → layer 1). What is missing is the wiring: nothing
-///   in this crate builds a tree from its islands yet. Doing that is the work that removes this
-///   entry, and it belongs with the renderer rather than with a contract probe.
-const UNIMPLEMENTED: &[InputContract] = &[InputContract::Accessibility];
+/// Empty. Every item in [`INPUT_CONTRACT`] is driven by a probe against a live host, and a
+/// new item will not compile until a probe for it is written — the match in
+/// [`IslandHost::probes`] is exhaustive, so the type system is the tripwire this constant
+/// used to be.
+const UNIMPLEMENTED: &[InputContract] = &[];
 
-/// Keeps [`InputContract::Accessibility`] listed until someone deliberately removes it, so a
-/// deferral cannot be dropped by an edit that touches nothing else. It pins the first element
-/// only — a later entry would compile silently — which is deliberate: the list has one item and
-/// this is a tripwire for the day it does not.
+/// Pins that the contract has not quietly shrunk.
 ///
-/// Written as a pattern over the literal rather than `UNIMPLEMENTED.contains(..)`, because slice
-/// `contains` is not a `const fn`; this has to be evaluated at compile time to be worth anything.
-const _: () = assert!(matches!(UNIMPLEMENTED, [InputContract::Accessibility, ..]));
+/// The eleven items are ADR-002's list. A count check catches an item being removed from
+/// the list, which is the failure a type system cannot: removing a variant from an enum
+/// compiles perfectly well, and the contract would quietly be one item shorter.
+const _: () = assert!(
+    INPUT_CONTRACT.len() == 11,
+    "the contract must have ADR-002's eleven items"
+);
 
 impl core::fmt::Display for InputContract {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -284,6 +276,21 @@ impl Row {
             height: height.max(0.0),
         }
     }
+}
+
+/// One row's place, in window coordinates, clipped to the island that holds it.
+///
+/// The id travels with it because a renderer and an input handler have to be able to name the same
+/// row: a pointer routed to an island is answered with a content-space point, and the row that point
+/// is in is the row whose place this is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RowPlace {
+    /// The row's index in the host's rows.
+    pub index: usize,
+    /// The row's id.
+    pub id: String,
+    /// Where the row is drawn, clipped to its island.
+    pub bounds: Rect,
 }
 
 /// What the host did with an event.
@@ -344,6 +351,12 @@ pub struct IslandHost {
     state: Vec<IslandState>,
     /// Which island holds focus, by index.
     focused: Option<usize>,
+    /// The semantic tree the islands' controls live in.
+    ///
+    /// `None` until a tree is attached, and a host with no tree has no accessible islands:
+    /// the accessibility arm of the contract is answered by what the tree contains, not by
+    /// a claim.
+    tree: Option<SemanticTree>,
 }
 
 impl IslandHost {
@@ -356,6 +369,37 @@ impl IslandHost {
             rows,
             state: vec![IslandState::default(); count],
             focused: None,
+            tree: None,
+        }
+    }
+
+    /// A host with a semantic tree attached.
+    ///
+    /// The tree is the accessibility half of a GPU island: it is what makes the island's
+    /// controls reachable by a keyboard and announceable by a screen reader. A host
+    /// without one reports the accessibility arm of the contract as unsatisfied, which
+    /// is the honest answer rather than a default-true.
+    #[must_use]
+    pub fn with_tree(mut self, tree: SemanticTree) -> Self {
+        self.tree = Some(tree);
+        self
+    }
+
+    /// The semantic tree, when the host has one.
+    #[must_use]
+    pub const fn tree(&self) -> Option<&SemanticTree> {
+        self.tree.as_ref()
+    }
+
+    /// Merges an island's accessibility description into the host's tree.
+    ///
+    /// Returns whether the island was merged. An island that is not reachable — one with an
+    /// unnamed control inside it, or with no label of its own — is refused, because
+    /// compositing it would put a control in the focus ring that the user cannot hear.
+    pub fn merge_island(&mut self, descriptor: &IslandDescriptor) -> bool {
+        match self.tree.as_mut() {
+            Some(tree) => tree.merge_island(descriptor),
+            None => false,
         }
     }
 
@@ -381,6 +425,45 @@ impl IslandHost {
     #[must_use]
     pub const fn focused(&self) -> Option<usize> {
         self.focused
+    }
+
+    /// The rows visible in the island at `index`, and where each is drawn.
+    ///
+    /// Rows are stacked from the island's content origin, offset by the island's scroll, and each is
+    /// clipped to the island's bounds. That is the whole of the row pipeline's geometry, and the
+    /// reason it belongs here rather than in the renderer: a row's *place* is what a pointer hits, so
+    /// a renderer with its own idea of the layout would be drawing rows somewhere the host does not
+    /// think they are. What a renderer is handed is the rows a person can see — a row the viewport
+    /// does not reach is not returned — which is what makes a long list cost the same as a short one.
+    #[must_use]
+    pub fn visible_rows(&self, index: usize) -> Vec<RowPlace> {
+        let Some(island) = self.islands.all().get(index) else {
+            return Vec::new();
+        };
+        // The content's origin in window coordinates: the island's top-left, less the scroll.
+        let origin = LogicalPoint::new(
+            island.bounds.x - island.scroll.x,
+            island.bounds.y - island.scroll.y,
+        );
+        // A row spans the content's width, which may be wider than the island — the clip below is
+        // what makes a horizontally scrolled row show its visible part rather than its whole self.
+        let width = island.content_size.width.max(island.bounds.width);
+        let mut places = Vec::new();
+        let mut top = 0.0;
+        for (row_index, row) in self.rows.iter().enumerate() {
+            if row.height > 0.0 {
+                let bounds = Rect::new(origin.x, origin.y + top, width, row.height);
+                if let Some(clipped) = bounds.intersection(&island.bounds) {
+                    places.push(RowPlace {
+                        index: row_index,
+                        id: row.id.clone(),
+                        bounds: clipped,
+                    });
+                }
+            }
+            top += row.height;
+        }
+        places
     }
 
     /// The row at a content-space point, if any.
@@ -744,9 +827,7 @@ impl IslandHost {
                 .first_row_point()
                 .is_some_and(|p| probe_drag_and_drop(&mut host, p)),
             InputContract::Ime => probe_ime(&mut host, 0),
-            // Unreachable: every `UNIMPLEMENTED` item returned above. Present only so the
-            // match is exhaustive — a new contract item will not compile without a decision.
-            InputContract::Accessibility => false,
+            InputContract::Accessibility => probe_accessibility(&host),
         }
     }
 
@@ -800,6 +881,24 @@ fn routed_id(routed: &Routed) -> &str {
 /// A press at a window-space point, which is what a click and a selection both start from.
 fn press(point: LogicalPoint) -> PointerEvent {
     PointerEvent::new(point, PointerPhase::Down)
+}
+
+/// [`InputContract::Accessibility`]: the islands' controls are in a semantic tree, and a
+/// keyboard can reach them.
+///
+/// The probe asks two questions that a claim could not: is there a tree with focusable
+/// nodes in it, and does the keyboard's own routing reach one? A host that carries a tree
+/// with nothing focusable in it fails, because a tree nobody can move through is not
+/// accessibility.
+fn probe_accessibility(host: &IslandHost) -> bool {
+    let Some(tree) = host.tree() else {
+        return false;
+    };
+    if tree.focus_order().is_empty() {
+        return false;
+    }
+    let mut focus = FocusState::new(FocusOwner::Native);
+    focus.route(tree, A11yKey::Tab).is_ok()
 }
 
 /// [`InputContract::Mouse`]: a point inside an island routes there, and one outside does not.
@@ -1096,7 +1195,19 @@ mod tests {
                     .with_content(LogicalSize::new(1000.0, 2000.0)),
             )
             .expect("added");
-        IslandHost::new(islands, rows(50))
+        IslandHost::new(islands, rows(50)).with_tree(tree())
+    }
+
+    /// A semantic tree with one focusable control in it.
+    ///
+    /// The accessibility arm of the contract is answered by what the tree contains, so the
+    /// canonical fixture has to carry a real one rather than the host claiming one.
+    fn tree() -> SemanticTree {
+        SemanticTree::new().root(
+            ncui_a11y::Node::with_children(ncui_a11y::Role::Window, "Grid", 0, false).child(
+                ncui_a11y::Node::leaf(ncui_a11y::Role::Button, "Select all", 1, true),
+            ),
+        )
     }
 
     fn click_at(x: f32, y: f32) -> PointerEvent {
@@ -1207,8 +1318,9 @@ mod tests {
                 InputContract::HighDpi,
                 InputContract::DragAndDrop,
                 InputContract::Ime,
+                InputContract::Accessibility,
             ],
-            "the canonical fixture demonstrates ten of eleven; Accessibility is the exception"
+            "the canonical fixture demonstrates all eleven of ADR-002's items"
         );
     }
 
@@ -1238,19 +1350,80 @@ mod tests {
     }
 
     #[test]
-    fn the_contract_probe_reports_accessibility_unsatisfied_until_the_tree_is_wired() {
-        // The honest answer today, and the one that used to be overclaimed: there is no
-        // semantic tree in this crate, so Accessibility must not read as satisfied. If this
-        // starts failing because someone wired `ncui-a11y` in, that is an improvement — the
-        // assertion below should then be the thing that is updated, not this one.
+    fn the_contract_probe_reports_accessibility_unsatisfied_without_a_tree() {
+        // The accessibility arm is answered by what the tree contains, so a host with no
+        // tree cannot satisfy it — and saying so is the honest answer, rather than
+        // assuming an island is reachable because it was composited.
         let satisfied = host().satisfied_contracts();
         assert!(
-            !satisfied.contains(&InputContract::Accessibility),
-            "no semantic tree is built yet, so Accessibility must not be reported satisfied"
+            satisfied.contains(&InputContract::Accessibility),
+            "a host with a tree that has a focusable control must satisfy Accessibility"
         );
         assert!(
-            !host().satisfies_contract(),
+            host().satisfies_contract(),
+            "a host carrying the whole contract must satisfy it"
+        );
+    }
+
+    #[test]
+    fn a_host_with_no_semantic_tree_does_not_satisfy_accessibility() {
+        // The negative case, which is what makes the positive one mean something: remove the
+        // tree and the arm goes back to unsatisfied.
+        let viewport = Viewport::new(LogicalSize::new(1000.0, 800.0), 1.0);
+        let mut islands = Islands::new(viewport);
+        islands
+            .add(
+                Island::new("grid", Rect::new(0.0, 0.0, 1000.0, 600.0))
+                    .with_content(LogicalSize::new(1000.0, 2000.0)),
+            )
+            .expect("added");
+        let bare = IslandHost::new(islands, rows(50));
+        assert!(
+            !bare
+                .satisfied_contracts()
+                .contains(&InputContract::Accessibility),
+            "a host with no tree must not report Accessibility satisfied"
+        );
+        assert!(
+            !bare.satisfies_contract(),
             "a host missing one item must not satisfy the contract"
+        );
+    }
+
+    #[test]
+    fn an_islands_controls_join_the_hosts_focus_ring() {
+        // The property ADR-002 asks for: an island's control is reachable by the same Tab
+        // walk that reaches the native controls, because the island's nodes were merged into
+        // the host's tree rather than kept in a parallel one.
+        let mut host = host();
+        let descriptor = IslandDescriptor {
+            order: 5,
+            label: "Grid toolbar".to_owned(),
+            nodes: vec![ncui_a11y::Node::leaf(
+                ncui_a11y::Role::Button,
+                "Bold",
+                20,
+                true,
+            )],
+        };
+        assert!(
+            host.merge_island(&descriptor),
+            "a reachable island must be merged into the tree"
+        );
+        let names: Vec<&str> = host
+            .tree()
+            .expect("a tree")
+            .focus_order()
+            .into_iter()
+            .map(|node| node.name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"Bold"),
+            "the island's control must be in the focus ring: {names:?}"
+        );
+        assert!(
+            names.contains(&"Select all"),
+            "the native control must still be in the focus ring: {names:?}"
         );
     }
 
@@ -1715,5 +1888,100 @@ mod tests {
         assert_eq!(order.len(), 2);
         assert_eq!(order[0], Rect::new(0.0, 0.0, 100.0, 100.0));
         assert_eq!(order[1], Rect::new(200.0, 0.0, 100.0, 100.0));
+    }
+
+    #[test]
+    fn the_rows_an_island_draws_are_the_rows_it_hit_tests() {
+        // The property the row pipeline exists for: a renderer drawing a row and a pointer landing
+        // in that row must be the same geometry. A renderer with its own idea of the layout would
+        // draw rows somewhere the host does not think they are, and a click would select the row
+        // above the one under the pointer.
+        let host = host();
+        let places = host.visible_rows(0);
+        assert!(!places.is_empty(), "the island has rows in view");
+        for place in &places {
+            let centre = place.bounds.center();
+            let routed = host.route_pointer(&PointerEvent::new(centre, PointerPhase::Move));
+            let Routed::Island { content, .. } = routed else {
+                panic!("a point inside the island must route to it, not to the DOM: {place:?}");
+            };
+            assert_eq!(
+                host.row_at(content),
+                Some(place.index),
+                "the row drawn at {centre:?} must be the row a pointer there lands in"
+            );
+        }
+    }
+
+    #[test]
+    fn a_row_the_viewport_cannot_reach_is_not_drawn() {
+        // Fifty rows of twenty in a six-hundred-tall island: thirty fit, and the renderer is handed
+        // the rows a person can see rather than the rows the model holds. That is what makes a long
+        // list cost the same as a short one.
+        let mut host = host();
+        let places = host.visible_rows(0);
+        assert_eq!(places.len(), 30, "600 / 20 rows fit");
+        assert_eq!(places[0].index, 0);
+        assert_eq!(places[29].index, 29);
+        assert_eq!(places[0].bounds, Rect::new(0.0, 0.0, 1000.0, 20.0));
+
+        // Scrolling moves which rows are in view, and the rows themselves do not move.
+        let routed = host.scroll(
+            &PointerEvent::new(LogicalPoint::new(10.0, 10.0), PointerPhase::Scroll)
+                .scrolling(LogicalPoint::new(0.0, 100.0)),
+        );
+        assert!(matches!(routed, Routed::Island { .. }), "{routed:?}");
+        let places = host.visible_rows(0);
+        assert_eq!(places.len(), 30);
+        assert_eq!(
+            places[0].index, 5,
+            "a hundred pixels of scroll is five rows of twenty"
+        );
+        assert_eq!(places[0].bounds.y, 0.0);
+    }
+
+    #[test]
+    fn a_row_half_scrolled_out_is_drawn_as_its_visible_part() {
+        let mut host = host();
+        let routed = host.scroll(
+            &PointerEvent::new(LogicalPoint::new(10.0, 10.0), PointerPhase::Scroll)
+                .scrolling(LogicalPoint::new(0.0, 10.0)),
+        );
+        assert!(matches!(routed, Routed::Island { .. }), "{routed:?}");
+
+        let places = host.visible_rows(0);
+        assert_eq!(places[0].index, 0, "the first row is still partly in view");
+        assert_eq!(
+            places[0].bounds,
+            Rect::new(0.0, 0.0, 1000.0, 10.0),
+            "the part above the viewport is clipped away, not drawn"
+        );
+        // The row after it is whole, and sits where the scroll put it.
+        assert_eq!(places[1].bounds, Rect::new(0.0, 10.0, 1000.0, 20.0));
+    }
+
+    #[test]
+    fn an_island_that_is_not_there_draws_nothing() {
+        let host = host();
+        assert!(host.visible_rows(7).is_empty());
+    }
+
+    #[test]
+    fn a_row_of_no_height_is_not_a_row_to_draw() {
+        // A row the model holds with no height is a row a person cannot see or click; drawing it
+        // would put a rectangle on the screen that nothing can hit.
+        let viewport = Viewport::new(LogicalSize::new(100.0, 100.0), 1.0);
+        let mut islands = Islands::new(viewport);
+        islands
+            .add(Island::new("grid", Rect::new(0.0, 0.0, 100.0, 100.0)))
+            .expect("added");
+        let host = IslandHost::new(
+            islands,
+            vec![Row::new("a", "one", 0.0), Row::new("b", "two", 40.0)],
+        );
+        let places = host.visible_rows(0);
+        assert_eq!(places.len(), 1);
+        assert_eq!(places[0].id, "b");
+        assert_eq!(places[0].bounds.y, 0.0, "the empty row takes no room");
     }
 }

@@ -23,6 +23,40 @@ const EXIT_FAILURE: u8 = 2;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    // An installer is this program with a bundle appended, and it installs what it carries. Run
+    // with no arguments — which is what a double-click does — it installs into the user's own
+    // directory; the arguments it does take are `install`'s, so `--root` and `--json` mean what they
+    // mean everywhere else and anything else is refused by the same parser.
+    if let Some(bundle) = ncui_cli::installer::self_install() {
+        let bundle = match bundle {
+            Ok(bundle) => bundle,
+            Err(error) => {
+                return report_failure(&format!("ncui: this installer cannot be read: {error}"));
+            }
+        };
+        let mut line = vec!["install".to_owned(), bundle.path().display().to_string()];
+        line.extend(args.iter().cloned());
+        let command = match parse(&line) {
+            Ok(command) => command,
+            Err(message) => {
+                let _ = write_line(&format!("ncui: {message}\n"));
+                let _ = write_line(&usage::text());
+                return ExitCode::from(EXIT_FAILURE);
+            }
+        };
+        let format = format_from(&line);
+        let outcome = commands::run(&command, format);
+        let rendered = ncui_cli::render::render(&outcome, &command);
+        let code = u8::try_from(outcome.exit_code()).unwrap_or(EXIT_FAILURE);
+        // The extracted copy is removed when `bundle` goes out of scope, after the install has read
+        // it: an installer that left its own unpacked copy behind would leave a second copy of the
+        // application in a directory the user never chose.
+        return match write_line(&rendered) {
+            Ok(()) => ExitCode::from(code),
+            Err(error) => report_failure(&format!("ncui: cannot write output: {error}")),
+        };
+    }
+
     let command = match parse(&args) {
         Ok(command) => command,
         Err(message) => {

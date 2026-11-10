@@ -16,16 +16,27 @@ layers:
 1  ncui-observability  ncui-security  ncui-ipc  ncui-state  ncui-scheduler
 1  ncui-a11y  ncui-abi
 2  ncui-workers  ncui-webview  ncui-gpu
-3  ncui-runtime
-4  ncui-cli  ncui-bench
+2  ncui-app  ncui-native  ncui-component
+3  ncui-webview-wry  ncui-gpu-renderer
+4  ncui-runtime
+5  ncui-cli  ncui-bench
 ```
+
+The table above is a reading of the authoritative one, `LAYERS` in
+`tools/ncui-tools/src/arch.rs`, which is what the checker enforces; when the two disagree, the
+code is right and this table is the bug.
 
 `ncui-gpu` is the compositing boundary's decision logic — hit testing, routing, selection and
 input state. It currently has **no internal dependencies**, so the layer rule does not force its
 position; layer 2 is a semantic grouping that keeps it beside `ncui-workers` and `ncui-webview`,
-the other crates that exist to serve a host rather than to be depended on. Wiring `ncui-a11y`'s
-semantic tree in would put that constraint back at strictly-above-1. It renders nothing; see
-`docs/remaining-work.md` for why that keeps `gpu.islands` unimplemented.
+the other crates that exist to serve a host rather than to be depended on.
+
+Layer 3 holds the **platform adapters**: the crates that implement a layer-2 port against a
+real platform library. `ncui-webview-wry` implements `ncui-webview`'s `WebViewBackend` and
+`HostFactory` over `wry`/`tao`; `ncui-gpu-renderer` implements the compositing boundary's
+rendering half over `wgpu`. They sit *between* the port and the runtime, which is what lets
+the runtime depend on a real host without depending on the policy that describes one — and
+what keeps `wry` and `wgpu` out of every crate that does not actually talk to a platform.
 
 The rule is enforced mechanically by `ncui-arch`, which reads the real graph from
 `cargo metadata` rather than parsing manifests, so it reflects what Cargo will build. Adding a

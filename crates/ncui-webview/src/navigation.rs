@@ -22,6 +22,11 @@ pub enum Scheme {
     /// `https:` — the only scheme a production page should be reached over.
     Https,
     /// `http:` — permitted only for local development hosts, and never in production.
+    ///
+    /// "Local development host" is a concrete, checkable thing rather than a flag an
+    /// operator flips: see [`NavigationPolicy::with_loopback_http`]. A loopback origin
+    /// never leaves the machine, so the transport it uses cannot be intercepted by anyone
+    /// on the network — which is the only thing `https` buys a development server.
     Http,
     /// `file:` — reads the local filesystem. Refused by default in every configuration.
     File,
@@ -120,6 +125,46 @@ pub struct NavigationRequest {
     pub top_level: bool,
 }
 
+impl NavigationRequest {
+    /// Builds a request from a URL string.
+    ///
+    /// Returns `None` for a URL this module cannot read, which the caller must treat as a
+    /// refusal. The parser is deliberately minimal and total in the same way the seam's
+    /// probe is: it reads the scheme, the authority and the port, and nothing else. A URL
+    /// it cannot read is never guessed at, because a guessed origin is a guess about what
+    /// the page is allowed to reach.
+    #[must_use]
+    pub fn from_url(url: &str, top_level: bool) -> Option<Self> {
+        let (scheme, rest) = url.split_once("://")?;
+        if rest.is_empty() {
+            return None;
+        }
+        // The authority ends at the first `/`, `?` or `#`. Without this, `https://app/x`
+        // yields a host of `app/x`, which matches no allow-list entry and refuses a
+        // navigation the policy was written to permit — a real URL would never load.
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+        if authority.is_empty() {
+            return None;
+        }
+
+        // A bare IPv6 literal is bracketed, so the *last* colon is the port separator rather
+        // than the first — `rsplit_once` handles both, and a non-numeric tail falls back to
+        // being part of the host.
+        let (host, port) = match authority.rsplit_once(':') {
+            Some((host, port)) => match port.parse::<u16>() {
+                Ok(port) => (host.to_owned(), Some(port)),
+                Err(_) => (authority.to_owned(), None),
+            },
+            None => (authority.to_owned(), None),
+        };
+
+        Some(Self {
+            target: Origin::new(Scheme::parse(scheme), &host, port),
+            top_level,
+        })
+    }
+}
+
 /// The host's answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
@@ -150,6 +195,8 @@ pub struct NavigationPolicy {
     allow_subdomains: bool,
     /// Whether plain `http:` is permitted at all.
     allow_insecure_http: bool,
+    /// Whether `http:` is permitted for loopback hosts.
+    allow_loopback_http: bool,
 }
 
 impl NavigationPolicy {
@@ -160,6 +207,7 @@ impl NavigationPolicy {
             allowed_origins: origins.to_vec(),
             allow_subdomains: false,
             allow_insecure_http: false,
+            allow_loopback_http: false,
         }
     }
 
@@ -177,6 +225,21 @@ impl NavigationPolicy {
     #[must_use]
     pub const fn with_insecure_http(mut self, allow: bool) -> Self {
         self.allow_insecure_http = allow;
+        self
+    }
+
+    /// Permits plain `http:` for loopback hosts only.
+    ///
+    /// Off by default, because the general rule is that insecure transport is refused
+    /// everywhere; this is the narrow exception that a local development host needs. The
+    /// origin allow-list still applies, so a loopback origin has to be *listed* before a
+    /// page can reach it — this relaxes the scheme, not the destination.
+    ///
+    /// A production deployment leaves it off, and then a page served over `http:` is refused
+    /// the same way any other insecure origin is.
+    #[must_use]
+    pub const fn with_loopback_http(mut self, allow: bool) -> Self {
+        self.allow_loopback_http = allow;
         self
     }
 
@@ -210,7 +273,7 @@ impl NavigationPolicy {
                     reason: "unrecognised scheme".to_owned(),
                 };
             }
-            Scheme::Http if !self.allow_insecure_http => {
+            Scheme::Http if !self.http_scheme_is_permitted(target) => {
                 return Verdict::Deny {
                     reason: "http: is not permitted; use https".to_owned(),
                 };
@@ -258,6 +321,67 @@ impl NavigationPolicy {
             self.allow_subdomains && is_one_label_subdomain(&allowed.host, &target.host)
         })
     }
+
+    /// Whether the `http:` scheme is permitted for this particular target.
+    fn http_scheme_is_permitted(&self, target: &Origin) -> bool {
+        self.allow_insecure_http || (self.allow_loopback_http && is_loopback_host(&target.host))
+    }
+}
+
+/// Whether a host names this machine's loopback interface.
+///
+/// The set is the one RFC 6761 and the IPv4/IPv6 specifications actually define:
+///
+/// - `localhost` and any name under `.localhost`, which RFC 6761 reserves to the loopback.
+/// - `127.0.0.0/8`, the whole IPv4 loopback block rather than only `127.0.0.1`, because a
+///   listener bound to `127.0.0.2` is exactly as local as one bound to `127.0.0.1`.
+/// - `::1`, the IPv6 loopback, bracketed or bare.
+///
+/// A name that merely *looks* like one of these — `localhost.evil.test`, `127.0.0.1.evil.test`,
+/// `notlocalhost` — is not one, and a DNS-resolvable name is never treated as loopback even
+/// when it is spelled `localhost`: if it resolves at all, it was resolved by someone else.
+#[must_use]
+pub fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim();
+    if host.is_empty() {
+        return false;
+    }
+    // A bracketed IPv6 literal carries brackets in the authority; the bare form appears when
+    // the URL omitted a port and the parser split on the wrong colon.
+    let host = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host);
+
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    if host.len() > "localhost".len() && host.to_ascii_lowercase().ends_with(".localhost") {
+        return true;
+    }
+    if host.eq_ignore_ascii_case("::1") {
+        return true;
+    }
+    // The IPv4 loopback block: four dot-separated decimal octets whose first is 127.
+    let mut octets = host.split('.');
+    let mut count = 0;
+    let mut first_is_loopback = false;
+    for octet in &mut octets {
+        count += 1;
+        if count > 4 {
+            return false;
+        }
+        if octet.is_empty() || !octet.bytes().all(|byte| byte.is_ascii_digit()) {
+            return false;
+        }
+        if octet.len() > 3 || octet.parse::<u16>().map_or(true, |value| value > 255) {
+            return false;
+        }
+        if count == 1 {
+            first_is_loopback = octet.parse::<u16>() == Ok(127);
+        }
+    }
+    count == 4 && first_is_loopback
 }
 
 /// Whether `child` is exactly one label beneath `parent`.
@@ -535,6 +659,76 @@ mod tests {
     fn a_navigation_with_no_host_is_refused() {
         let verdict = policy().evaluate(&top_level(https("")));
         assert!(!verdict.is_allowed());
+    }
+
+    #[test]
+    fn loopback_http_is_permitted_only_when_the_policy_opts_in() {
+        // A development host serves the application over loopback http. The origin is
+        // listed, so the only thing standing between the page and its own assets is the
+        // scheme — and the scheme is permitted for exactly this case.
+        let dev = NavigationPolicy::new(&[Origin::new(Scheme::Http, "127.0.0.1", Some(4321))])
+            .with_loopback_http(true);
+        assert!(
+            dev.evaluate(&top_level(Origin::new(
+                Scheme::Http,
+                "127.0.0.1",
+                Some(4321)
+            )))
+            .is_allowed()
+        );
+
+        // Without the opt-in the same navigation is refused: the default is that insecure
+        // transport is refused everywhere.
+        assert!(
+            !NavigationPolicy::new(&[Origin::new(Scheme::Http, "127.0.0.1", Some(4321))])
+                .evaluate(&top_level(Origin::new(
+                    Scheme::Http,
+                    "127.0.0.1",
+                    Some(4321)
+                )))
+                .is_allowed()
+        );
+
+        // The opt-in relaxes the scheme, not the destination: a loopback scheme allowance
+        // does not put a remote host on the allow-list.
+        assert!(
+            !dev.evaluate(&top_level(Origin::new(
+                Scheme::Http,
+                "example.com",
+                Some(4321)
+            )))
+            .is_allowed()
+        );
+    }
+
+    #[test]
+    fn loopback_host_matching_is_exact() {
+        for host in [
+            "localhost",
+            "LOCALHOST",
+            "app.localhost",
+            "127.0.0.1",
+            "127.0.0.2",
+            "127.255.255.254",
+            "::1",
+            "[::1]",
+        ] {
+            assert!(is_loopback_host(host), "{host} should be loopback");
+        }
+        for host in [
+            "",
+            "localhost.evil.test",
+            "127.0.0.1.evil.test",
+            "notlocalhost",
+            "127.0.0.256",
+            "127.0.0",
+            "127.0.0.1.2",
+            "example.com",
+            "128.0.0.1",
+            "::2",
+        ] {
+            assert!(!is_loopback_host(host), "{host} should not be loopback");
+        }
     }
 
     #[test]

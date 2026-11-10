@@ -1,0 +1,2 @@
+This file lives next to the manifest, outside the served assets.
+The page can read it because the manifest grants filesystem.read.

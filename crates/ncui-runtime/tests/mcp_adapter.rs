@@ -12,7 +12,7 @@
     reason = "test assertions must abort loudly on failure"
 )]
 
-use ncui_core::Limits;
+use ncui_core::{Capability, CapabilitySet, Limits};
 use ncui_runtime::mcp::{
     call_tool, handle_envelope, method_for_tool, tool_name_for, tool_table, tools_list_response,
 };
@@ -207,9 +207,22 @@ fn a_destructive_call_without_consent_is_refused_through_the_adapter_too() {
         json!(true),
         "consent is required for a destructive operation: {without}"
     );
-    // And supplying consent serves it, which is what proves the argument reached the gate
-    // rather than being dropped by the translation.
-    let with = harness.call("ncui_logs_purge", json!({ "consent": true }));
+    // And a minted consent token serves it, which is what proves the argument reached the
+    // gate rather than being dropped by the translation. The legacy `consent: true`
+    // authorizes nothing destructive; the token is the consent.
+    let correlation = ncui_core::CorrelationId::new();
+    let token = harness
+        .runtime
+        .mint_consent(
+            correlation,
+            "ncui.logs.purge",
+            CapabilitySet::empty().with(Capability::ReadLogs),
+        )
+        .expect("mint");
+    let with = harness.call(
+        "ncui_logs_purge",
+        json!({ "consent_token": token.to_value() }),
+    );
     assert_eq!(
         with["isError"],
         json!(false),

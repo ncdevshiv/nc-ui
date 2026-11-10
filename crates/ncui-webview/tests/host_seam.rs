@@ -17,13 +17,13 @@ use ncui_core::{Capability, CapabilitySet};
 use ncui_webview::capability::CapabilityRequest;
 use ncui_webview::lifecycle::HostState;
 use ncui_webview::navigation::{NavigationPolicy, Origin, Scheme};
-use ncui_webview::seam::{HostSeam, SeamMessage, SeamResponse};
+use ncui_webview::seam::{HostSeam, SeamError, SeamMessage, SeamResponse};
 use ncui_webview::{CapabilityGrant, NavigationRequest, WindowLifecycle};
 use serde_json::{Value, json};
 
 /// A host that is attached and running, with one action and one allowed origin.
 fn running_host() -> HostSeam {
-    let mut lifecycle = WindowLifecycle::new();
+    let lifecycle = WindowLifecycle::new();
     lifecycle.transition(HostState::Created).expect("created");
     lifecycle
         .transition(HostState::Attaching)
@@ -52,7 +52,7 @@ fn running_host() -> HostSeam {
 
 /// Counts dispatcher calls, so a refusal can be shown to have happened *before* dispatch.
 fn counting_dispatcher() -> (
-    impl Fn(&CapabilityRequest, Value) -> Result<Value, String>,
+    impl FnMut(&CapabilityRequest, Value) -> Result<Value, SeamError>,
     std::sync::Arc<std::sync::atomic::AtomicUsize>,
 ) {
     let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -69,13 +69,14 @@ fn counting_dispatcher() -> (
 #[test]
 fn a_granted_action_reaches_the_dispatcher_and_is_answered() {
     let host = running_host();
-    let (dispatch, calls) = counting_dispatcher();
+    let (mut dispatch, calls) = counting_dispatcher();
 
     let response = host.handle(
         &SeamMessage::Perform {
             name: "describe_metrics".to_owned(),
+            payload: json!({ "probe": 7 }),
         },
-        &dispatch,
+        &mut dispatch,
     );
 
     assert!(response.ok, "a granted action must be served: {response:?}");
@@ -89,13 +90,14 @@ fn an_ungranted_action_is_refused_before_the_dispatcher_is_reached() {
     // Declaring it makes it *known*, not permitted, which is the distinction the default-empty
     // grant depends on.
     let host = running_host();
-    let (dispatch, calls) = counting_dispatcher();
+    let (mut dispatch, calls) = counting_dispatcher();
 
     let response = host.handle(
         &SeamMessage::Perform {
             name: "purge_logs".to_owned(),
+            payload: Value::Null,
         },
-        &dispatch,
+        &mut dispatch,
     );
 
     assert!(
@@ -117,13 +119,14 @@ fn an_ungranted_action_is_refused_before_the_dispatcher_is_reached() {
 #[test]
 fn an_unknown_action_is_refused_before_the_dispatcher_is_reached() {
     let host = running_host();
-    let (dispatch, calls) = counting_dispatcher();
+    let (mut dispatch, calls) = counting_dispatcher();
 
     let response = host.handle(
         &SeamMessage::Perform {
             name: "install_dependencies".to_owned(),
+            payload: Value::Null,
         },
-        &dispatch,
+        &mut dispatch,
     );
 
     assert!(!response.ok);
@@ -140,7 +143,7 @@ fn a_page_cannot_ask_the_runtime_for_a_method_by_name() {
     // requires. If a page could dispatch by runtime method name it would be the JSON-RPC
     // agent surface with the capability checks removed.
     let host = running_host();
-    let (dispatch, calls) = counting_dispatcher();
+    let (mut dispatch, calls) = counting_dispatcher();
 
     for probe in [
         "ncui.logs.purge",
@@ -151,8 +154,9 @@ fn a_page_cannot_ask_the_runtime_for_a_method_by_name() {
         let response = host.handle(
             &SeamMessage::Perform {
                 name: probe.to_owned(),
+                payload: Value::Null,
             },
-            &dispatch,
+            &mut dispatch,
         );
         assert!(!response.ok, "`{probe}` was accepted as an action");
     }
@@ -162,7 +166,7 @@ fn a_page_cannot_ask_the_runtime_for_a_method_by_name() {
 #[test]
 fn describing_advertises_the_grant_and_nothing_more() {
     let host = running_host();
-    let response = host.handle(&SeamMessage::Describe, &|_, _| Ok(Value::Null));
+    let response = host.handle(&SeamMessage::Describe, &mut |_, _| Ok(Value::Null));
     assert!(response.ok);
 
     let payload = response.payload.expect("a payload");
@@ -196,7 +200,7 @@ fn a_navigation_probe_agrees_with_the_policy_for_a_real_url_with_a_path() {
             &SeamMessage::ProbeNavigation {
                 url: url.to_owned(),
             },
-            &|_, _| Ok(Value::Null),
+            &mut |_, _| Ok(Value::Null),
         );
         assert!(
             response.ok,
@@ -220,7 +224,7 @@ fn a_navigation_probe_refuses_what_the_policy_refuses() {
             &SeamMessage::ProbeNavigation {
                 url: url.to_owned(),
             },
-            &|_, _| Ok(Value::Null),
+            &mut |_, _| Ok(Value::Null),
         );
         assert!(
             !response.ok,
@@ -238,7 +242,7 @@ fn a_malformed_url_is_refused_rather_than_guessed_at() {
             &SeamMessage::ProbeNavigation {
                 url: url.to_owned(),
             },
-            &|_, _| Ok(Value::Null),
+            &mut |_, _| Ok(Value::Null),
         );
         assert!(!response.ok, "{url:?} should be refused");
     }
@@ -249,7 +253,7 @@ fn a_crashed_host_answers_nothing_at_all() {
     // ADR-001 calls the crash a real failure mode. The enforcement is that a dead host serves
     // nothing — not that it serves stale data, and not that it answers from a page that is
     // gone.
-    let mut lifecycle = WindowLifecycle::new();
+    let lifecycle = WindowLifecycle::new();
     lifecycle.transition(HostState::Created).expect("created");
     lifecycle
         .transition(HostState::Attaching)
@@ -267,17 +271,18 @@ fn a_crashed_host_answers_nothing_at_all() {
         CapabilitySet::empty().with(Capability::InspectRuntime),
     );
 
-    let (dispatch, calls) = counting_dispatcher();
+    let (mut dispatch, calls) = counting_dispatcher();
     for message in [
         SeamMessage::Describe,
         SeamMessage::Perform {
             name: "describe_metrics".to_owned(),
+            payload: Value::Null,
         },
         SeamMessage::ProbeNavigation {
             url: "https://app.example.com/".to_owned(),
         },
     ] {
-        let response = host.handle(&message, &dispatch);
+        let response = host.handle(&message, &mut dispatch);
         assert!(!response.ok, "a crashed host served {message:?}");
         assert!(
             response.outcome.contains("unavailable"),
@@ -296,8 +301,9 @@ fn a_dispatch_failure_is_surfaced_rather_than_swallowed() {
     let response = host.handle(
         &SeamMessage::Perform {
             name: "describe_metrics".to_owned(),
+            payload: Value::Null,
         },
-        &|_, _| Err("the metrics registry is saturated".to_owned()),
+        &mut |_, _| Err(SeamError::dispatch("the metrics registry is saturated")),
     );
     assert!(!response.ok);
     assert!(
@@ -317,7 +323,7 @@ fn page_json_round_trips_through_the_seam() {
     // The seam is the wire format for page content, so a message a page can send has to
     // survive serialisation rather than only working when constructed in Rust.
     let host = running_host();
-    let (dispatch, calls) = counting_dispatcher();
+    let (mut dispatch, calls) = counting_dispatcher();
 
     let raw = json!({
         "action": "perform",
@@ -325,7 +331,7 @@ fn page_json_round_trips_through_the_seam() {
     });
     let message = SeamMessage::parse(&serde_json::to_string(&raw).expect("serialise"))
         .expect("a well-formed message parses");
-    let response = host.handle(&message, &dispatch);
+    let response = host.handle(&message, &mut dispatch);
 
     assert!(response.ok, "{response:?}");
     assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
@@ -335,7 +341,7 @@ fn page_json_round_trips_through_the_seam() {
 fn narrowing_a_page_grant_takes_effect_at_the_seam() {
     // The grant is per-host policy, so narrowing it must actually remove reachability rather
     // than only change what `describe` reports.
-    let mut lifecycle = WindowLifecycle::new();
+    let lifecycle = WindowLifecycle::new();
     lifecycle.transition(HostState::Created).expect("created");
     lifecycle
         .transition(HostState::Attaching)
@@ -350,12 +356,13 @@ fn narrowing_a_page_grant_takes_effect_at_the_seam() {
         CapabilitySet::empty().with(Capability::DeleteData),
     );
 
-    let (dispatch, calls) = counting_dispatcher();
+    let (mut dispatch, calls) = counting_dispatcher();
     let response = host.handle(
         &SeamMessage::Perform {
             name: "purge_logs".to_owned(),
+            payload: Value::Null,
         },
-        &dispatch,
+        &mut dispatch,
     );
     assert!(!response.ok, "narrowing the grant must remove reachability");
     assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
@@ -365,7 +372,7 @@ fn narrowing_a_page_grant_takes_effect_at_the_seam() {
 fn a_seam_built_over_a_dead_lifecycle_refuses_from_the_first_call() {
     // A host that was destroyed rather than crashed is refused the same way, so the reason a
     // page is not served does not leak whether the engine died or was closed deliberately.
-    let mut lifecycle = WindowLifecycle::new();
+    let lifecycle = WindowLifecycle::new();
     lifecycle.transition(HostState::Created).expect("created");
     lifecycle
         .transition(HostState::Attaching)
@@ -383,7 +390,7 @@ fn a_seam_built_over_a_dead_lifecycle_refuses_from_the_first_call() {
         CapabilityGrant::none(),
         NavigationPolicy::new(&[]),
     );
-    let response: SeamResponse = host.handle(&SeamMessage::Describe, &|_, _| Ok(Value::Null));
+    let response: SeamResponse = host.handle(&SeamMessage::Describe, &mut |_, _| Ok(Value::Null));
     assert!(!response.ok);
     assert!(
         response.outcome.contains("unavailable"),

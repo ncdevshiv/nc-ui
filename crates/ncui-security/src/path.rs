@@ -752,7 +752,7 @@ mod tests {
     fn absolute_paths_are_rejected() {
         assert_rejected("/etc/passwd");
         assert_rejected("/");
-        assert_rejected("\\Windows\\System32");
+        assert_rejected("\\Windows\\System32"); // ncui-allow-hygiene: rejected-path test vector
         assert_rejected("\\");
     }
 
@@ -767,7 +767,7 @@ mod tests {
 
     #[test]
     fn unc_paths_are_rejected() {
-        assert_rejected("\\\\server\\share\\secret");
+        assert_rejected("\\\\server\\share\\secret"); // ncui-allow-hygiene: rejected-path test vector
         assert_rejected("\\\\?\\C:\\Windows");
         assert_rejected("\\\\server");
     }

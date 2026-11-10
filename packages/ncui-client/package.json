@@ -1,0 +1,27 @@
+{
+  "name": "@ncui/client",
+  "version": "0.1.0",
+  "description": "The NC-UI page bridge: typed access to native commands from an application page.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    }
+  },
+  "files": [
+    "src/index.js",
+    "src/index.d.ts",
+    "src/bridge.js",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test tests/"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

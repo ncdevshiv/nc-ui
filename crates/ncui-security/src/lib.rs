@@ -80,7 +80,7 @@ pub mod ratelimit;
 pub mod token;
 
 pub use audit::{AuditEvent, AuditLog, AuditOutcome};
-pub use authz::{AgentRole, Authorizer};
+pub use authz::{AgentRole, Authorizer, ConsentToken};
 pub use path::SafePath;
 pub use ratelimit::RateLimiter;
 pub use token::{EntropySource, SecretToken, SystemEntropy, constant_time_eq};

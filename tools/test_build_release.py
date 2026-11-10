@@ -101,7 +101,7 @@ def test_verify_detects_tampering() -> None:
         signed = subprocess.run(
             ["gpg", "--batch", "--yes", "--armor", "--detach-sign",
              "--output", str(signature), str(artefact)],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8",
         )
         if signed.returncode != 0:
             print("  SKIP  tampering test: no signing key available")

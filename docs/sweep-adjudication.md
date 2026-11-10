@@ -25,20 +25,14 @@ because it is the same class of defect.
 **`crates/ncui-cli/src/main.rs` — a discarded `write_all`.** The sweep flagged
 `let _ = out.write_all(...)`. This was a real defect: a machine-readable CLI that failed to
 write its output would exit **0 having printed nothing**, and a caller would parse empty
-output as success. `write_line` now returns `std::io::Result<()>` and every call site turns
-a failure into a non-zero exit, reporting the diagnostic on stderr — through an explicit
-write, because the workspace denies `eprint!` in the same way it denies `println!`.
+output as success. `write_line` now returns `std::io::Result<()>`. The three call sites that
+write the rendered result turn a failure into a non-zero exit; the parse-error paths already
+exit non-zero and keep their discard. A write failure is reported on stderr through an
+explicit write, because the workspace denies `eprint!` in the same way it denies `println!`.
 
-## Fixed at the root (2)
+## Also fixed at the root
 
-**`crates/ncui-cli/src/main.rs` — a discarded `write_all`.** The sweep flagged
-`let _ = out.write_all(...)`. A machine-readable CLI that failed to write its output would
-exit **0 having printed nothing**, and a caller would parse empty output as success.
-`write_line` now returns `std::io::Result<()>` and every call site turns a failure into a
-non-zero exit, reporting the diagnostic on stderr through an explicit write, because the
-workspace denies `eprint!` in the same way it denies `println!`.
-
-**`crates/ncui-runtime/src/transport.rs:225` — a discarded per-connection `Result`.**
+**`crates/ncui-runtime/src/transport.rs` — a discarded per-connection `Result`.**
 Found by the pre-gate reviewer, and the adjudication originally missed it. A connection
 handler fails when a peer hangs up mid-frame; discarding that made a misbehaving client
 completely invisible. `ServerStats` gained `connection_errors`, the accept loop counts and
@@ -57,26 +51,27 @@ The shapes present, and why each is correct:
 | `std::fs::create_dir_all` | 1 | Output-directory creation before a write that is separately checked. |
 | `channel.try_send`, `s.schedule`, `server.serve` | 4 | Setup or fire-and-forget threads; `server.serve` runs until shutdown, where the outcome is asserted separately. |
 
-The four hits that touch I/O or error handling were read individually:
+The three hits that touch I/O or error handling were read individually:
 
 - `crates/ncui-runtime/src/transport.rs` — `writer.flush()` after a loop whose every
   iteration is already checked by `write_frame`. The final flush on close is genuinely
   best-effort.
-- `crates/ncui-workers/src/pool.rs:594` — `tx.send(42)` inside a test task. The test
+- `crates/ncui-workers/src/pool.rs` — `tx.send(42)` inside a test task. The test
   asserts on the receiving end, so a dropped send fails the test rather than passing quietly.
 - `crates/ncui-cli/src/main.rs` — **fixed**, above.
 
 ## Justified: `suppression` (33 hits)
 
-15 `#[allow]` attributes exist in the workspace. **Every one carries a written `reason =`**,
-verified by reading the full attribute from source rather than the sweep's single-line
-capture. The sweep reports more than that because it matches the opening line of a multi-line
-attribute; none is a bare suppression.
+59 `#[allow]` attributes exist in the workspace on 2026-11-08, and **every one carries a
+written `reason =`**. That is enforced rather than asserted: `clippy::allow_attributes_without_reason`
+is set in `[workspace.lints.clippy]`, so under `-D warnings` an `#[allow]` without a reason fails
+the build. The sweep reports more than the count below because it matches the opening line of a
+multi-line attribute; none is a bare suppression.
 
 The count moves as crates are added, so it is stated for the tree this adjudication ran
-against rather than as a standing fact.
+against rather than as a standing fact; the invariant is what the gate holds.
 
-## Justified: `mock-fake-stub` and `todo-marker` in production (5 files)
+## Justified: `mock-fake-stub` and `todo-marker` in production (4 files)
 
 | File | Hits | Adjudication |
 | --- | --- | --- |

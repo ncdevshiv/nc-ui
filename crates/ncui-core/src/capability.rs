@@ -77,6 +77,12 @@ pub enum Capability {
     Gpu,
     /// Attach debuggers and access runtime internals.
     Debug,
+    /// Load and run an untrusted component artifact in this process.
+    ///
+    /// Separate from every other capability because it is not an authority over a resource: it
+    /// is permission to execute code the runtime did not write and cannot read. A page that may
+    /// write a file may not thereby run one.
+    RunComponents,
 
     // ---- Workspace scope (spec 36) ----
     /// Modify tracked source files.
@@ -119,6 +125,7 @@ impl Capability {
         Capability::Database,
         Capability::Gpu,
         Capability::Debug,
+        Capability::RunComponents,
         Capability::ModifySource,
         Capability::InstallDependencies,
         Capability::Deploy,
@@ -145,6 +152,7 @@ impl Capability {
             Self::Database => "database",
             Self::Gpu => "gpu",
             Self::Debug => "debug",
+            Self::RunComponents => "run.components",
             Self::ModifySource => "modify.source",
             Self::InstallDependencies => "install.dependencies",
             Self::Deploy => "deploy",
@@ -171,7 +179,8 @@ impl Capability {
             | Self::Notifications
             | Self::Database
             | Self::Gpu
-            | Self::Debug => CapabilityScope::Runtime,
+            | Self::Debug
+            | Self::RunComponents => CapabilityScope::Runtime,
             Self::ModifySource | Self::InstallDependencies | Self::Deploy | Self::DeleteData => {
                 CapabilityScope::Workspace
             }
@@ -193,7 +202,14 @@ impl Capability {
     pub const fn is_destructive(self) -> bool {
         matches!(
             self,
-            Self::FilesystemWrite | Self::ProcessSpawn | Self::DeleteData | Self::Deploy
+            // Running components is destructive in the sense this list means: it is permission
+            // to execute code the runtime did not write, so every call needs a recorded consent
+            // rather than a silent grant.
+            Self::FilesystemWrite
+                | Self::ProcessSpawn
+                | Self::DeleteData
+                | Self::Deploy
+                | Self::RunComponents
         )
     }
 
@@ -258,6 +274,7 @@ static CAPABILITY_NAMES: &[&str] = &[
     "database",
     "gpu",
     "debug",
+    "run.components",
     "modify.source",
     "install.dependencies",
     "deploy",

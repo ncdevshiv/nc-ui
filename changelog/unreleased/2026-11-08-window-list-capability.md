@@ -1,0 +1,1 @@
+- **`ncui.window.list` now authorizes `inspect.runtime` instead of `window`.** The page action `list_windows` is offered with `inspect.runtime` but the method authorized `window`, so a page holding the default grant was offered an action that was then refused; the two tables now agree, and a regression test keeps them agreed.

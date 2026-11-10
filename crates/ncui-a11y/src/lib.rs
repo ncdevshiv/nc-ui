@@ -24,9 +24,13 @@
 //!
 //! # What is deliberately absent
 //!
-//! Text shaping, bidi, and screen-reader *output* encoding are the `WebView`'s. An island
-//! an [`IslandDescriptor`] so it can be checked for the properties above, and the island half of
-//! `a11y.support` stays unimplemented until islands exist.
+//! Text shaping, bidi, and screen-reader *output* encoding are the `WebView`'s.
+//!
+//! What this crate provides instead is the strategy a GPU island must satisfy to be
+//! reachable: an [`IslandDescriptor`] describing what the island exposes, and the
+//! [`tree::SemanticTree::merge_island`] that folds those nodes into the host's own tree so
+//! the island's controls sit in the same focus ring as everything else. An island that
+//! cannot produce a descriptor is refused rather than composited and left unreachable.
 
 pub mod focus;
 pub mod tree;
@@ -52,9 +56,18 @@ pub struct IslandDescriptor {
 impl IslandDescriptor {
     /// Whether the island satisfies the properties this crate holds.
     ///
-    /// The two conditions are exactly the failure modes: a nameless island announces as
-    /// nothing, and an island with focusable nodes and no label is a keyboard trap with no
-    /// way out.
+    /// The two failure modes are a nameless island, which announces as nothing, and an unnamed
+    /// focusable node, which is a keyboard trap with no way out. Both are refused here.
+    ///
+    /// What is deliberately *not* required is something focusable. An island whose content is a list
+    /// of rows has nothing to focus and is still reachable: a screen reader reads a labelled list by
+    /// walking it, which is how every list on every platform is reached. Requiring focusable content
+    /// refused exactly the islands this runtime can produce — a region of text — while catching
+    /// nothing that the unnamed-focusable check does not already catch.
+    ///
+    /// Keyboard reachability is a separate question with a separate answer: the host puts an
+    /// island's focusable nodes into its own focus order when it merges them, so an island with
+    /// nothing focusable simply contributes nothing to that walk.
     #[must_use]
     pub fn is_reachable(&self) -> bool {
         // The unnamed check walks the whole subtree. Checking only the island's top-level
@@ -64,21 +77,14 @@ impl IslandDescriptor {
         if self.nodes.iter().any(Self::contains_unnamed_focusable) {
             return false;
         }
-        let has_focusable = self.nodes.iter().any(Self::contains_focusable);
-        has_focusable && !self.label.trim().is_empty()
+        // A named island with nothing in it is a label announcing an absence, which is worse than
+        // no island at all: it tells the reader there is something to hear and there is not.
+        !self.label.trim().is_empty() && !self.nodes.is_empty()
     }
 
     /// Whether `node`'s subtree holds a focusable node with no name.
     fn contains_unnamed_focusable(node: &Node) -> bool {
         node.is_unnamed_focusable() || node.children.iter().any(Self::contains_unnamed_focusable)
-    }
-
-    /// Whether `node`'s subtree contains anything focusable.
-    ///
-    /// Free rather than a method: it never reads `self`, and taking `&self` for a pure walk
-    /// of a node that is not part of the island is misleading.
-    fn contains_focusable(node: &Node) -> bool {
-        node.focusable || node.children.iter().any(Self::contains_focusable)
     }
 }
 
@@ -140,15 +146,23 @@ mod tests {
     }
 
     #[test]
-    fn an_island_with_no_focusable_content_is_not_reachable() {
-        let island = island(
-            "Decoration",
-            vec![Node::leaf(Role::StaticText, "sparkle", 1, false)],
+    fn a_named_island_of_text_is_reachable() {
+        // A list of rows is reached by reading it, not by focusing it. The old rule refused this
+        // shape, which is the shape a region of text has.
+        let notes = island(
+            "Notes",
+            vec![
+                Node::with_children(Role::List, "Notes", 1, false)
+                    .child(Node::leaf(Role::ListItem, "first", 2, false))
+                    .child(Node::leaf(Role::ListItem, "second", 3, false)),
+            ],
         );
-        assert!(
-            !island.is_reachable(),
-            "an island with nothing to focus is not a keyboard destination"
-        );
+        assert!(notes.is_reachable());
+
+        // An island with no content at all is not a destination for anyone, and a label announcing
+        // an absence is worse than no island.
+        let empty = island("Decoration", Vec::new());
+        assert!(!empty.is_reachable());
     }
 
     #[test]
@@ -163,15 +177,19 @@ mod tests {
     #[test]
     fn island_nodes_merge_into_the_host_focus_order() {
         // The end-to-end property: an island's controls are reachable by the same Tab walk
-        // that reaches native controls.
+        // that reaches native controls. The merge is done by the tree, not by the test
+        // inserting the nodes by hand — a test that assembles the tree itself proves only
+        // that the test's assembly was right.
         let island = island("Toolbar", vec![Node::leaf(Role::Button, "Italic", 3, true)]);
-        let tree = SemanticTree::new()
-            .root(
-                Node::with_children(Role::Window, "W", 0, false)
-                    .child(Node::leaf(Role::Button, "Save", 1, true))
-                    .child(Node::leaf(Role::Button, "Save As", 2, true)),
-            )
-            .root(island.nodes.into_iter().next().expect("a node"));
+        let mut tree = SemanticTree::new().root(
+            Node::with_children(Role::Window, "W", 0, false)
+                .child(Node::leaf(Role::Button, "Save", 1, true))
+                .child(Node::leaf(Role::Button, "Save As", 2, true)),
+        );
+        assert!(
+            tree.merge_island(&island),
+            "a reachable island must be merged into the tree"
+        );
 
         let mut focus = FocusState::new(FocusOwner::Native);
         let mut seen = Vec::new();
@@ -190,6 +208,43 @@ mod tests {
             seen,
             vec!["Save", "Save As", "Italic"],
             "island controls are in the walk"
+        );
+    }
+
+    #[test]
+    fn an_unreachable_island_is_not_merged_into_the_tree() {
+        // The refusal matters as much as the merge: a composited surface with a control
+        // nobody can hear must not reach the focus ring.
+        let island = island(
+            "Toolbar",
+            vec![
+                Node::leaf(Role::Button, "Bold", 1, true),
+                Node::leaf(Role::Button, "", 2, true),
+            ],
+        );
+        let mut tree = SemanticTree::new();
+        assert!(
+            !tree.merge_island(&island),
+            "an island with an unnamed control must be refused"
+        );
+        assert!(tree.is_empty(), "a refused island must leave no trace");
+    }
+
+    #[test]
+    fn a_merged_island_becomes_a_group_in_the_announcement() {
+        // The island is announced as a group with its own label, so a screen-reader user
+        // hears where they are.
+        let island = island("Toolbar", vec![Node::leaf(Role::Button, "Bold", 1, true)]);
+        let mut tree = SemanticTree::new();
+        assert!(tree.merge_island(&island));
+        let announcement = tree.to_announcement();
+        assert!(
+            announcement.contains("group Toolbar"),
+            "the island must be announced: {announcement}"
+        );
+        assert!(
+            announcement.contains("button Bold"),
+            "the island's controls must be announced: {announcement}"
         );
     }
 }

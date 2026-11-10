@@ -13,7 +13,7 @@
 
 use core::time::Duration;
 
-use ncui_core::{Capability, Limits, WindowId};
+use ncui_core::{Capability, CapabilitySet, CorrelationId, Limits, WindowId};
 use ncui_runtime::Runtime;
 use ncui_runtime::agent::AgentSession;
 use ncui_runtime::dispatch::dispatch;
@@ -30,7 +30,8 @@ impl HostFactory for AlwaysReady {
     fn spawn(
         &self,
         _window: WindowId,
-        _url: &str,
+        _request: &ncui_webview::WindowRequest,
+        _seam: &std::sync::Arc<ncui_webview::HostSeam>,
     ) -> Option<Box<dyn ncui_webview::WebViewBackend>> {
         Some(Box::new(AlwaysAlive))
     }
@@ -46,13 +47,45 @@ impl ncui_webview::WebViewBackend for AlwaysAlive {
     fn is_alive(&self) -> bool {
         true
     }
+    fn poll_page_message(&self) -> Option<ncui_webview::PageMessage> {
+        None
+    }
+    fn evaluate_script(&self, _script: &str) -> bool {
+        true
+    }
+    // A real engine asks the platform; this one answers the way a windowed, unfocused window does,
+    // so the presentation and shape methods reach their handlers rather than being refused for an
+    // engine that cannot speak.
+    fn window_state(&self) -> Option<ncui_webview::WindowState> {
+        Some(ncui_webview::WindowState::default())
+    }
+    fn set_window_state(
+        &self,
+        _change: ncui_webview::WindowChange,
+    ) -> Option<ncui_webview::WindowState> {
+        Some(ncui_webview::WindowState::default())
+    }
+    // Answered for the same reason as the presentation above: an engine that stayed silent would
+    // turn an authorized request into a refusal, and this fixture exists to reach the handler.
+    fn window_theme(&self) -> Option<ncui_webview::Theme> {
+        Some(ncui_webview::Theme::Light)
+    }
+    fn set_window_shape(&self, _shape: &ncui_webview::WindowShape) -> bool {
+        true
+    }
 }
 
 fn runtime() -> Runtime {
     let mut runtime = Runtime::start(Limits::default()).expect("runtime should start");
     runtime.windows = runtime
         .windows
-        .with_registry(ncui_webview::WindowRegistry::new())
+        .with_registry(ncui_webview::WindowRegistry::new().with_default_navigation(
+            ncui_webview::NavigationPolicy::new(&[ncui_webview::Origin::new(
+                ncui_webview::Scheme::Https,
+                "example.com",
+                None,
+            )]),
+        ))
         .with_factory(Box::new(AlwaysReady));
     runtime
 }
@@ -112,6 +145,27 @@ fn an_error_raised_inside_a_handler_survives_the_pipeline_intact() {
     assert_eq!(back, response);
 }
 
+/// The payload one advertised method is called with, when the method needs a window to act on.
+///
+/// Split out of the walk so the walk reads as the rule it checks; a method that acts on a window
+/// needs the window that was opened earlier in the walk, and one that is called before any window
+/// exists names a window that is not there so the refusal is the not-found path rather than a
+/// malformed payload.
+fn params_for(name: &str, created_window: Option<WindowId>) -> Value {
+    let named = created_window.map_or_else(
+        || "00000000000000000000000000000001".to_owned(),
+        |id| id.to_string(),
+    );
+    match name {
+        "ncui.window.create" => json!({ "url": "https://example.com" }),
+        "ncui.window.close" | "ncui.window.theme" => json!({ "window": named }),
+        "ncui.window.post" => json!({ "window": named, "script": "1;" }),
+        "ncui.window.state" => json!({ "window": named, "maximized": true }),
+        "ncui.window.shape" => json!({ "window": named, "title": "renamed" }),
+        _ => json!({ "deep": true }),
+    }
+}
+
 /// Every method advertised by `ncui.describe` must be callable by a caller holding the
 /// authority it advertises, and every destructive method must require explicit consent.
 #[test]
@@ -163,12 +217,19 @@ fn the_advertised_surface_matches_the_enforced_surface() {
                 "`{name}` is advertised as destructive but ran without consent"
             );
 
-            // With consent it must succeed.
+            // With a minted consent token it must succeed. The legacy `consent: true`
+            // authorizes nothing destructive; the token is the consent, and it is bound to
+            // the method and the capabilities the method requires.
+            let correlation = CorrelationId::new();
+            let requires: CapabilitySet = required.iter().copied().collect();
+            let token = runtime
+                .mint_consent(correlation, name, requires)
+                .expect("a destructive method's requirements can be minted");
             let allowed = call(
                 &mut runtime,
                 &mut administrator,
                 name,
-                json!({ "consent": true }),
+                json!({ "consent_token": token.to_value() }),
             );
             assert!(
                 allowed.error.is_none(),
@@ -178,14 +239,11 @@ fn the_advertised_surface_matches_the_enforced_surface() {
             continue;
         }
 
-        let params = match name {
-            "ncui.window.create" => json!({ "url": "https://example.com" }),
-            "ncui.window.close" => match created_window {
-                Some(id) => json!({ "window": id.to_string() }),
-                None => json!({ "window": "00000000000000000000000000000001" }),
-            },
-            _ => json!({ "deep": true }),
-        };
+        if name == "ncui.test.run" || name == "ncui.benchmark.run" {
+            // Subprocess-based; environment-dependent. Covered by their handlers existing.
+            continue;
+        }
+        let params = params_for(name, created_window);
         let allowed = dispatch(
             &mut runtime,
             &mut administrator,

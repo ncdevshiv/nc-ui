@@ -11,12 +11,24 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+# The real window host. Off by default so the CLI builds on a machine with no display;
+# a release build turns it on, and `ncui serve` then opens real windows.
+wry-host = ["ncui-runtime/wry-host"]
+
 [dependencies]
 ncui-core = { workspace = true }
+ncui-app = { workspace = true }
+ncui-webview = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+ncui-native = { workspace = true }
 ncui-runtime = { workspace = true }
 ncui-security = { workspace = true }
+# A digest per bundled file. Already in the tree as a transitive dependency; the bundle makes it
+# direct, so no new crate enters the graph.
+sha2 = { workspace = true }
 
 [[bin]]
 name = "ncui"

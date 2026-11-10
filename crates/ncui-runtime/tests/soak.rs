@@ -21,7 +21,7 @@
     reason = "test assertions must abort loudly on failure"
 )]
 
-use ncui_core::{Limits, LimitsBuilder};
+use ncui_core::{Capability, CapabilitySet, Limits, LimitsBuilder};
 use ncui_observability::logring::{LogLevel, LogRecord};
 use ncui_observability::metrics::{Labels, MetricsRegistry};
 use ncui_runtime::agent::AgentSession;
@@ -62,7 +62,12 @@ fn limits() -> Limits {
         .max_ipc_frame_bytes(64 * 1024)
         .max_worker_payload_bytes(32 * 1024)
         .agent_rate(10_000, 10_000)
-        .worker_shutdown_timeout_ms(1_000)
+        // Generous on purpose. This file is about what a pool leaves *behind* over many cycles —
+        // markers, metric series, the log ring — and not about how fast shutdown returns, which
+        // `ncui-workers` tests on its own with a deliberately tiny budget. A budget tight enough to
+        // trip on a loaded machine (a runner building another target at the same time) would report
+        // a stalled worker that was merely not scheduled yet, which is a flake rather than a leak.
+        .worker_shutdown_timeout_ms(10_000)
         .build()
         .expect("limits")
 }
@@ -136,7 +141,22 @@ fn a_runtime_returns_to_baseline_after_repeated_cycles() {
             "ncui.logs.purge",
             "ncui.metrics.query",
         ] {
-            let request = Request::new(json!(1), method, json!({ "consent": true }));
+            let params = if method == "ncui.logs.purge" {
+                // The destructive method needs a minted token; the legacy `consent: true`
+                // authorizes nothing and would leave the ring unpurged.
+                let correlation = ncui_core::CorrelationId::new();
+                let token = runtime
+                    .mint_consent(
+                        correlation,
+                        method,
+                        CapabilitySet::empty().with(Capability::ReadLogs),
+                    )
+                    .expect("mint");
+                json!({ "consent_token": token.to_value() })
+            } else {
+                json!({})
+            };
+            let request = Request::new(json!(1), method, params);
             let _ = dispatch::dispatch_with(
                 &mut runtime,
                 &mut session,

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "apps": [
+    {
+      "name": "electron-quick-start",
+      "framework": "electron",
+      "source": "https://github.com/electron/electron-quick-start",
+      "commit": "ecfb901f49746b62ca1c2b157d082d960cb2399f",
+      "port": "ports/electron-quick-start",
+      "window_title": "Hello World!",
+      "ipc": "echo"
+    },
+    {
+      "name": "example-tauri-app",
+      "framework": "tauri",
+      "source": "https://github.com/AlexMercedCoder/example-tauri-app",
+      "commit": "c178b4f8859aa7f3dbd7bca650a95aef411e14e2",
+      "port": "ports/tauri-word-signal",
+      "window_title": "exampleapp",
+      "ipc": "return_string"
+    }
+  ]
+}

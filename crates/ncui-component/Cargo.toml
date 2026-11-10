@@ -1,0 +1,20 @@
+[package]
+name = "ncui-component"
+description = "The component host: bounded WASM execution, gated behind the component ABI's capability negotiation."
+version.workspace = true
+edition.workspace = true
+rust-version = "1.98"
+license.workspace = true
+repository.workspace = true
+authors = ["NC-UI Contributors"]
+
+[lints]
+workspace = true
+
+[dependencies]
+ncui-core = { workspace = true }
+ncui-abi = { workspace = true }
+serde_json = { workspace = true }
+# ADR-012's third exception: an interpreter is the only way to run a component without
+# `unsafe`, which the workspace forbids. Confined to this crate for one purpose.
+wasmi = { workspace = true }

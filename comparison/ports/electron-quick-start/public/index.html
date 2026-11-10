@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <!-- The host injects its bridge as an inline initialization script, so the CSP must allow
+         inline scripts; with `script-src 'self'` alone the bridge is blocked and the page has
+         no runtime to ask about itself. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
+    />
+    <link href="./styles.css" rel="stylesheet" />
+    <title>Hello World!</title>
+  </head>
+  <body>
+    <main>
+      <h1>Hello World!</h1>
+      <p>
+        We are running on NC-UI runtime <span id="runtime-version"></span>,
+        API <span id="api-version"></span>,
+        on <span id="platform"></span>,
+        with <span id="method-count"></span> agent methods.
+      </p>
+      <p id="status">Asking the runtime who it is…</p>
+      <pre id="bench" aria-live="polite"></pre>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

@@ -10,7 +10,12 @@
 use core::fmt;
 
 /// What a component imports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The `serde` names are the wire names, and they are the same strings [`Self::as_str`]
+/// returns — a test asserts the two cannot drift, because a manifest parsed under one name
+/// and rendered under another is a component that means something different on each side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ImportKind {
     /// A capability check the component will make at run time.
     CapabilityCheck,
@@ -56,7 +61,8 @@ pub struct Import {
 }
 
 /// What a component exports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ExportKind {
     /// A function the host may call.
     Function,
@@ -257,6 +263,33 @@ mod tests {
     fn wire_names_are_stable() {
         assert_eq!(ImportKind::CapabilityCall.as_str(), "capability_call");
         assert_eq!(ExportKind::Function.as_str(), "function");
+    }
+
+    #[test]
+    fn the_serialiser_writes_the_same_name_as_str_does() {
+        // Two spellings of one kind is how a manifest written by tooling stops parsing at the
+        // host, and the failure looks like a malformed component rather than a drift.
+        for (kind, name) in [
+            (ImportKind::CapabilityCheck, "capability_check"),
+            (ImportKind::CapabilityCall, "capability_call"),
+            (ImportKind::ResourceBorrow, "resource_borrow"),
+        ] {
+            assert_eq!(kind.as_str(), name);
+            let rendered = serde_json::to_string(&kind).expect("a plain enum is serialisable");
+            assert_eq!(rendered, format!("\"{name}\""));
+            let parsed: ImportKind =
+                serde_json::from_str(&rendered).expect("the same spelling reads back");
+            assert_eq!(parsed, kind);
+        }
+        for (kind, name) in [
+            (ExportKind::Function, "function"),
+            (ExportKind::Resource, "resource"),
+            (ExportKind::Value, "value"),
+        ] {
+            assert_eq!(kind.as_str(), name);
+            let rendered = serde_json::to_string(&kind).expect("a plain enum is serialisable");
+            assert_eq!(rendered, format!("\"{name}\""));
+        }
     }
 
     #[test]

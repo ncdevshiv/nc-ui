@@ -1,0 +1,26 @@
+[package]
+name = "ncui-native"
+description = "The native capability surface: filesystem access, contained to one root, for a page that holds the capability."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors = ["NC-UI Contributors"]
+
+[lints]
+workspace = true
+
+[features]
+# Enables global shortcuts, which need the platform's own registration call. Off by default: on
+# Linux the crate needs a connection to an X server, which a headless machine does not have, so
+# gating it keeps the default build — and the Linux gate — exactly as they are.
+global-hotkeys = ["dep:global-hotkey"]
+
+[dependencies]
+ncui-core = { workspace = true }
+ncui-security = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+global-hotkey = { workspace = true, optional = true }

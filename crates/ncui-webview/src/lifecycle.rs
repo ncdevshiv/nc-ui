@@ -10,6 +10,7 @@
 //! window" as a distinct, testable case, which is exactly the case that must not be silent.
 
 use core::fmt;
+use std::sync::{Arc, Mutex};
 
 /// Where a host is in its life.
 ///
@@ -113,22 +114,32 @@ fn legal(from: HostState, to: HostState) -> Option<&'static str> {
 }
 
 /// A window host's lifecycle.
+///
+/// The state is shared rather than owned, because a window and the seam that governs it
+/// must agree about whether the host is serving. Two copies of the state would be two
+/// answers to the same question, and the one that mattered — the seam's — would be the
+/// one nobody advanced: a window that was running and a seam that was not.
+///
+/// Sharing is why `transition` takes `&self` rather than `&mut self`. A transition is
+/// still a state machine; it is simply one that more than one holder can drive.
 #[derive(Debug, Clone, Default)]
 pub struct WindowLifecycle {
-    state: Option<HostState>,
+    state: Arc<Mutex<Option<HostState>>>,
 }
 
 impl WindowLifecycle {
     /// A fresh, unattached host.
     #[must_use]
     pub fn new() -> Self {
-        Self { state: None }
+        Self {
+            state: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Where the host is, or `None` before it has been created.
     #[must_use]
-    pub const fn state(&self) -> Option<HostState> {
-        self.state
+    pub fn state(&self) -> Option<HostState> {
+        *self.lock()
     }
 
     /// Moves to `to`, or explains why not.
@@ -138,11 +149,12 @@ impl WindowLifecycle {
     /// Returns the refused transition when the edge is not one of the legal ones. The refusal
     /// is a value rather than a panic: a teardown path that raced a crash must be able to
     /// report that, not abort.
-    pub fn transition(&mut self, to: HostState) -> Result<(), IllegalTransition> {
-        let Some(from) = self.state else {
+    pub fn transition(&self, to: HostState) -> Result<(), IllegalTransition> {
+        let mut state = self.lock();
+        let Some(from) = *state else {
             // Creation is the only transition available before the host exists.
             return if to == HostState::Created {
-                self.state = Some(HostState::Created);
+                *state = Some(HostState::Created);
                 Ok(())
             } else {
                 Err(IllegalTransition {
@@ -155,7 +167,7 @@ impl WindowLifecycle {
 
         match legal(from, to) {
             Some(_) => {
-                self.state = Some(to);
+                *state = Some(to);
                 Ok(())
             }
             None => Err(IllegalTransition {
@@ -172,14 +184,25 @@ impl WindowLifecycle {
 
     /// Whether the host is serving requests right now.
     #[must_use]
-    pub const fn is_serving(&self) -> bool {
-        matches!(self.state, Some(HostState::Running))
+    pub fn is_serving(&self) -> bool {
+        matches!(self.state(), Some(HostState::Running))
     }
 
     /// Whether the engine died and the host has not been torn down.
     #[must_use]
-    pub const fn is_crashed(&self) -> bool {
-        matches!(self.state, Some(HostState::Crashed))
+    pub fn is_crashed(&self) -> bool {
+        matches!(self.state(), Some(HostState::Crashed))
+    }
+
+    /// Locks the shared state, recovering from a poisoned lock.
+    ///
+    /// A panic in one holder must not make the host's state permanently unreadable: a
+    /// poisoned lock would otherwise turn a crash in unrelated code into a runtime that
+    /// could not report whether it was serving.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<HostState>> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -194,7 +217,7 @@ mod tests {
     use super::*;
 
     fn attached() -> WindowLifecycle {
-        let mut host = WindowLifecycle::new();
+        let host = WindowLifecycle::new();
         host.transition(HostState::Created).expect("created");
         host.transition(HostState::Attaching).expect("attaching");
         host.transition(HostState::Running).expect("running");
@@ -203,7 +226,7 @@ mod tests {
 
     #[test]
     fn a_host_walks_the_happy_path() {
-        let mut host = WindowLifecycle::new();
+        let host = WindowLifecycle::new();
         assert_eq!(host.state(), None);
         for state in [
             HostState::Created,
@@ -222,7 +245,7 @@ mod tests {
 
     #[test]
     fn a_running_host_serves_and_a_suspended_one_does_not() {
-        let mut host = attached();
+        let host = attached();
         assert!(host.is_serving());
         host.transition(HostState::Suspended).expect("suspend");
         assert!(!host.is_serving(), "a suspended host must not serve");
@@ -242,7 +265,7 @@ mod tests {
             HostState::Running,
             HostState::Suspended,
         ] {
-            let mut host = WindowLifecycle::new();
+            let host = WindowLifecycle::new();
             host.transition(HostState::Created).expect("created");
             host.transition(HostState::Attaching).expect("attaching");
             if from == HostState::Running {
@@ -260,7 +283,7 @@ mod tests {
 
     #[test]
     fn a_crashed_host_can_be_torn_down_but_not_resumed() {
-        let mut host = attached();
+        let host = attached();
         host.transition(HostState::Crashed).expect("crash");
         let refused = host.transition(HostState::Running).expect_err("no revival");
         assert!(
@@ -274,7 +297,7 @@ mod tests {
 
     #[test]
     fn a_destroyed_host_is_terminal_and_refuses_everything() {
-        let mut host = attached();
+        let host = attached();
         host.transition(HostState::Destroying).expect("tear down");
         host.transition(HostState::Destroyed).expect("torn down");
         assert!(host.state().expect("state").is_terminal());
@@ -303,7 +326,7 @@ mod tests {
     fn a_host_cannot_skip_attachment_and_serve() {
         // Created -> Running is the edge that would let a host serve before its engine
         // exists, which is how "the page loaded but nothing works" happens.
-        let mut host = WindowLifecycle::new();
+        let host = WindowLifecycle::new();
         host.transition(HostState::Created).expect("created");
         let refused = host
             .transition(HostState::Running)
@@ -314,7 +337,7 @@ mod tests {
 
     #[test]
     fn nothing_is_reachable_before_the_host_exists() {
-        let mut host = WindowLifecycle::new();
+        let host = WindowLifecycle::new();
         for state in [HostState::Running, HostState::Crashed, HostState::Destroyed] {
             host.transition(state)
                 .expect_err("only `Created` is reachable before creation");
@@ -324,7 +347,7 @@ mod tests {
     #[test]
     fn every_illegal_transition_explains_itself() {
         // An undiagnosable refusal is what makes a lifecycle bug unauditable.
-        let mut host = attached();
+        let host = attached();
         let refused = host
             .transition(HostState::Created)
             .expect_err("created is behind us");

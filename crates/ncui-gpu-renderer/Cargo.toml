@@ -1,0 +1,33 @@
+[package]
+name = "ncui-gpu-renderer"
+description = "wgpu-backed GPU renderer for GPU islands: device, queue, surface and render pass ownership."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors = ["NC-UI Contributors"]
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Enables the real wgpu device binding. Off by default so the crate — and the whole
+# workspace — compiles on any machine without pulling in a graphics dependency.
+wgpu-device = ["dep:wgpu"]
+# Enables the text layout path. Off by default because it pulls in a font stack; the
+# layout policy itself is pure and is tested without it.
+text-shaping = ["dep:rustybuzz"]
+
+[dependencies]
+ncui-core = { workspace = true }
+ncui-gpu = { workspace = true }
+
+wgpu = { workspace = true, optional = true }
+rustybuzz = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Window surface tests create a real window on a machine with a display; the adapter
+# layer owns the window, but the renderer's primitive is exercised against it here.
+tao = { version = "0.33", default-features = false, features = ["rwh_06"] }

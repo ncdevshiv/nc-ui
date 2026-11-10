@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- The host injects its bridge as an inline initialization script, so the CSP must allow
+         inline scripts; with `script-src 'self'` alone the bridge is blocked and the page has
+         no runtime to invoke the component through. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
+    />
+    <title>exampleapp</title>
+    <link href="./styles.css" rel="stylesheet" />
+  </head>
+  <body>
+    <main>
+      <h1>Word signal is currently: <span id="word"></span></h1>
+      <button id="trigger" type="button">Trigger the Tauri Action</button>
+      <p id="status">The page has not asked the native side anything yet.</p>
+      <pre id="bench" aria-live="polite"></pre>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,1 @@
+- **The release build carries the GPU island renderer.** `wry-host` now enables `gpu-islands`, so `ncui run` serves the `/__ncui/island` frame the counter example's canvas draws instead of a blank rectangle; the distributed size moves from 4.8 MiB to 11.2 MiB, which the comparison report records as the renderer's honest cost.

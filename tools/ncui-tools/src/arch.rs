@@ -14,14 +14,19 @@
 //! ncui-abi           (1)  ─┘
 //! ncui-workers       (2)  worker runtime: needs the scheduler and observability
 //! ncui-webview       (2)  webview host policy
+//! ncui-app           (2)  the application layer: manifest and loopback asset server
+//! ncui-native        (2)  native capabilities behind the capability model
+//! ncui-component     (2)  the component host: bounded WASM execution behind the ABI
 //! ncui-gpu           (2)  compositing boundary's decision logic
-//! ncui-runtime       (3)  composition: wires every subsystem together
-//! ncui-cli           (4)  user-facing entry point
-//! ncui-bench         (4)  measurement harness
+//! ncui-webview-wry   (3)  ─┐ platform adapters: a layer-2 port over a real library
+//! ncui-gpu-renderer  (3)  ─┘
+//! ncui-runtime       (4)  composition: wires every subsystem together
+//! ncui-cli           (5)  user-facing entry point
+//! ncui-bench         (5)  measurement harness
 //! ```
 //!
-//! [`LAYERS`] is the authoritative table; this diagram is a reading of it. `docs/adr/ADR-011`
-//! carries the same table and the reasoning behind it.
+//! [`LAYERS`] is the authoritative table; this diagram is a reading of it, and `docs/adr/ADR-011`
+//! carries the reasoning behind the rule along with a reading of its own.
 //!
 //! A crate may depend on any crate at a strictly lower layer, never on the same layer
 //! and never on a higher one. That single rule prevents most cycles by construction, but
@@ -50,11 +55,18 @@ pub const LAYERS: &[(&str, u8)] = &[
     ("ncui-scheduler", 1),
     ("ncui-workers", 2),
     ("ncui-webview", 2),
+    ("ncui-app", 2),
+    ("ncui-native", 2),
+    ("ncui-component", 2),
     ("ncui-gpu", 2),
+    // Layer 3 holds the platform adapters: a crate that implements a layer-2 port against a
+    // real platform library. They sit between the port and the runtime, which is what lets
+    // the runtime depend on a real host without depending on the policy that describes one.
     ("ncui-webview-wry", 3),
-    ("ncui-runtime", 3),
-    ("ncui-cli", 4),
-    ("ncui-bench", 4),
+    ("ncui-gpu-renderer", 3),
+    ("ncui-runtime", 4),
+    ("ncui-cli", 5),
+    ("ncui-bench", 5),
 ];
 
 /// One internal crate and the internal crates it depends on.

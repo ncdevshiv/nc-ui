@@ -51,7 +51,7 @@ def run(command, cwd=ROOT, env=None, check=True):
     """Runs a command, returning its stdout."""
     merged = {**os.environ, **(env or {})}
     proc = subprocess.run(
-        command, cwd=cwd, env=merged, capture_output=True, text=True, timeout=3600
+        command, cwd=cwd, env=merged, capture_output=True, text=True, encoding="utf-8", timeout=3600
     )
     if check and proc.returncode != 0:
         sys.stderr.write(proc.stdout + proc.stderr)
@@ -106,7 +106,13 @@ def build_release_binary() -> Path:
     print("building the release binary (reproducible) ...")
     # 2024-01-01T00:00:00Z, a fixed point rather than "now".
     epoch = {"SOURCE_DATE_EPOCH": "1704067200"}
-    run(["cargo", "build", "--release", "-p", "ncui-cli"], env=epoch)
+    # The `wry-host` feature is what gives the binary a real window host. Without it the
+    # shipped `ncui` can serve the agent API but cannot open a window, so `ncui run`
+    # would refuse every application.
+    run(
+        ["cargo", "build", "--release", "-p", "ncui-cli", "--features", "ncui-cli/wry-host"],
+        env=epoch,
+    )
     binary = ROOT / "target" / "release" / "ncui.exe"
     if not binary.exists():
         binary = ROOT / "target" / "release" / "ncui"
@@ -127,7 +133,15 @@ def reproducible_check(binary: Path) -> bool:
         # A different target directory rules out an incremental no-op being reported as a
         # match, which would make this check pass for the wrong reason.
         run(
-            ["cargo", "build", "--release", "-p", "ncui-cli"],
+            [
+                "cargo",
+                "build",
+                "--release",
+                "-p",
+                "ncui-cli",
+                "--features",
+                "ncui-cli/wry-host",
+            ],
             env={"SOURCE_DATE_EPOCH": "1704067200", "CARGO_TARGET_DIR": scratch},
         )
         rebuilt = Path(scratch) / "release" / binary.name
@@ -165,7 +179,7 @@ def verify(path: Path) -> bool:
         return False
     proc = subprocess.run(
         ["gpg", "--batch", "--verify", str(signature), str(path)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     if proc.returncode != 0:
         print(f"  SIGNATURE INVALID for {path.name}")

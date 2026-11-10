@@ -91,7 +91,46 @@ impl AgentSession {
         })
     }
 
-    /// Verifies a bearer token in constant time and, on success, authenticates the session.
+    /// Creates a session for a page inside a granted window.
+    ///
+    /// A page is not an agent. It has no bearer token and no role; its authority is the
+    /// window's grant, and the host vouched for it by granting that window in the first
+    /// place. So the session starts authenticated — the grant *is* the credential — and it
+    /// holds exactly the capabilities the grant carries and nothing else.
+    ///
+    /// The role is `Observer` because there is no page role: it names the absence of a
+    /// standing administrative authority, and the granted set is the real authority. The
+    /// audit trail records both, so a reader can see that the actor was a page and what it
+    /// was permitted to do.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::Validation`] if `agent_id` is blank, for the same reason as
+    /// [`AgentSession::new`]: an audit trail that cannot name its actor cannot answer
+    /// "who did this".
+    pub fn for_page(
+        agent_id: impl Into<String>,
+        granted: CapabilitySet,
+        limiter: Arc<Mutex<RateLimiter>>,
+    ) -> Result<Self> {
+        let agent_id = agent_id.into();
+        if agent_id.trim().is_empty() {
+            return Err(NcError::new(ErrorKind::Validation {
+                field: "agent_id".to_owned(),
+                reason: "a page session must be attributable to a named window".to_owned(),
+            })
+            .operation("agent::session::for_page"));
+        }
+        Ok(Self {
+            agent_id,
+            granted,
+            role: AgentRole::Observer,
+            limiter,
+            authenticated: true,
+        })
+    }
+
+    /// Verifies a bearer token and, on success, authenticates the session.
     ///
     /// Authentication is state rather than a convention. An unauthenticated session cannot
     /// authorize, and therefore cannot dispatch, so a caller that forgets to authenticate

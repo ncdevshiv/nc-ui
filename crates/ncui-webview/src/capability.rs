@@ -37,6 +37,12 @@ impl CapabilityGrant {
         Self { granted }
     }
 
+    /// A grant of exactly the capabilities in an existing set.
+    #[must_use]
+    pub const fn from_set(granted: CapabilitySet) -> Self {
+        Self { granted }
+    }
+
     /// The capabilities granted.
     #[must_use]
     pub const fn granted(&self) -> CapabilitySet {

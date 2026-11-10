@@ -146,6 +146,19 @@ impl Rect {
         LogicalPoint::new(point.x + self.x, point.y + self.y)
     }
 
+    /// The rectangle this shares with `other`, or `None` when they do not overlap.
+    ///
+    /// Rectangles that merely touch share no area, so the answer is `None` rather than a rectangle
+    /// of no width: a clipped row of zero height is not a row a renderer should be handed.
+    #[must_use]
+    pub fn intersection(&self, other: &Self) -> Option<Self> {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let right = self.right().min(other.right());
+        let bottom = self.bottom().min(other.bottom());
+        (right > x && bottom > y).then(|| Self::new(x, y, right - x, bottom - y))
+    }
+
     /// Whether this rectangle entirely contains `other`.
     #[must_use]
     pub fn contains_rect(&self, other: &Self) -> bool {
@@ -893,5 +906,26 @@ mod tests {
         assert_eq!(RenderMode::Gpu.to_string(), "gpu");
         assert_eq!(RenderMode::Dom.as_str(), "dom");
         assert_eq!(RenderMode::Native.as_str(), "native");
+    }
+
+    #[test]
+    fn two_rectangles_share_exactly_the_area_they_overlap() {
+        let rect = Rect::new(10.0, 10.0, 20.0, 20.0);
+        assert_eq!(
+            rect.intersection(&Rect::new(0.0, 0.0, 20.0, 20.0)),
+            Some(Rect::new(10.0, 10.0, 10.0, 10.0)),
+            "the shared corner is the area both cover"
+        );
+        assert_eq!(
+            rect.intersection(&Rect::new(15.0, 15.0, 100.0, 100.0)),
+            Some(Rect::new(15.0, 15.0, 15.0, 15.0)),
+            "a rectangle inside another shares the part that is inside"
+        );
+        assert_eq!(
+            rect.intersection(&Rect::new(30.0, 0.0, 10.0, 10.0)),
+            None,
+            "rectangles that touch along an edge share no area, which is not a rectangle of no width"
+        );
+        assert_eq!(rect.intersection(&Rect::new(100.0, 100.0, 1.0, 1.0)), None);
     }
 }

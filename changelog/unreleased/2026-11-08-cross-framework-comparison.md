@@ -1,0 +1,1 @@
+- **`comparison/` measures NC-UI against Electron and Tauri on two cloned, ported applications.** The harness builds and runs both sides and records cold start, idle working set, IPC round trip and distributed size; the machine-readable report is `comparison/bench/results/windows.json`.

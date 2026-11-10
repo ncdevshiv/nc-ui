@@ -5,7 +5,11 @@
 # machine-checked rather than aspirational.
 
 [graph]
-all-features = false
+# Every feature, not the default set. The platform adapters — `wry`, `tao`, `wgpu` and
+# `rustybuzz` — are behind feature flags, so a default-feature graph would not contain the
+# dependencies that actually reach a user's machine. A supply-chain check that only sees
+# the default features is a check of the tree nobody ships.
+all-features = true
 
 [advisories]
 version = 2

@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Notes</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --ink: #16181d;
+        --paper: #f6f7f9;
+        --line: #d7dae0;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --ink: #e8eaed;
+          --paper: #16181d;
+          --line: #2c2f36;
+        }
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+        color: var(--ink);
+        background: var(--paper);
+      }
+      main {
+        width: min(26rem, 90vw);
+        padding: 2rem;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+      }
+      h1 {
+        margin: 0 0 0.5rem;
+        font-size: 1.25rem;
+      }
+      p {
+        margin: 0 0 0.75rem;
+      }
+      .place {
+        font-variant-numeric: tabular-nums;
+        color: color-mix(in srgb, var(--ink) 70%, transparent);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Notes</h1>
+      <p>
+        This window was opened by the counter page under the name <code>notes</code>. That name
+        is what makes it remembered: the runtime writes down where this window was when it
+        closes, and puts it back there the next time the page opens it.
+      </p>
+      <p class="place" id="place">Asking the runtime where this window is…</p>
+    </main>
+
+    <script type="module">
+      // The window asks the runtime for the window list and finds itself in it. `list_windows`
+      // is a read-only action, so a window opened by a page gets it without the application
+      // having to grant anything more.
+      window.ncui
+        .invoke("list_windows", {})
+        .then((answer) => {
+          const mine = answer.windows.find((entry) => entry.url.endsWith("notes.html"));
+          document.getElementById("place").textContent = mine
+            ? `This window is at ${mine.x ?? "the platform's choice"}, ` +
+              `${mine.y ?? "—"} and is ${mine.width}×${mine.height}.`
+            : "The runtime does not list this window yet.";
+        })
+        .catch((error) => {
+          document.getElementById("place").textContent =
+            `The runtime refused list_windows: ${error.message}`;
+        });
+    </script>
+  </body>
+</html>

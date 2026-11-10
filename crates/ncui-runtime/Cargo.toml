@@ -11,9 +11,50 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Enables global shortcuts: the manifest declares them and the application holds them while
+# it runs. Off by default for the same reason the crate underneath gates them.
+global-shortcuts = ["ncui-native/global-hotkeys"]
+
+default = []
+# The real window host. Off by default so the runtime compiles and its whole test suite
+# runs on a machine with no display and no graphics stack; a release build turns it on.
+# It carries the global-shortcut registration, because a desktop application with a
+# window host is exactly the application that declares a shortcut: the counter example
+# does, and the documented `ncui run` command must be able to run it rather than refuse
+# the manifest for want of the feature.
+# ADR-012 records the `wry`/`tao` dependency as a deliberate exception, confined to
+# `ncui-webview-wry`.
+wry-host = [
+    "dep:ncui-webview-wry",
+    "ncui-webview-wry/wry-engine",
+    "global-shortcuts",
+    "gpu-islands",
+]
+# Enables the application tray icon. Implies the window host, because a tray icon belongs
+# to the engine's event loop and there is no tray without one.
+tray-icon = ["wry-host", "ncui-webview-wry/tray-icon"]
+# The GPU island surface: the route a page fetches a rendered island from. Pulls in the renderer
+# and its `wgpu` binding, which is why it is off by default — a build with no graphics stack must
+# still compile and run.
+gpu-islands = [
+    "dep:ncui-gpu-renderer",
+    "ncui-gpu-renderer/wgpu-device",
+    "ncui-gpu-renderer/text-shaping",
+]
+
 [dependencies]
 ncui-core = { workspace = true }
+ncui-app = { workspace = true }
+ncui-native = { workspace = true }
+ncui-abi = { workspace = true }
+ncui-component = { workspace = true }
 ncui-webview = { workspace = true }
+ncui-webview-wry = { workspace = true, optional = true }
+ncui-gpu = { workspace = true }
+# Optional: only the island surface draws anything.
+ncui-gpu-renderer = { workspace = true, optional = true }
+ncui-a11y = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 ncui-ipc = { workspace = true }

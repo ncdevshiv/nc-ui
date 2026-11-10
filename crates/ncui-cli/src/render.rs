@@ -53,8 +53,144 @@ fn to_text(payload: &Value, command: &Command) -> String {
         Command::Roles => roles_text(payload),
         Command::Status { .. } => status_text(payload),
         Command::Serve { .. } => to_json(payload),
+        // `launch` runs an application, so its output is the run's: one shape for one event,
+        // whether the application was named by directory or by the name it was installed under.
+        Command::Run { .. } | Command::Launch { .. } => run_text(payload),
+        Command::Build { check, .. } => build_text(payload, *check),
+        Command::Update { .. } => update_text(payload),
+        Command::Install { .. } => install_text(payload),
+        Command::Uninstall { .. } => uninstall_text(payload),
+        Command::Installed { .. } => installed_text(payload),
         Command::Help => crate::usage::text(),
     }
+}
+
+/// The text form of an install.
+fn install_text(payload: &Value) -> String {
+    let mut out = String::new();
+    let installed = payload.get("installed").cloned().unwrap_or(Value::Null);
+    let _ = writeln!(
+        out,
+        "{} {}",
+        field(&installed, "name"),
+        field(&installed, "version")
+    );
+    let _ = writeln!(out, "into   {}", field(&installed, "directory"));
+    let _ = writeln!(out, "run    {}", field(&installed, "program"));
+    for registration in installed
+        .get("registrations")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice)
+    {
+        let _ = writeln!(out, "       registered {registration}");
+    }
+    out
+}
+
+/// The text form of an uninstall.
+fn uninstall_text(payload: &Value) -> String {
+    let removed = payload.get("removed").cloned().unwrap_or(Value::Null);
+    format!(
+        "removed {} from {}\n",
+        field(&removed, "name"),
+        field(&removed, "directory")
+    )
+}
+
+/// The text form of the list of installed applications.
+fn installed_text(payload: &Value) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "{}", field(payload, "root"));
+    let empty = Vec::new();
+    let applications = payload
+        .get("applications")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+    if applications.is_empty() {
+        let _ = writeln!(out, "nothing is installed here");
+        return out;
+    }
+    for application in applications {
+        let _ = writeln!(
+            out,
+            "{} {}  {}",
+            field(application, "name"),
+            field(application, "version"),
+            field(application, "directory")
+        );
+    }
+    out
+}
+
+/// The text form of a finished application run.
+fn run_text(payload: &Value) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{} {}",
+        field(payload, "application"),
+        field(payload, "version")
+    );
+    let _ = writeln!(out, "url    {}", field(payload, "url"));
+    let _ = writeln!(out, "window {}", field(payload, "window"));
+    let _ = writeln!(out, "reloads {}", field(payload, "reloads"));
+    let _ = writeln!(
+        out,
+        "served {} page calls",
+        field(payload, "page_calls_served")
+    );
+    out
+}
+
+/// Renders a build or a check.
+///
+/// A check that passed says so rather than printing the bundle again: the caller asked whether the
+/// bundle is current, and the answer is the point.
+fn build_text(payload: &Value, check: bool) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{} {}",
+        field(payload, "name"),
+        field(payload, "version")
+    );
+    let _ = writeln!(out, "identity {}", field(payload, "identity"));
+    if !check {
+        let _ = writeln!(out, "runtime  {}", field(payload, "runtime"));
+    }
+    let _ = writeln!(out, "out      {}", field(payload, "out"));
+    let _ = writeln!(
+        out,
+        "{} {} files",
+        if check { "matches " } else { "wrote   " },
+        field(payload, "files")
+    );
+    // The installer is only there when `--installer` asked for one, and a build that names it is
+    // telling the person what to hand to the user.
+    if let Some(installer) = payload.get("installer").and_then(Value::as_str) {
+        let _ = writeln!(out, "installer {installer}");
+    }
+    out
+}
+
+fn update_text(payload: &Value) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{} {} -> {}",
+        field(payload, "name"),
+        field(payload, "from_version"),
+        field(payload, "to_version")
+    );
+    let _ = writeln!(out, "installed {}", field(payload, "directory"));
+    if let Some(registrations) = payload.get("registrations").and_then(Value::as_array) {
+        for registration in registrations {
+            if let Some(text) = registration.as_str() {
+                let _ = writeln!(out, "  {text}");
+            }
+        }
+    }
+    out
 }
 
 fn version_text(payload: &Value) -> String {

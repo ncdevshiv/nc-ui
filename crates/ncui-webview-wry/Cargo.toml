@@ -16,11 +16,22 @@ default = []
 # Enables the real wry/tao engine binding. Enable on a machine/host that can build it;
 # Linux needs webkit2gtk-dev. Off by default so the crate always compiles.
 wry-engine = ["dep:wry", "dep:tao"]
+# Enables the GPU surface inside the host window. Pulls in wgpu; the host creates a
+# surface from its window and presents a frame, which is the adapter half of the
+# composition boundary ADR-002 requires. Off by default so the crate still compiles
+# on a machine with no graphics stack.
+gpu-surface = ["wry-engine", "dep:wgpu"]
+# Enables the tray icon. Implies the engine, because a tray icon without an event loop is
+# not a thing: it is created on the engine's own thread and lives beside the loop.
+tray-icon = ["wry-engine", "dep:tray-icon"]
 [dependencies]
 ncui-webview = { workspace = true }
 ncui-core = { workspace = true }
+ncui-gpu = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
 wry = { version = "0.57", optional = true, default-features = false, features = ["os-webview"] }
 tao = { version = "0.33", optional = true, default-features = false, features = ["rwh_06"] }
+wgpu = { workspace = true, optional = true }
+tray-icon = { workspace = true, optional = true }

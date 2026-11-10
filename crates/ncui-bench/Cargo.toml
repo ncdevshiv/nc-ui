@@ -13,6 +13,10 @@ workspace = true
 
 [dependencies]
 ncui-abi = { workspace = true }
+ncui-app = { workspace = true }
+ncui-native = { workspace = true }
+ncui-component = { workspace = true }
+ncui-gpu-renderer = { workspace = true, features = ["text-shaping"] }
 ncui-core = { workspace = true }
 ncui-a11y = { workspace = true }
 ncui-ipc = { workspace = true }
@@ -36,4 +40,8 @@ harness = false
 
 [[bench]]
 name = "throughput"
+harness = false
+
+[[bench]]
+name = "components"
 harness = false

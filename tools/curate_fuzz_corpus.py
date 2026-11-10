@@ -70,7 +70,7 @@ SEEDS = {
         "dotdot_in_name": b"..0",
         "absolute_unix": b"/etc/passwd",
         "windows_drive": b"C:\\Windows\\System32",
-        "unc_path": b"\\\\server\\share",
+        "unc_path": b"\\\\server\\share",  # ncui-allow-hygiene: fuzz seed construction
         "nul_byte": b"file\x00.txt",
         "trailing_dot": b"file.txt.",
         "trailing_space": b"dir ",

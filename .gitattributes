@@ -1,0 +1,28 @@
+# Line endings are fixed by the repository, not by each contributor's
+# `core.autocrlf`. `rustfmt.toml` sets `newline_style = "Unix"`, so every text
+# file must be LF on every platform or `cargo fmt --check` fails on a Windows
+# checkout while passing on Linux.
+#
+# `text=auto` lets git decide text vs binary by content, so images, archives and
+# other binaries are untouched. Files that genuinely need CRLF say so.
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.zip binary
+*.gz binary
+*.exe binary
+*.dll binary
+*.pdb binary

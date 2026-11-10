@@ -1837,7 +1837,7 @@
         },
         "metrics": {
           "verified": true,
-          "evidence": "artifacts/MANIFEST.txt records a SHA-256 per artefact, which is the number a consumer recomputes"
+          "evidence": "tools/build_release.py writes a SHA-256 per artefact into the release manifest and recomputes every entry when verifying, so the number a consumer checks is the one the script produced; the manifest itself is a build output and is not committed"
         },
         "documentation": {
           "verified": true,

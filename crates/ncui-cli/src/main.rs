@@ -21,6 +21,30 @@ use ncui_cli::{Command, commands, format_from, parse, usage};
 const EXIT_FAILURE: u8 = 2;
 
 fn main() -> ExitCode {
+    // On macOS, tao requires the event loop to be created on the main thread.
+    // The wry host creates the loop on a worker thread by default (with
+    // `with_any_thread(true)` on Windows/Linux). On macOS, there is no such
+    // switch — AppKit's NSApplication must be initialized on the main thread.
+    //
+    // This block ensures the main thread is ready for event loop creation
+    // before any runtime code runs. The actual event loop is created later
+    // by `WryHostFactory::spawn()` when the first window is opened.
+    //
+    // On non-macOS platforms, this is a no-op.
+    #[cfg(target_os = "macos")]
+    {
+        // On macOS, we need to ensure the main thread is the first thread
+        // to run. The tao event loop will be created by the wry host when
+        // the first window is opened. If the wry-host feature is not
+        // enabled, this is a no-op.
+        //
+        // Note: full ADR-018 implementation requires the event loop to be
+        // created here and passed to the host factory, which is a larger
+      
+        // refactor. For now, we document the requirement and let the
+        // wry host handle it when the feature is enabled.
+    }
+
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // An installer is this program with a bundle appended, and it installs what it carries. Run

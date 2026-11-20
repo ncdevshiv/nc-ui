@@ -17,6 +17,24 @@ pub(super) fn resized_script(size: tao::dpi::LogicalSize<f64>) -> String {
     )
 }
 
+/// What a page hears when files are dropped onto the window.
+///
+/// Delivered as an event with a `paths` array in the payload. Each path is a
+/// string representation of a dropped file. The page can register a listener
+/// via `window.ncui.on("drop", handler)` to receive these events.
+#[cfg(feature = "wry-engine")]
+pub(super) fn dropped_files_script(paths: &[std::path::PathBuf]) -> String {
+    let paths_json: Vec<String> = paths
+        .iter()
+        .filter_map(|p| p.to_str())
+        .map(|s| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")))
+        .collect();
+    format!(
+        "window.ncui && window.ncui.__dispatch({{\"event\":\"drop\",\"payload\":{{\"paths\":[{}]}}}});",
+        paths_json.join(",")
+    )
+}
+
 /// What a page hears when its window is moved, in logical pixels.
 ///
 /// The counterpart of the resize: a page that keeps something anchored to the window's place — a
@@ -27,4 +45,42 @@ pub(super) fn moved_script(position: tao::dpi::LogicalPosition<f64>) -> String {
         "window.ncui && window.ncui.__dispatch({{\"event\":\"moved\",\"payload\":{{\"x\":{},\"y\":{}}}}});",
         position.x, position.y
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dropped_files_script_contains_event_and_paths() {
+        let paths = vec![
+            std::path::PathBuf::from("/home/user/file.txt"),
+            std::path::PathBuf::from("C:\\data\\doc.pdf"),
+        ];
+        let script = dropped_files_script(&paths);
+        assert!(script.contains("\"event\":\"drop\""), "missing event: {script}");
+        assert!(script.contains("file.txt"), "missing path: {script}");
+        assert!(script.contains("doc.pdf"), "missing path: {script}");
+        assert!(script.contains("__dispatch"), "missing __dispatch: {script}");
+    }
+
+    #[test]
+    fn dropped_files_script_escapes_backslashes_and_quotes() {
+        let paths = vec![std::path::PathBuf::from("C:\\path\\file.txt")];
+        let script = dropped_files_script(&paths);
+        // Backslashes must be escaped in the JSON string.
+        assert!(
+            script.contains("C:\\\\path\\\\file.txt"),
+            "backslash not escaped: {script}"
+        );
+    }
+
+    #[test]
+    fn dropped_files_script_handles_empty_paths() {
+        let script = dropped_files_script(&[]);
+        assert!(
+            script.contains("\"paths\":[]"),
+            "empty paths should produce empty array: {script}"
+        );
+    }
 }

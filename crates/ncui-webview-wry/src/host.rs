@@ -37,7 +37,7 @@ use std::time::Duration;
 use ncui_webview::{HostSeam, PageMessage, WebViewBackend};
 
 #[cfg(feature = "wry-engine")]
-use crate::host_scripts::{moved_script, resized_script};
+use crate::host_scripts::{dropped_files_script, moved_script, resized_script};
 
 #[cfg(feature = "wry-engine")]
 use std::collections::HashMap;
@@ -444,6 +444,10 @@ fn engine() -> Option<&'static EventLoopProxy<HostEvent>> {
                   across both configurations keeps the call site from being conditional"
     )
 )]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the event loop match arms are each a distinct window event; splitting them would obscure the event flow"
+)]
 fn run_engine(event_loop: tao::event_loop::EventLoop<HostEvent>, proxy: EventLoopProxy<HostEvent>) {
     let mut windows: HashMap<u64, EngineWindow> = HashMap::new();
     // The tray belongs to the application rather than to a window, so it lives beside the windows
@@ -527,6 +531,17 @@ fn run_engine(event_loop: tao::event_loop::EventLoop<HostEvent>, proxy: EventLoo
                 if let Some(entry) = window_entry(&windows, window_id) {
                     let logical = position.to_logical::<f64>(entry.window.scale_factor());
                     tell_page(&windows, window_id, &moved_script(logical));
+                }
+            }
+            // The user dropped files onto the window. The page is told so it can
+            // process them. Each path is a file the user dragged from the OS.
+            Event::WindowEvent {
+                window_id,
+                event: WindowEvent::DroppedFile(path),
+                ..
+            } => {
+                if let Some(_entry) = window_entry(&windows, window_id) {
+                    tell_page(&windows, window_id, &dropped_files_script(&[path]));
                 }
             }
             Event::WindowEvent {

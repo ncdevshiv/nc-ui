@@ -1383,6 +1383,7 @@ fn a_window_is_put_back_where_it_was_left() {
         scratch.path(),
         Limits::default(),
         Some(state_file.clone()),
+        None,
         |_| Ok(()),
     )
     .expect("the application launches");
@@ -1513,6 +1514,7 @@ fn launch_with_state(
         scratch.path(),
         Limits::default(),
         Some(state_file),
+        None,
         |runtime| {
             let _registration = runtime
                 .register_page_command(

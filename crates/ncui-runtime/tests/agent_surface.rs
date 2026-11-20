@@ -158,6 +158,7 @@ fn params_for(name: &str, created_window: Option<WindowId>) -> Value {
     );
     match name {
         "ncui.window.create" => json!({ "url": "https://example.com" }),
+        "ncui.window.create.child" => json!({ "url": "https://example.com" }),
         "ncui.window.close" | "ncui.window.theme" => json!({ "window": named }),
         "ncui.window.post" => json!({ "window": named, "script": "1;" }),
         "ncui.app.emit" => json!({ "window": named, "event": "test" }),

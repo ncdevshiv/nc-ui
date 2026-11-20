@@ -139,6 +139,12 @@ pub fn method_table() -> Vec<MethodDescription> {
             false,
         ),
         entry(
+            "ncui.window.create.child",
+            "Open a child window on a URL. The child's grant is narrowed to a subset of the parent's. Requires a host to be installed.",
+            CapabilitySet::empty().with(Capability::Window),
+            false,
+        ),
+        entry(
             "ncui.window.post",
             "Evaluate a script in a window's page. The host-to-page half of the bridge.",
             CapabilitySet::empty().with(Capability::Window),
@@ -587,6 +593,22 @@ fn invoke(
             );
             serde_json::to_value(json!({ "id": id.to_string() })).map_err(|e| json_error(&e))
         }
+        "ncui.window.create.child" => {
+            let remembered = remembered_place(runtime, &request.params)?;
+            let window_request = window_request_param(&request.params, remembered)?;
+            let parent_grant = grant_param(&request.params)?;
+            let child_grant = parent_grant.unwrap_or_else(|| runtime.page_grant());
+            let id = runtime
+                .windows
+                .open(&window_request, Some(child_grant))
+                .map_err(window_rejection)?;
+            let _ = runtime.metrics.counter_inc(
+                "window.created",
+                &ncui_observability::metrics::Labels::new(),
+                1,
+            );
+            serde_json::to_value(json!({ "id": id.to_string(), "child": true })).map_err(|e| json_error(&e))
+        }
         "ncui.window.close" => {
             let id = window_id_param(&request.params)?;
             let closed = runtime.windows.close(id).map_err(window_rejection)?;
@@ -1032,6 +1054,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one test iterates every method; splitting it would hide the surface"
+    )]
     fn every_role_can_reach_the_diagnostic_surface_when_consenting() {
         // The window methods require `Window`, which only Administrator holds; every other
         // role must be denied. A host is installed so the Administrator's window calls reach
@@ -1065,7 +1091,7 @@ mod tests {
                     json!({ "consent_token": token.to_value() })
                 } else {
                     match method.name.as_str() {
-                        "ncui.window.create" => json!({ "url": "https://example.com" }),
+                        "ncui.window.create" | "ncui.window.create.child" => json!({ "url": "https://example.com" }),
                         // Closing a window and asking about its theme take the same parameter and
                         // nothing else, so they are one arm.
                         "ncui.window.close" | "ncui.window.theme" => match created_window {
@@ -1371,7 +1397,7 @@ mod tests {
                 json!({ "consent_token": token.to_value() })
             } else {
                 match method.name.as_str() {
-                    "ncui.window.create" => json!({ "url": "https://example.com" }),
+                    "ncui.window.create" | "ncui.window.create.child" => json!({ "url": "https://example.com" }),
                     "ncui.window.close" => json!({
                         "window": created_window
                             .expect("create is listed before close")

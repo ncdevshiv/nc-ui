@@ -82,6 +82,15 @@ pub enum Command {
         /// application that does not know why it opened.
         url: Option<String>,
     },
+    /// Scaffold a new application directory: a manifest, an entry page and a script.
+    ///
+    /// This is the first-run-to-window command: `ncui new my-app` writes the smallest
+    /// application that opens
+    /// from something that runs rather than from a blank directory and a page of docs.
+    New {
+        /// The directory to create and scaffold into. It must not already hold an application.
+        directory: String,
+    },
     /// Build a shippable bundle from an application directory.
     Build {
         /// The directory holding the application's manifest and assets.
@@ -234,6 +243,10 @@ pub const SUBCOMMANDS: &[(&str, &str)] = &[
     (
         "serve",
         "Serve the agent API on a loopback socket (--role <name>)",
+    ),
+    (
+        "new",
+        "Scaffold a new application directory: manifest, entry page and script",
     ),
     (
         "run",
@@ -517,6 +530,9 @@ where
 
     match subcommand.as_str() {
         "serve" => Ok(Command::Serve { role, registry }),
+        "new" => Ok(Command::New {
+            directory: positional.unwrap_or_default(),
+        }),
         "run" => Ok(Command::Run {
             directory,
             watch,

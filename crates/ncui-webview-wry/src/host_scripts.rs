@@ -35,6 +35,33 @@ pub(super) fn dropped_files_script(paths: &[std::path::PathBuf]) -> String {
     )
 }
 
+/// Script injected into the page to enable drag regions.
+///
+/// Listens for mousedown on elements matching `[data-ncui-drag-region]` and
+/// calls the host to initiate a window drag. This is the NC-UI equivalent of
+/// Tauri 2's CSS `app-region: drag` / Electron's `-webkit-app-region: drag`.
+///
+/// The script also calls `preventDefault()` on mousedown inside drag regions
+/// so the browser doesn't start a text selection, and honours `[data-ncui-no-drag]`
+/// for interactive elements inside a drag region (buttons, inputs, etc.).
+#[cfg(feature = "wry-engine")]
+pub(super) const DRAG_REGION_SCRIPT: &str = r#"(() => {
+  const DRAG = "[data-ncui-drag-region]";
+  const NO_DRAG = "[data-ncui-no-drag]";
+  document.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    const target = e.target;
+    if (!(target instanceof Element)) return;
+    if (target.closest(NO_DRAG)) return;
+    const region = target.closest(DRAG);
+    if (!region) return;
+    e.preventDefault();
+    if (window.ncui && window.ncui.invoke) {
+      window.ncui.invoke("window.drag_region", {}).catch(() => {});
+    }
+  }, true);
+})();"#;
+
 /// What a page hears when its window is moved, in logical pixels.
 ///
 /// The counterpart of the resize: a page that keeps something anchored to the window's place — a

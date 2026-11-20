@@ -138,6 +138,15 @@ pub trait WebViewBackend: core::fmt::Debug + Send {
     /// than reporting a success that never happened.
     fn evaluate_script(&self, script: &str) -> bool;
 
+    /// Initiate a window drag (titlebar drag region).
+    ///
+    /// Returns `true` when the drag was initiated, `false` when the backend
+    /// cannot perform this operation. Called by the page when the user
+    /// mousedowns on a `[data-ncui-drag-region]` element.
+    fn drag_window(&self) -> bool {
+        false
+    }
+
     /// Where the window is and how big it is, or `None` when this backend cannot say.
     ///
     /// A backend that cannot report its geometry says so rather than guessing: a guessed
@@ -218,6 +227,10 @@ impl<T: WebViewBackend + ?Sized> WebViewBackend for Box<T> {
 
     fn evaluate_script(&self, script: &str) -> bool {
         T::evaluate_script(self, script)
+    }
+
+    fn drag_window(&self) -> bool {
+        T::drag_window(self)
     }
 
     fn geometry(&self) -> Option<WindowGeometry> {

@@ -37,7 +37,7 @@ use std::time::Duration;
 use ncui_webview::{HostSeam, PageMessage, WebViewBackend};
 
 #[cfg(feature = "wry-engine")]
-use crate::host_scripts::{dropped_files_script, moved_script, resized_script};
+use crate::host_scripts::{DRAG_REGION_SCRIPT, dropped_files_script, moved_script, resized_script};
 
 #[cfg(feature = "wry-engine")]
 use std::collections::HashMap;
@@ -171,6 +171,11 @@ enum HostEvent {
     /// Close one window and drop its webview.
     Close {
         /// The window to close.
+        window: u64,
+    },
+    /// Initiate a window drag (titlebar drag region).
+    DragWindow {
+        /// The window to drag.
         window: u64,
     },
     /// Show the application's tray icon, or remove it, reporting whether the platform agreed.
@@ -469,6 +474,11 @@ fn run_engine(event_loop: tao::event_loop::EventLoop<HostEvent>, proxy: EventLoo
             Event::UserEvent(HostEvent::Close { window }) => {
                 if let Some(entry) = windows.remove(&window) {
                     entry.alive.store(false, Ordering::SeqCst);
+                }
+            }
+            Event::UserEvent(HostEvent::DragWindow { window }) => {
+                if let Some(entry) = windows.get(&window) {
+                    let _ = entry.window.drag_window();
                 }
             }
             #[cfg(feature = "tray-icon")]
@@ -956,7 +966,7 @@ fn build_window(
             let _ = ipc_tx.send(request.body().to_owned());
         })
         .with_navigation_handler(navigation_handler)
-        .with_initialization_script(BRIDGE_SCRIPT);
+        .with_initialization_script(format!("{BRIDGE_SCRIPT}\n{DRAG_REGION_SCRIPT}"));
 
     let builder = match request {
         Some(request) => builder.with_url(request.url.clone()),
@@ -1185,6 +1195,20 @@ impl WindowHost {
         #[cfg(not(feature = "wry-engine"))]
         {
             let _ = script;
+        }
+    }
+
+    /// Initiate a window drag (titlebar drag region).
+    ///
+    /// Sends a `HostEvent::DragWindow` to the process-wide engine event loop,
+    /// which calls `tao::window::Window::drag_window()`. This is called by the
+    /// page when the user mousedowns on a `[data-ncui-drag-region]` element.
+    #[cfg(feature = "wry-engine")]
+    pub fn drag_window(&self) -> bool {
+        if let (Some(engine), Some(window)) = (&self.engine, self.window) {
+            engine.send_event(HostEvent::DragWindow { window }).is_ok()
+        } else {
+            false
         }
     }
 

@@ -47,6 +47,7 @@ use self::params::{
     invoke_devtools_tree,
     invoke_logs_query,
     invoke_state_inspect,
+    invoke_window_drag_region,
     invoke_window_post,
     remembered_place,
     window_change_param,
@@ -139,6 +140,12 @@ pub fn method_table() -> Vec<MethodDescription> {
         entry(
             "ncui.window.post",
             "Evaluate a script in a window's page. The host-to-page half of the bridge.",
+            CapabilitySet::empty().with(Capability::Window),
+            false,
+        ),
+        entry(
+            "ncui.window.drag.region",
+            "Initiate a window drag from a drag region (titlebar). Called by the page when the user mousedowns on a [data-ncui-drag-region] element.",
             CapabilitySet::empty().with(Capability::Window),
             false,
         ),
@@ -702,6 +709,7 @@ fn invoke(
             .map_err(|e| json_error(&e))
         }
         "ncui.window.post" => invoke_window_post(runtime, &request.params),
+        "ncui.window.drag.region" => invoke_window_drag_region(runtime),
         "ncui.components.list" => {
             let components = runtime.windows.manifests().map_err(window_rejection)?;
             serde_json::to_value(json!({ "components": components })).map_err(|e| json_error(&e))

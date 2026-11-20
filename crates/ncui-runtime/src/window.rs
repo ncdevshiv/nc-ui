@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use ncui_core::{Capability, CapabilitySet, CorrelationId, WindowId};
@@ -105,6 +105,14 @@ pub const SEAM_ACTIONS: &[SeamAction] = &[
         summary: "List the open windows.",
         granted_by_default: true,
         targets_caller_window: false,
+    },
+    SeamAction {
+        name: "drag_region",
+        method: "ncui.window.drag.region",
+        requires: CapabilitySet::empty().with(Capability::Window),
+        summary: "Initiate a window drag from a drag region (titlebar).",
+        granted_by_default: false,
+        targets_caller_window: true,
     },
     SeamAction {
         name: "list_components",
@@ -698,14 +706,9 @@ impl Windows {
     /// Cloned out rather than borrowed, so the caller can dispatch through the runtime
     /// while holding it: the seam is policy, and policy does not change while a request
     /// is being served.
-    pub fn seam_for(
-        &self,
-        window: WindowId,
-    ) -> Result<Option<std::sync::Arc<HostSeam>>, WindowRejection> {
+    pub fn seam_for(&self, window: WindowId) -> Result<Option<Arc<HostSeam>>, WindowRejection> {
         self.with_registry_mut(|registry| {
-            Ok(registry
-                .get(window)
-                .map(|entry| std::sync::Arc::clone(&entry.seam)))
+            Ok(registry.get(window).map(|entry| Arc::clone(&entry.seam)))
         })
     }
 
@@ -754,6 +757,11 @@ impl Runtime {
     }
 
     /// Evaluates one message from one page and answers it.
+    ///
+    /// Two messages are not answered here and are handled before the seam's dispatcher runs:
+    /// a page-handled command, which is *started* (its answer comes back later), and a
+    /// handler's answer, which *settles* a call the runtime started earlier. Everything else
+    /// is dispatched and answered as it always was.
     fn serve_page_message(&mut self, window: WindowId, body: &str, now: core::time::Duration) {
         let Ok(Some(seam)) = self.windows.seam_for(window) else {
             return;
@@ -761,16 +769,31 @@ impl Runtime {
         let Ok(Some(granted)) = self.windows.grant_for(window) else {
             return;
         };
-        let response = match ncui_webview::SeamRequest::parse(body) {
-            Ok(request) => {
-                let mut response = seam.handle(&request.message, &mut |request, payload| {
-                    self.dispatch_page_action(window, request, payload, granted, now)
-                });
-                response.id = Some(request.id);
-                response
+        let request = match ncui_webview::SeamRequest::parse(body) {
+            Ok(request) => request,
+            Err(refusal) => {
+                self.send_seam_response(window, &refusal);
+                return;
             }
-            Err(refusal) => refusal,
         };
+        // The page's answer to a handler the runtime handed it: settle the call it completes.
+        if let ncui_webview::SeamMessage::CommandResult { ok, payload, error } = &request.message {
+            self.complete_page_handler(*ok, &request.id, payload.clone(), error.clone());
+            return;
+        }
+        // A page-handled command is started here and answered when the page posts its result.
+        if self.try_begin_page_handler(window, &seam, &request) {
+            return;
+        }
+        let mut response = seam.handle(&request.message, &mut |request, payload| {
+            self.dispatch_page_action(window, request, payload, granted, now)
+        });
+        response.id = Some(request.id);
+        self.send_seam_response(window, &response);
+    }
+
+    /// Sends a seam response to a window's page under the correlation id it carries.
+    fn send_seam_response(&mut self, window: WindowId, response: &ncui_webview::SeamResponse) {
         // The answer is embedded as a JSON object literal. JSON escaping is a superset of
         // what a JavaScript string literal needs, and the bridge reads the object directly.
         let Ok(encoded) = serde_json::to_string(&response) else {
@@ -784,6 +807,94 @@ impl Runtime {
                 "the bridge response could not be delivered to the page"
             );
         }
+    }
+
+    /// Starts a page-handled command: gate it, remember the call, and hand it to the page.
+    ///
+    /// Returns `true` when the message was a page-handled command and has been dealt with —
+    /// either started (its answer comes back later) or refused (the reply is already sent) —
+    /// so the caller sends nothing further. Returns `false` when the message is some other
+    /// action the caller should dispatch and answer as usual.
+    fn try_begin_page_handler(
+        &mut self,
+        window: WindowId,
+        seam: &Arc<HostSeam>,
+        request: &ncui_webview::SeamRequest,
+    ) -> bool {
+        let ncui_webview::SeamMessage::Perform { name, payload } = &request.message else {
+            return false;
+        };
+        let Some(command) = self.page_commands.get(name) else {
+            return false;
+        };
+        if !matches!(command.target, CommandTarget::Page) {
+            return false;
+        }
+        // The same gate the seam applies to every action, applied here because a page command
+        // is started rather than run. Every refusal below is answered under the ORIGINAL id, so
+        // the page's own invoke settles (with the error) instead of hanging until it times out.
+        if let Err(error) = seam.authorize_perform(name) {
+            let mut refusal = ncui_webview::SeamResponse::failure(error);
+            refusal.id = Some(request.id.clone());
+            self.send_seam_response(window, &refusal);
+            return true;
+        }
+        let Some(reply_id) = self.page_commands.begin_page_call(window, &request.id) else {
+            let mut refusal = ncui_webview::SeamResponse::failure(SeamError::new(
+                "busy",
+                "too many page-handled calls are awaiting an answer",
+            ));
+            refusal.id = Some(request.id.clone());
+            self.send_seam_response(window, &refusal);
+            return true;
+        };
+        // Hand the command to the page: the bridge runs the registered handler and posts the
+        // result back under `reply_id`, which is what settles the original `invoke`.
+        let script = format!(
+            "window.ncui && window.ncui.__runCommand({},{},{});",
+            serde_json::to_string(&reply_id).unwrap_or_default(),
+            serde_json::to_string(name).unwrap_or_default(),
+            payload,
+        );
+        if !self.windows.post_to_page(window, &script).unwrap_or(false) {
+            // The page could not be reached to run the handler, so the call will never be
+            // answered: take it back and refuse the original `invoke` rather than let it hang.
+            let _ = self.page_commands.take_page_call(&reply_id);
+            let mut refusal = ncui_webview::SeamResponse::failure(SeamError::unavailable(
+                "the page could not be reached to run its own handler",
+            ));
+            refusal.id = Some(request.id.clone());
+            self.send_seam_response(window, &refusal);
+            return true;
+        }
+        true
+    }
+
+    /// Settles the original `invoke` a page-handled command produced, with the handler's answer.
+    fn complete_page_handler(
+        &mut self,
+        ok: bool,
+        reply_id: &str,
+        payload: serde_json::Value,
+        error: Option<SeamError>,
+    ) {
+        let Some(pending) = self.page_commands.take_page_call(reply_id) else {
+            // Not a reply to a call this runtime started (or already settled). Nothing is
+            // waiting on it, so there is nothing to answer — the bridge drops an id it has
+            // no pending promise for.
+            return;
+        };
+        let mut response = if ok {
+            ncui_webview::SeamResponse::ok("performed", Some(payload))
+        } else {
+            ncui_webview::SeamResponse::failure(error.unwrap_or_else(|| {
+                SeamError::dispatch("the page's handler failed without a reason")
+            }))
+        };
+        // The answer settles the *original* invoke, not the reply id: the bridge matches on
+        // the id the page minted when it called, which is what the runtime is holding.
+        response.id = Some(pending.original_id);
+        self.send_seam_response(pending.window, &response);
     }
 
     /// Dispatches a page's action through the runtime's own pipeline.
@@ -865,6 +976,13 @@ impl Runtime {
                 granted,
                 now,
             }),
+            // A page command is intercepted in `serve_page_message` before this dispatcher runs,
+            // because its answer comes back from the page over a second message rather than as
+            // this call's return value. Reaching here means that interception was bypassed, so
+            // the honest answer is a refusal rather than a fabricated result.
+            CommandTarget::Page => Err(SeamError::dispatch(
+                "a page-handled command is answered by the page and cannot be run here",
+            )),
         }
     }
 
@@ -979,12 +1097,19 @@ pub fn hosted_registry(
     // machine, so the traffic never crosses a network, and a local development server
     // cannot offer `https` without a certificate the user has to trust. The allow-list is
     // unchanged: the origin still has to be named before a page may reach it.
+    // Every window's page is told the platform's locale and the direction it lays out in, so a
+    // page matches its formatting and text direction to the machine without keeping its own
+    // table of right-to-left scripts. The direction is derived from the locale, so the pair
+    // cannot disagree.
+    let locale = crate::describe::platform_locale();
+    let direction = ncui_a11y::TextDirection::for_locale(&locale).as_str();
     WindowRegistry::new()
         .with_default_navigation(
             ncui_webview::NavigationPolicy::new(allowed_origins).with_loopback_http(true),
         )
         .with_default_grant(ncui_webview::CapabilityGrant::from_set(page_grant))
         .with_action_table(actions.clone())
+        .with_default_locale(locale, direction)
 }
 
 /// Builds the window surface a hosted runtime uses.

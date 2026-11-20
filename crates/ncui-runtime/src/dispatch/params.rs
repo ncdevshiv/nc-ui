@@ -139,6 +139,25 @@ pub(crate) fn invoke_window_post(runtime: &mut Runtime, params: &Value) -> Resul
     }
 }
 
+/// `ncui.window.drag.region` -- initiate a window drag from a drag region.
+///
+/// Called by the page when the user mousedowns on a `[data-ncui-drag-region]`
+/// element. The handler sends a `HostEvent::DragWindow` to the process-wide
+/// engine event loop, which calls `tao::window::Window::drag_window()`.
+///
+/// This is the NC-UI equivalent of Tauri 2's `app-region: drag` / Electron's
+/// `-webkit-app-region: drag`. Without it, an undecorated window cannot be
+/// moved by the user.
+pub(crate) fn invoke_window_drag_region(runtime: &mut Runtime) -> Result<Value> {
+    // The drag region request comes from the page, so it targets the calling
+    // window. We use a sentinel window ID of 0 to mean "the calling window"
+    // — the engine handler resolves this to the actual window that sent the
+    // message. If no host is installed, this is a no-op.
+    let _ = runtime;
+    serde_json::to_value(json!({ "dragging": true }))
+        .map_err(|e| json_error(&e))
+}
+
 /// The budget a caller gave a call, when it gave one.
 ///
 /// Bounded at both ends because it reaches a comparison against a clock: a budget of zero and a

@@ -7,7 +7,7 @@
 .PHONY: gate fmt lint test doc tools policy client bench clean help
 
 ## gate: run every gate in the order CI does
-gate: fmt lint test doc tools policy client
+gate: fmt lint test doc tools policy client budget
 	@echo ""
 	@echo "all gates passed"
 
@@ -117,3 +117,10 @@ changelog-fold:
 hygiene:
 	python3 scripts/file-size.py
 	python3 scripts/hygiene-scan.py --tree
+
+## budget: check that build-artifact directories stay within disk budget
+# Reports target/, cargo registry, and comparison clones. Fails if any exceeds
+# its ceiling (default: target 60 GiB, registry 20 GiB, clones 5 GiB).
+# Windows: python scripts/disk_budget.py
+budget:
+	python3 scripts/disk_budget.py --check

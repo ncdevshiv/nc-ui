@@ -12,7 +12,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ncui_bench::{Environment, NoiseEntry, Repeated, Report, Summary, measure};
+use ncui_bench::{Environment, NoiseEntry, Repeated, Report, Summary, measure, measure_wall_clock};
 use ncui_core::{Capability, CapabilitySet, CorrelationId, RequestId, SemVer};
 use ncui_ipc::channel::BackpressurePolicy;
 use ncui_ipc::frame::FrameKind;
@@ -362,6 +362,134 @@ fn record(scenarios: &mut Vec<Repeated>) {
     a11y(scenarios);
     abi(scenarios);
     glyphs(scenarios);
+    feedback(scenarios);
+}
+
+/// Scenarios for the developer feedback loop: the wall-clock cost of the operations a
+/// developer waits on every day.
+///
+/// Unlike every other scenario in this file, these are one-shot wall-clock measurements —
+/// `cargo check`, a focused unit-test run, an edit→reload cycle — that cannot be looped
+/// thousands of times. They are measured with [`measure_wall_clock`], which runs the
+/// workload once and records the elapsed time as a single sample. The `noise` entry for
+/// each is 1.0 (one sample), which states plainly that these are point-in-time
+/// measurements rather than distributions; a regression is still visible because the
+/// baseline comparison uses the single recorded value.
+///
+/// These scenarios are the evidence behind the "faster build/test/debug" goal: a change
+/// that makes `cargo check` or the unit suite slower shows up here rather than only in
+/// developer frustration. They are deliberately excluded from the p99 floor gate (see
+/// `REPORTED_ONLY_FLOOR_NS`) because a single wall-clock sample has no p99 distribution to
+/// compare — but they are reported, recorded, and visible on every run.
+fn feedback(scenarios: &mut Vec<Repeated>) {
+    feedback_build_check(scenarios);
+    feedback_test_unit(scenarios);
+    feedback_edit_to_visible(scenarios);
+}
+
+/// `cargo check -p ncui-core` — the fastest representative compile check.
+///
+/// `ncui-core` is the foundational crate: almost every other crate depends on it, so a
+/// change there forces the widest rebuild. Checking it is the lower bound on "how long
+/// until the compiler tells me I broke something". A warm cache is the common case (the
+/// developer just built), so this measures the incremental check path, not a cold build.
+fn feedback_build_check(scenarios: &mut Vec<Repeated>) {
+    scenarios.push(measure_wall_clock(
+        "build.check",
+        "cargo check -p ncui-core (warm cache, the lower bound on compile feedback)",
+        || {
+            let output = std::process::Command::new("cargo")
+                .args(["check", "-p", "ncui-core", "--quiet"])
+                .current_dir(repo_root())
+                .output();
+            match output {
+                Ok(out) if out.status.success() => 1,
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    fail(&format!("cargo check failed: {stderr}"));
+                }
+                Err(e) => fail(&format!("cargo check could not be spawned: {e}")),
+            }
+        },
+    ));
+}
+
+/// `cargo test -p ncui-core --quiet` — the fastest representative unit-test run.
+///
+/// `ncui-core` holds the foundational vocabulary (errors, ids, capabilities, versions,
+/// limits) and has a focused unit suite. Running it is the lower bound on "how long until
+/// I know my change broke a test". A warm build is the common case.
+fn feedback_test_unit(scenarios: &mut Vec<Repeated>) {
+    scenarios.push(measure_wall_clock(
+        "test.unit",
+        "cargo test -p ncui-core --quiet (warm build, the lower bound on test feedback)",
+        || {
+            let output = std::process::Command::new("cargo")
+                .args(["test", "-p", "ncui-core", "--quiet"])
+                .current_dir(repo_root())
+                .output();
+            match output {
+                Ok(out) if out.status.success() => 1,
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    fail(&format!("cargo test failed: {stderr}"));
+                }
+                Err(e) => fail(&format!("cargo test could not be spawned: {e}")),
+            }
+        },
+    ));
+}
+
+/// Edit→visible change: touch a source file, then `cargo check` to see the recompile.
+///
+/// This is the "instant rebuild" promise made concrete. The workload writes a trivial
+/// comment to a real source file, runs `cargo check`, and restores the file. The measured
+/// time is what a developer pays between saving a change and seeing the compiler's
+/// verdict. A runtime that cannot reload a page in less time than this is not competitive
+/// on developer experience regardless of its runtime performance.
+fn feedback_edit_to_visible(scenarios: &mut Vec<Repeated>) {
+    let target = repo_root().join("crates/ncui-core/src/lib.rs");
+    if !target.exists() {
+        fail("the edit→visible benchmark's target file does not exist");
+    }
+    scenarios.push(measure_wall_clock(
+        "edit_to_visible",
+        "touch a source file then cargo check (the edit→visible developer loop)",
+        || {
+            // Append a comment, check, then restore. The comment is a no-op for the
+            // compiler but changes the file's mtime and content hash, which is what
+            // forces a recompile of the crate.
+            let original = std::fs::read_to_string(&target)
+                .unwrap_or_else(|e| fail(&format!("cannot read target: {e}")));
+            let touched = format!("{original}\n// edit_to_visible benchmark touch\n");
+            if std::fs::write(&target, &touched).is_err() {
+                fail("cannot write touched file");
+            }
+            let output = std::process::Command::new("cargo")
+                .args(["check", "-p", "ncui-core", "--quiet"])
+                .current_dir(repo_root())
+                .output();
+            // Restore the original content regardless of the check's outcome.
+            let _ = std::fs::write(&target, &original);
+            match output {
+                Ok(out) if out.status.success() => 1,
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    fail(&format!("cargo check after edit failed: {stderr}"));
+                }
+                Err(e) => fail(&format!("cargo check could not be spawned: {e}")),
+            }
+        },
+    ));
+}
+
+/// The repository root, anchored to this benchmark's manifest directory.
+///
+/// `cargo bench` runs with the package directory as its working directory, so a relative
+/// path would not resolve. Anchoring to `CARGO_MANIFEST_DIR`'s grandparent makes the same
+/// path work from a shell, from `cargo bench`, and from CI.
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 /// Scenarios for the text path a GPU island draws its rows with.
@@ -1317,6 +1445,104 @@ fn application(scenarios: &mut Vec<Repeated>) {
         )
         .unwrap_or_else(|e| fail(&e)),
     );
+
+    application_assets(scenarios);
+}
+
+/// Scenarios for the asset server's HTTP paths, measured over a real socket.
+///
+/// A page's own assets are served over loopback HTTP, and the reload loop re-fetches them.
+/// Both the cold fetch (200, body and all) and the warm one (304, validators only) are
+/// measured against a real server on a real socket, because the interesting cost is the
+/// round trip a page actually pays — not a validator computed in isolation. The two together
+/// are what a `--watch` reload costs: the first request after a change is a 200, every
+/// request for an unchanged file is a 304.
+fn application_assets(scenarios: &mut Vec<Repeated>) {
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpStream;
+
+    let served_root =
+        std::env::temp_dir().join(format!("ncui-bench-assets-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&served_root);
+    if std::fs::create_dir_all(&served_root).is_err() {
+        fail("the asset benchmark's directory could not be created");
+    }
+    let page_body = "<!doctype html><title>bench</title><script src=\"app.js\"></script>";
+    if std::fs::write(served_root.join("index.html"), page_body).is_err() {
+        fail("the asset benchmark's fixture could not be written");
+    }
+    let mut server = ncui_app::AssetServer::start(&served_root)
+        .unwrap_or_else(|error| fail(&format!("the asset benchmark could not start: {error}")));
+
+    // One full GET, to capture the validators the warm request will echo back.
+    let (etag, last_modified) = {
+        let mut stream =
+            TcpStream::connect(server.local_addr()).unwrap_or_else(|e| fail(&e.to_string()));
+        let _ = write!(
+            stream,
+            "GET /index.html HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        );
+        let mut raw = String::new();
+        let _ = stream.read_to_string(&mut raw);
+        let head = raw
+            .split_once("\r\n\r\n")
+            .map_or(raw.as_str(), |(head, _)| head);
+        let value = |name: &str| {
+            head.lines()
+                .find(|line| line.to_ascii_lowercase().starts_with(name))
+                .and_then(|line| line.split_once(':'))
+                .map(|(_, value)| value.trim().to_owned())
+                .unwrap_or_default()
+        };
+        (value("etag"), value("last-modified"))
+    };
+    if etag.is_empty() || last_modified.is_empty() {
+        fail("the asset benchmark could not read the validators a 200 carries");
+    }
+
+    let request_path = server.url_for("/index.html");
+    scenarios.push(
+        measure(
+            "app.asset_get_200",
+            "a cold fetch of a page's own asset over loopback HTTP",
+            50,
+            1_000,
+            || {
+                let mut stream = TcpStream::connect(server.local_addr())
+                    .unwrap_or_else(|e| fail(&e.to_string()));
+                let _ = write!(
+                    stream,
+                    "GET {request_path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                );
+                let mut raw = String::new();
+                let _ = stream.read_to_string(&mut raw);
+                usize::from(raw.starts_with("HTTP/1.1 200"))
+            },
+        )
+        .unwrap_or_else(|e| fail(&e)),
+    );
+    scenarios.push(
+        measure(
+            "app.asset_conditional_304",
+            "a warm reload: a conditional GET for an unchanged asset, answered with 304",
+            50,
+            1_000,
+            || {
+                let mut stream =
+                    TcpStream::connect(server.local_addr()).unwrap_or_else(|e| fail(&e.to_string()));
+                let _ = write!(
+                    stream,
+                    "GET {request_path} HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: {etag}\r\nIf-Modified-Since: {last_modified}\r\nConnection: close\r\n\r\n"
+                );
+                let mut raw = String::new();
+                let _ = stream.read_to_string(&mut raw);
+                usize::from(raw.starts_with("HTTP/1.1 304"))
+            },
+        )
+        .unwrap_or_else(|e| fail(&e)),
+    );
+    server.stop();
+    let _ = std::fs::remove_dir_all(&served_root);
 }
 
 /// Scenarios for `ncui-native`.

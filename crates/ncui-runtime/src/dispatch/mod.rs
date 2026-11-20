@@ -41,6 +41,9 @@ use self::params::{
     enforce_deadline,
     grant_param,
     invoke_component_inspect,
+    invoke_devtools_events,
+    invoke_devtools_profile,
+    invoke_devtools_tree,
     invoke_logs_query,
     invoke_state_inspect,
     invoke_window_post,
@@ -229,6 +232,36 @@ pub fn method_table() -> Vec<MethodDescription> {
             inspect,
             false,
         ),
+        entry(
+            "ncui.devtools.tree",
+            "Live snapshot of the window tree: every open window, its state, and its capability grant.",
+            inspect,
+            false,
+        ),
+        entry(
+            "ncui.devtools.events",
+            "Recent runtime events (navigations, capability denials, window state changes), filterable by kind.",
+            inspect,
+            false,
+        ),
+        entry(
+            "ncui.devtools.profile",
+            "Per-method timing histograms recorded while profiling was active.",
+            inspect,
+            false,
+        ),
+        entry(
+            "ncui.devtools.profile.reset",
+            "Clear all recorded profiling data.",
+            inspect,
+            false,
+        ),
+        entry(
+            "ncui.devtools.summary",
+            "A summary of the devtools subsystem: event count, capacity, profile methods, and call count.",
+            inspect,
+            false,
+        ),
     ]
 }
 
@@ -414,6 +447,12 @@ fn run_pipeline(
         &runtime.metrics,
         correlation,
     );
+
+    // Record profiling data when profiling is active.
+    if runtime.profiling_active {
+        let elapsed = started.elapsed();
+        runtime.devtools.record_profile(&request.method, elapsed);
+    }
 
     // Prefix the failing method onto the operation. An agent that fires several requests
     // and receives "capability `delete.data` is not granted" otherwise cannot tell which
@@ -705,6 +744,24 @@ fn invoke(
             "request_timeout_ms": runtime.limits.request_timeout_ms,
         }))
         .map_err(|e| json_error(&e)),
+        "ncui.devtools.tree" => {
+            invoke_devtools_tree(runtime)
+        }
+        "ncui.devtools.events" => {
+            invoke_devtools_events(runtime, &request.params)
+        }
+        "ncui.devtools.profile" => {
+            invoke_devtools_profile(runtime)
+        }
+        "ncui.devtools.profile.reset" => {
+            runtime.devtools.reset_profile();
+            serde_json::to_value(json!({ "reset": true }))
+                .map_err(|e| json_error(&e))
+        }
+        "ncui.devtools.summary" => {
+            serde_json::to_value(runtime.devtools.summary())
+                .map_err(|e| json_error(&e))
+        }
         "ncui.metrics.query" => {
             let series = runtime.metrics.snapshot();
             serde_json::to_value(json!({

@@ -161,6 +161,11 @@ is the one actually enforced.
 | `ncui.component.inspect` | `inspect.runtime` | no | One mounted component, by identity, with its window and grant |
 | `ncui.state.inspect` | `inspect.runtime` | no | A snapshot of the runtime's observable state |
 | `ncui.ipc.inspect` | `inspect.runtime` | no | The IPC protocol version and frame limits |
+| `ncui.devtools.tree` | `inspect.runtime` | no | Live snapshot of the window tree: every open window, its state, and its capability grant |
+| `ncui.devtools.events` | `inspect.runtime` | no | Recent runtime events (navigations, capability denials, window state changes), filterable by kind |
+| `ncui.devtools.profile` | `inspect.runtime` | no | Per-method timing histograms recorded while profiling was active |
+| `ncui.devtools.profile.reset` | `inspect.runtime` | no | Clear all recorded profiling data |
+| `ncui.devtools.summary` | `inspect.runtime` | no | A summary of the devtools subsystem: event count, capacity, profile methods, and call count |
 | `ncui.trace.start` | `inspect.runtime` | no | Begin verbose tracing of operations |
 | `ncui.trace.stop` | `inspect.runtime` | no | End verbose tracing of operations |
 | `ncui.profile.start` | `inspect.runtime` | no | Begin profiling: record per-method timing |

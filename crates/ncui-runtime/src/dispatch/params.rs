@@ -690,6 +690,68 @@ pub(crate) fn json_error(error: &serde_json::Error) -> NcError {
     })
 }
 
+/// `ncui.devtools.tree` -- live snapshot of the window tree.
+///
+/// Returns every open window with its lifecycle state and capability grant, plus
+/// the total window count and the runtime's uptime. This is the data an agent needs
+/// to understand "what is on screen right now" without polling each window individually.
+pub(crate) fn invoke_devtools_tree(runtime: &Runtime) -> Result<Value> {
+    let windows: Vec<ncui_webview::WindowSummary> = runtime
+        .windows
+        .summaries()
+        .unwrap_or_default();
+    let mut window_list: Vec<Value> = Vec::with_capacity(windows.len());
+    for w in &windows {
+        window_list.push(json!({
+            "id": w.id.to_string(),
+            "title": w.title,
+            "state": w.state,
+            "url": w.url,
+            "serving": w.serving,
+        }));
+    }
+    serde_json::to_value(json!({
+        "windows": window_list,
+        "window_count": window_list.len(),
+        "uptime_ms": runtime.elapsed().as_millis() as u64,
+    }))
+    .map_err(|e| json_error(&e))
+}
+
+/// `ncui.devtools.events` -- recent runtime events, filterable by kind.
+///
+/// Returns up to `limit` events from the devtools ring, newest first. If `kind`
+/// is specified in the params, only events of that kind are returned.
+pub(crate) fn invoke_devtools_events(runtime: &Runtime, params: &Value) -> Result<Value> {
+    let limit = params
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(50)
+        .min(1024) as usize;
+    let kind = params.get("kind").and_then(Value::as_str);
+    let events = runtime.devtools.events(kind, limit);
+    serde_json::to_value(json!({
+        "events": events,
+        "count": events.len(),
+    }))
+    .map_err(|e| json_error(&e))
+}
+
+/// `ncui.devtools.profile` -- per-method timing histograms.
+///
+/// Returns profiling data for all methods recorded while profiling was active.
+/// Each entry has p50/p90/p95/p99/max in nanoseconds and the total call count.
+pub(crate) fn invoke_devtools_profile(runtime: &Runtime) -> Result<Value> {
+    let entries = runtime.devtools.profile();
+    let call_count = runtime.devtools.profile_call_count();
+    serde_json::to_value(json!({
+        "methods": entries,
+        "total_calls": call_count,
+        "profiling_active": runtime.profiling_active,
+    }))
+    .map_err(|e| json_error(&e))
+}
+
 /// Reads the `consent_token` parameter, when present.
 ///
 /// `None` means the caller supplied no token. A present-but-malformed token is a

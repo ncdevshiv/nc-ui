@@ -51,6 +51,7 @@ pub mod application;
 pub mod commands;
 pub mod components;
 pub mod describe;
+pub mod devtools;
 pub mod dispatch;
 pub mod gpu;
 pub mod health;
@@ -69,6 +70,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use ncui_core::{Capability, CapabilitySet, CorrelationId, ErrorKind, Limits, NcError, Result};
+use crate::devtools::DevTools;
 use ncui_observability::logring::LogRing;
 use ncui_observability::metrics::MetricsRegistry;
 use ncui_scheduler::Scheduler;
@@ -111,6 +113,8 @@ pub struct Runtime {
     page_grant: CapabilitySet,
     /// The GPU surface. Empty until islands are installed.
     pub gpu: gpu::Gpu,
+    /// Deep devtools SDK: live runtime inspection, events, and profiling.
+    pub devtools: Arc<DevTools>,
     /// Whether verbose tracing is active.
     ///
     /// Toggled by `ncui.trace.start` / `ncui.trace.stop`; an agent reads the current
@@ -216,6 +220,7 @@ impl Runtime {
             page_commands,
             page_grant,
             gpu: gpu::Gpu::new(),
+            devtools: Arc::new(DevTools::new(limits.log_ring_capacity)),
             tracing_active: false,
             profiling_active: false,
             bench_allowed: std::env::var("NCUI_RUN_BENCH").as_deref() == Ok("1"),

@@ -402,6 +402,9 @@ fn engine() -> Option<&'static EventLoopProxy<HostEvent>> {
                         builder.with_any_thread(true);
                     }
                     // tao's Unix backend asserts the main thread unless the builder is told
+                    // otherwise. The switch exists on X11/Wayland only. macOS (AppKit)
+                    // requires the main thread and tao exposes no any-thread option.
+                    // On macOS, the event loop must be created on the main thread (ADR-018).
                     // otherwise, and the engine loop lives on its own thread by design. The
                     // switch exists on the X11/Wayland targets only — AppKit requires the main
                     // thread and tao exposes no such option for macOS, which is why that target

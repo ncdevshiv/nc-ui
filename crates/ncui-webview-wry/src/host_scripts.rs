@@ -74,7 +74,7 @@ pub(super) fn moved_script(position: tao::dpi::LogicalPosition<f64>) -> String {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "wry-engine"))]
 mod tests {
     use super::*;
 

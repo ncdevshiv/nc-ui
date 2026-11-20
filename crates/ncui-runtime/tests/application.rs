@@ -401,7 +401,7 @@ fn a_page_hears_its_own_window_resized() {
     let recorded: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
     let recorder = Arc::clone(&recorded);
     let mut application =
-        Application::launch_with(scratch.path(), Limits::default(), None, move |runtime| {
+        Application::launch_with(scratch.path(), Limits::default(), None, None, move |runtime| {
             let _registration = runtime
                 .register_page_command(
                     "record",
@@ -494,7 +494,7 @@ fn an_application_serves_its_page_and_the_page_calls_native_code() {
     let recorder = Arc::clone(&recorded);
 
     let mut application =
-        Application::launch_with(scratch.path(), Limits::default(), None, |runtime| {
+        Application::launch_with(scratch.path(), Limits::default(), None, None, |runtime| {
             let _registration = runtime
                 .register_page_command(
                     "record",
@@ -640,7 +640,7 @@ fn an_application_with_the_read_capability_reads_a_file_from_the_page() {
     let recorded: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
     let recorder = Arc::clone(&recorded);
     let mut application =
-        Application::launch_with(scratch.path(), Limits::default(), None, |runtime| {
+        Application::launch_with(scratch.path(), Limits::default(), None, None, |runtime| {
             let _registration = runtime
                 .register_page_command(
                     "record",
@@ -738,7 +738,7 @@ fn launch_with_recorder(scratch: &Scratch) -> (Application, Arc<Mutex<Vec<serde_
     let recorded: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
     let recorder = Arc::clone(&recorded);
     let application =
-        Application::launch_with(scratch.path(), Limits::default(), None, |runtime| {
+        Application::launch_with(scratch.path(), Limits::default(), None, None, |runtime| {
             let _registration = runtime
                 .register_page_command(
                     "record",
@@ -1422,7 +1422,7 @@ fn a_window_with_nothing_remembered_uses_the_manifest() {
     let state_file = state.path.join("nothing-here.json");
 
     let mut application =
-        Application::launch_with(scratch.path(), Limits::default(), Some(state_file), |_| {
+        Application::launch_with(scratch.path(), Limits::default(), Some(state_file), None, |_| {
             Ok(())
         })
         .expect("the application launches");
@@ -1452,7 +1452,7 @@ fn a_remembered_geometry_no_window_could_have_is_ignored() {
     write_geometry(&state_file, 10, 10, 5, 5);
 
     let mut application =
-        Application::launch_with(scratch.path(), Limits::default(), Some(state_file), |_| {
+        Application::launch_with(scratch.path(), Limits::default(), Some(state_file), None, |_| {
             Ok(())
         })
         .expect("the application launches");
@@ -1617,7 +1617,7 @@ fn a_remembered_place_on_a_display_that_is_gone_lands_on_one_that_exists() {
     write_geometry(&state_file, 100_000, 100_000, 640, 480);
 
     let mut application =
-        Application::launch_with(scratch.path(), Limits::default(), Some(state_file), |_| {
+        Application::launch_with(scratch.path(), Limits::default(), Some(state_file), None, |_| {
             Ok(())
         })
         .expect("the application launches");
@@ -1835,7 +1835,7 @@ fn a_floor_added_to_a_manifest_does_not_refuse_a_window_the_user_shrank() {
     write_geometry(&state_file, 40, 50, 250, 220);
 
     let mut application =
-        Application::launch_with(scratch.path(), Limits::default(), Some(state_file), |_| {
+        Application::launch_with(scratch.path(), Limits::default(), Some(state_file), None, |_| {
             Ok(())
         })
         .expect("the application launches rather than refusing");

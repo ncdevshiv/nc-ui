@@ -52,7 +52,6 @@ pub mod commands;
 pub mod components;
 pub mod describe;
 pub mod dispatch;
-mod dispatch_cargo;
 pub mod gpu;
 pub mod health;
 pub mod icon;
@@ -61,6 +60,7 @@ pub mod islands;
 pub mod mcp;
 pub mod native;
 pub mod page_state;
+pub mod reload;
 pub mod rpc;
 pub mod transport;
 pub mod window;
@@ -164,15 +164,20 @@ struct ConsentTokenBinding {
 impl Runtime {
     /// Starts a runtime from `limits`.
     ///
-    /// Fails rather than silently degrading: incoherent limits or an unavailable worker
-    /// pool is reported here, where it can be acted on, instead of surfacing later as
-    /// mysterious behaviour.
+    /// Fails rather than silently degrading: incoherent limits and the subsystems built here
+    /// (metrics registry, log ring, audit log, scheduler) report problems at construction,
+    /// where they can be acted on, instead of surfacing later as mysterious behaviour.
+    ///
+    /// The worker pool is the one subsystem built lazily: its threads are spawned on the
+    /// first submitted task rather than here, so a runtime that never runs background work
+    /// never pays for a worker stack. A thread the operating system refuses is therefore
+    /// reported from that first submission (see [`ncui_workers::WorkerPool::start`]), not at
+    /// construction.
     ///
     /// # Errors
     ///
     /// Returns [`ncui_core::ErrorKind::Validation`] if `limits` is incoherent, and any
-    /// error the metrics registry, log ring, scheduler, audit log or worker pool reports at
-    /// construction.
+    /// error the metrics registry, log ring, scheduler or audit log reports at construction.
     pub fn start(limits: Limits) -> Result<Self> {
         let metrics = Arc::new(MetricsRegistry::new(limits)?);
         let logs = Arc::new(LogRing::new(limits)?);

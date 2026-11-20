@@ -12,7 +12,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ncui_bench::{Environment, NoiseEntry, Repeated, Report, Summary, measure, measure_wall_clock};
+use ncui_bench::{Environment, NoiseEntry, Repeated, Report, Summary, measure};
 use ncui_core::{Capability, CapabilitySet, CorrelationId, RequestId, SemVer};
 use ncui_ipc::channel::BackpressurePolicy;
 use ncui_ipc::frame::FrameKind;
@@ -24,6 +24,15 @@ use ncui_state::patch::{Change, Patch};
 use ncui_state::store::Store;
 
 const MAX_FRAME: u32 = 16 * 1024 * 1024;
+
+/// Developer feedback-loop scenarios, measured as one-shot wall-clock costs.
+///
+/// A separate module because these shell out to `cargo` and take seconds-to-minutes each,
+/// so they cannot be looped nine times the way a micro-operation is.
+mod feedback;
+
+/// Component-ABI scenarios: the cost of deciding whether a component may load.
+mod abi;
 
 /// How much a scenario's measured p99 may grow before the comparison calls it a
 /// difference worth reporting.
@@ -360,138 +369,10 @@ fn record(scenarios: &mut Vec<Repeated>) {
     application(scenarios);
     native(scenarios);
     a11y(scenarios);
-    abi(scenarios);
+    abi::record(scenarios);
     glyphs(scenarios);
-    feedback(scenarios);
+    feedback::record(scenarios);
 }
-
-/// Scenarios for the developer feedback loop: the wall-clock cost of the operations a
-/// developer waits on every day.
-///
-/// Unlike every other scenario in this file, these are one-shot wall-clock measurements —
-/// `cargo check`, a focused unit-test run, an edit→reload cycle — that cannot be looped
-/// thousands of times. They are measured with [`measure_wall_clock`], which runs the
-/// workload once and records the elapsed time as a single sample. The `noise` entry for
-/// each is 1.0 (one sample), which states plainly that these are point-in-time
-/// measurements rather than distributions; a regression is still visible because the
-/// baseline comparison uses the single recorded value.
-///
-/// These scenarios are the evidence behind the "faster build/test/debug" goal: a change
-/// that makes `cargo check` or the unit suite slower shows up here rather than only in
-/// developer frustration. They are deliberately excluded from the p99 floor gate (see
-/// `REPORTED_ONLY_FLOOR_NS`) because a single wall-clock sample has no p99 distribution to
-/// compare — but they are reported, recorded, and visible on every run.
-fn feedback(scenarios: &mut Vec<Repeated>) {
-    feedback_build_check(scenarios);
-    feedback_test_unit(scenarios);
-    feedback_edit_to_visible(scenarios);
-}
-
-/// `cargo check -p ncui-core` — the fastest representative compile check.
-///
-/// `ncui-core` is the foundational crate: almost every other crate depends on it, so a
-/// change there forces the widest rebuild. Checking it is the lower bound on "how long
-/// until the compiler tells me I broke something". A warm cache is the common case (the
-/// developer just built), so this measures the incremental check path, not a cold build.
-fn feedback_build_check(scenarios: &mut Vec<Repeated>) {
-    scenarios.push(measure_wall_clock(
-        "build.check",
-        "cargo check -p ncui-core (warm cache, the lower bound on compile feedback)",
-        || {
-            let output = std::process::Command::new("cargo")
-                .args(["check", "-p", "ncui-core", "--quiet"])
-                .current_dir(repo_root())
-                .output();
-            match output {
-                Ok(out) if out.status.success() => 1,
-                Ok(out) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    fail(&format!("cargo check failed: {stderr}"));
-                }
-                Err(e) => fail(&format!("cargo check could not be spawned: {e}")),
-            }
-        },
-    ));
-}
-
-/// `cargo test -p ncui-core --quiet` — the fastest representative unit-test run.
-///
-/// `ncui-core` holds the foundational vocabulary (errors, ids, capabilities, versions,
-/// limits) and has a focused unit suite. Running it is the lower bound on "how long until
-/// I know my change broke a test". A warm build is the common case.
-fn feedback_test_unit(scenarios: &mut Vec<Repeated>) {
-    scenarios.push(measure_wall_clock(
-        "test.unit",
-        "cargo test -p ncui-core --quiet (warm build, the lower bound on test feedback)",
-        || {
-            let output = std::process::Command::new("cargo")
-                .args(["test", "-p", "ncui-core", "--quiet"])
-                .current_dir(repo_root())
-                .output();
-            match output {
-                Ok(out) if out.status.success() => 1,
-                Ok(out) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    fail(&format!("cargo test failed: {stderr}"));
-                }
-                Err(e) => fail(&format!("cargo test could not be spawned: {e}")),
-            }
-        },
-    ));
-}
-
-/// Edit→visible change: touch a source file, then `cargo check` to see the recompile.
-///
-/// This is the "instant rebuild" promise made concrete. The workload writes a trivial
-/// comment to a real source file, runs `cargo check`, and restores the file. The measured
-/// time is what a developer pays between saving a change and seeing the compiler's
-/// verdict. A runtime that cannot reload a page in less time than this is not competitive
-/// on developer experience regardless of its runtime performance.
-fn feedback_edit_to_visible(scenarios: &mut Vec<Repeated>) {
-    let target = repo_root().join("crates/ncui-core/src/lib.rs");
-    if !target.exists() {
-        fail("the edit→visible benchmark's target file does not exist");
-    }
-    scenarios.push(measure_wall_clock(
-        "edit_to_visible",
-        "touch a source file then cargo check (the edit→visible developer loop)",
-        || {
-            // Append a comment, check, then restore. The comment is a no-op for the
-            // compiler but changes the file's mtime and content hash, which is what
-            // forces a recompile of the crate.
-            let original = std::fs::read_to_string(&target)
-                .unwrap_or_else(|e| fail(&format!("cannot read target: {e}")));
-            let touched = format!("{original}\n// edit_to_visible benchmark touch\n");
-            if std::fs::write(&target, &touched).is_err() {
-                fail("cannot write touched file");
-            }
-            let output = std::process::Command::new("cargo")
-                .args(["check", "-p", "ncui-core", "--quiet"])
-                .current_dir(repo_root())
-                .output();
-            // Restore the original content regardless of the check's outcome.
-            let _ = std::fs::write(&target, &original);
-            match output {
-                Ok(out) if out.status.success() => 1,
-                Ok(out) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    fail(&format!("cargo check after edit failed: {stderr}"));
-                }
-                Err(e) => fail(&format!("cargo check could not be spawned: {e}")),
-            }
-        },
-    ));
-}
-
-/// The repository root, anchored to this benchmark's manifest directory.
-///
-/// `cargo bench` runs with the package directory as its working directory, so a relative
-/// path would not resolve. Anchoring to `CARGO_MANIFEST_DIR`'s grandparent makes the same
-/// path work from a shell, from `cargo bench`, and from CI.
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
 /// Scenarios for the text path a GPU island draws its rows with.
 ///
 /// The workload is a real line of type: the machine's own font, shaped and rasterised at a size a
@@ -1937,64 +1818,6 @@ fn a11y(scenarios: &mut Vec<Repeated>) {
             1_000,
             20_000,
             || tree.unnamed_focusable().len(),
-        )
-        .unwrap_or_else(|e| fail(&e)),
-    );
-}
-
-/// Scenarios for `ncui-abi`.
-///
-/// `abi.negotiate` is the cost of deciding whether a component may load, which a host pays
-/// before instantiating anything. It is not a hot path in the way a scheduler tick is, and the
-/// scenario is here because a negotiation that got *slower* by an order of magnitude would be
-/// a structural change — the grant is computed by folding over the capability set rather than
-/// intersected, and that is the cost being watched.
-///
-/// `abi.grant_narrow` isolates the fold on its own, so a regression there is distinguishable
-/// from one in version checking or surface validation.
-fn abi(scenarios: &mut Vec<Repeated>) {
-    use ncui_abi::surface::{Import, ImportKind, Surface};
-    use ncui_abi::{ComponentManifest, HostProfile, negotiate};
-
-    let mut surface = Surface::new();
-    for (order, capability) in Capability::ALL.iter().enumerate() {
-        surface = surface.import(Import {
-            module: "ncui".to_owned(),
-            name: format!("op-{order}"),
-            kind: ImportKind::CapabilityCall,
-            requires: Some(*capability),
-        });
-    }
-
-    let manifest = ComponentManifest::new("1.0")
-        .requesting(CapabilitySet::all())
-        .with_surface(surface);
-    // A profile offering everything, so the negotiation reaches the grant rather than
-    // short-circuiting on a forbidden import — the expensive path is the interesting one.
-    let profile = HostProfile::new(&["1.0"], CapabilitySet::all());
-
-    scenarios.push(
-        measure(
-            "abi.negotiate",
-            "negotiate a component declaring every capability and importing every capability",
-            500,
-            20_000,
-            || usize::from(negotiate(&manifest, &profile).is_ok()),
-        )
-        .unwrap_or_else(|e| fail(&e)),
-    );
-
-    scenarios.push(
-        measure(
-            "abi.grant_narrow",
-            "compute the granted set for a component requesting everything",
-            1_000,
-            50_000,
-            || {
-                let granted = profile
-                    .narrow_to(&ComponentManifest::new("1.0").requesting(CapabilitySet::all()));
-                usize::from(granted.contains(Capability::Gpu))
-            },
         )
         .unwrap_or_else(|e| fail(&e)),
     );

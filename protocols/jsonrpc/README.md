@@ -169,6 +169,7 @@ is the one actually enforced.
 | `ncui.app.emit` | `window` | no | Emit an application-defined event to a window's page (deep links, notification clicks, custom events) |
 | `ncui.window.drag.region` | `window` | no | Initiate a window drag from a drag region (titlebar) |
 | `ncui.window.create.child` | `window` | no | Open a child window with a narrowed grant |
+| `ncui.cdp.send` | `cdp` | **yes** | Send a CDP command to a child webview |
 | `ncui.consent.mint` | `inspect.runtime` | no | Mint a consent token for a destructive method |
 | `ncui.trace.start` | `inspect.runtime` | no | Begin verbose tracing of operations |
 | `ncui.trace.stop` | `inspect.runtime` | no | End verbose tracing of operations |

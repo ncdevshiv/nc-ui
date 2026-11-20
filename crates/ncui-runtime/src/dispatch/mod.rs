@@ -33,8 +33,10 @@ use crate::rpc::{Request, Response};
 
 pub(crate) use self::params::json_error;
 mod cargo;
+mod cdp_handler;
 mod params;
 
+use self::cdp_handler::invoke_cdp_send;
 use self::params::{
     consent_token_param,
     deadline_param,
@@ -288,6 +290,12 @@ pub fn method_table() -> Vec<MethodDescription> {
             "Mint a consent token for a destructive method. The token is bound to the calling session and must be presented as `consent_token` in the payload of the destructive call.",
             inspect,
             false,
+        ),
+        entry(
+            "ncui.cdp.send",
+            "Send a CDP (Chrome DevTools Protocol) command to a child webview. Requires Capability::Cdp. The command is forwarded to the target window's webview engine.",
+            CapabilitySet::empty().with(Capability::Cdp),
+            true,
         ),
     ]
 }
@@ -805,6 +813,9 @@ fn invoke(
         }
         "ncui.consent.mint" => {
             invoke_consent_mint(runtime, session, &request.params)
+        }
+        "ncui.cdp.send" => {
+            invoke_cdp_send(runtime, &request.params)
         }
         "ncui.devtools.summary" => {
             serde_json::to_value(runtime.devtools.summary())

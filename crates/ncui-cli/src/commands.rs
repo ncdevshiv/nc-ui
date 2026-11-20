@@ -33,9 +33,10 @@ pub fn run(command: &Command, format: Format) -> Outcome {
         directory,
         watch,
         url,
+        port,
     } = command
     {
-        return match run_app(directory, *watch, url.as_deref()) {
+        return match run_app(directory, *watch, url.as_deref(), *port) {
             Ok(payload) => Outcome::Ok {
                 payload,
                 format,
@@ -169,15 +170,21 @@ fn new_app(directory: &str) -> Result<Value, String> {
 /// Without the `wry-host` feature there is no engine to open a window with, and the
 /// command says so rather than serving assets nobody will look at.
 #[cfg(feature = "wry-host")]
-fn run_app(directory: &str, watch: bool, url: Option<&str>) -> Result<Value, String> {
+fn run_app(directory: &str, watch: bool, url: Option<&str>, port: Option<u16>) -> Result<Value, String> {
     use std::time::Duration;
 
     use ncui_runtime::application::Application;
 
     let directory_path = std::path::Path::new(directory);
-    let mut application = Application::launch(directory_path, Limits::default())
-        .map_err(|error| format!("cannot run the application: {error}"))?
-        .with_link(url.map(str::to_owned));
+    let mut application = if let Some(port) = port {
+        Application::launch_with_port(directory_path, Limits::default(), port)
+            .map_err(|error| format!("cannot run the application: {error}"))?
+            .with_link(url.map(str::to_owned))
+    } else {
+        Application::launch(directory_path, Limits::default())
+            .map_err(|error| format!("cannot run the application: {error}"))?
+            .with_link(url.map(str::to_owned))
+    };
     if watch {
         application
             .watch()
@@ -533,7 +540,7 @@ pub(crate) fn uninstall(name: &str, root: Option<&str>) -> Result<(Value, bool),
 fn launch(name: &str, root: Option<&str>, link: Option<&str>) -> Result<(Value, bool), String> {
     let root = root.map_or_else(ncui_native::default_root, PathBuf::from);
     let installed = resolve_installed(name, &root)?;
-    run_app(&installed.directory, false, link).map(|payload| (payload, false))
+    run_app(&installed.directory, false, link, None).map(|payload| (payload, false))
 }
 
 /// Finds the installed application called `name` under `root`.
@@ -576,7 +583,7 @@ pub(crate) fn installed(root: Option<&str>) -> Result<(Value, bool), String> {
 /// The manifest is still read, so a user whose application is broken hears about the
 /// manifest rather than about the build. The refusal itself is the build's.
 #[cfg(not(feature = "wry-host"))]
-fn run_app(directory: &str, _watch: bool, _url: Option<&str>) -> Result<Value, String> {
+fn run_app(directory: &str, _watch: bool, _url: Option<&str>, _port: Option<u16>) -> Result<Value, String> {
     use ncui_app::AppManifest;
 
     let directory_path = std::path::Path::new(directory);

@@ -160,6 +160,7 @@ fn params_for(name: &str, created_window: Option<WindowId>) -> Value {
         "ncui.window.create" => json!({ "url": "https://example.com" }),
         "ncui.window.close" | "ncui.window.theme" => json!({ "window": named }),
         "ncui.window.post" => json!({ "window": named, "script": "1;" }),
+        "ncui.app.emit" => json!({ "window": named, "event": "test" }),
         "ncui.window.state" => json!({ "window": named, "maximized": true }),
         "ncui.window.shape" => json!({ "window": named, "title": "renamed" }),
         _ => json!({ "deep": true }),

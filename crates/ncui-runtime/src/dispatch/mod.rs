@@ -43,6 +43,7 @@ use self::params::{
     invoke_component_inspect,
     invoke_devtools_events,
     invoke_devtools_profile,
+    invoke_app_emit,
     invoke_devtools_tree,
     invoke_logs_query,
     invoke_state_inspect,
@@ -230,6 +231,12 @@ pub fn method_table() -> Vec<MethodDescription> {
             "ncui.ipc.inspect",
             "The IPC protocol version and frame limits.",
             inspect,
+            false,
+        ),
+        entry(
+            "ncui.app.emit",
+            "Emit an application-defined event to a window's page. The host-to-page event delivery path for deep links, notification clicks, and custom application events.",
+            CapabilitySet::empty().with(Capability::Window),
             false,
         ),
         entry(
@@ -744,6 +751,7 @@ fn invoke(
             "request_timeout_ms": runtime.limits.request_timeout_ms,
         }))
         .map_err(|e| json_error(&e)),
+        "ncui.app.emit" => invoke_app_emit(runtime, &request.params),
         "ncui.devtools.tree" => {
             invoke_devtools_tree(runtime)
         }
@@ -1052,6 +1060,12 @@ mod tests {
                                 json!({ "window": "00000000000000000000000000000001", "script": "1;" })
                             }
                         },
+                        "ncui.app.emit" => match created_window {
+                            Some(id) => json!({ "window": id.to_string(), "event": "test" }),
+                            None => {
+                                json!({ "window": "00000000000000000000000000000001", "event": "test" })
+                            }
+                        },
                         "ncui.window.state" => match created_window {
                             Some(id) => json!({ "window": id.to_string(), "maximized": true }),
                             None => json!({ "window": "00000000000000000000000000000001" }),
@@ -1346,6 +1360,12 @@ mod tests {
                             .expect("create is listed before post")
                             .to_string(),
                         "script": "window.ncui.receive({});",
+                    }),
+                    "ncui.app.emit" => json!({
+                        "window": created_window
+                            .expect("create is listed before emit")
+                            .to_string(),
+                        "event": "test",
                     }),
                     "ncui.window.theme" => json!({
                         "window": created_window

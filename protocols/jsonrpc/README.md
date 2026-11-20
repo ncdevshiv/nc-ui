@@ -166,6 +166,7 @@ is the one actually enforced.
 | `ncui.devtools.profile` | `inspect.runtime` | no | Per-method timing histograms recorded while profiling was active |
 | `ncui.devtools.profile.reset` | `inspect.runtime` | no | Clear all recorded profiling data |
 | `ncui.devtools.summary` | `inspect.runtime` | no | A summary of the devtools subsystem: event count, capacity, profile methods, and call count |
+| `ncui.app.emit` | `window` | no | Emit an application-defined event to a window's page (deep links, notification clicks, custom events) |
 | `ncui.trace.start` | `inspect.runtime` | no | Begin verbose tracing of operations |
 | `ncui.trace.stop` | `inspect.runtime` | no | End verbose tracing of operations |
 | `ncui.profile.start` | `inspect.runtime` | no | Begin profiling: record per-method timing |

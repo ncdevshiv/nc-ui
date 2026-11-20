@@ -752,6 +752,70 @@ pub(crate) fn invoke_devtools_profile(runtime: &Runtime) -> Result<Value> {
     .map_err(|e| json_error(&e))
 }
 
+/// `ncui.app.emit` -- emit an application-defined event to a window's page.
+///
+/// This is the host-to-page event delivery path that Tauri 2 provides via `app.emit`.
+/// It constructs a `window.ncui.__dispatch(...)` script (the same mechanism used by
+/// the built-in `resized` and `moved` events) and evaluates it in the target window's
+/// page. The page's bridge dispatches the event to any listeners registered via
+/// `window.ncui.on(event, handler)`.
+///
+/// # Parameters
+///
+/// - `window` (string, required): the window ID to emit to.
+/// - `event` (string, required): the event name. Must be a non-empty, bounded string.
+/// - `payload` (any, optional): the event payload. Defaults to `null`.
+///
+/// # Why this matters
+///
+/// Without this method, the host cannot deliver application-defined events to the page.
+/// That blocks deep links, notification click-through, updater events, browser-view
+/// events, and any custom host→page messaging. The built-in `resized`/`moved`/`theme`
+/// events are hardcoded in the engine; `app.emit` generalises that pattern so
+/// applications can define their own event vocabulary.
+pub(crate) fn invoke_app_emit(runtime: &mut Runtime, params: &Value) -> Result<Value> {
+    let id = window_id_param(params)?;
+    let event = params
+        .get("event")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty() && s.len() <= 256)
+        .ok_or_else(|| {
+            NcError::new(ErrorKind::Validation {
+                field: "event".to_owned(),
+                reason: "`event` must be a non-empty string of at most 256 bytes".to_owned(),
+            })
+            .operation("dispatch::app_emit")
+        })?;
+    let payload = params.get("payload").cloned().unwrap_or(Value::Null);
+
+    // Build the dispatch script. The event name and payload are serialised as JSON
+    // so the page's __dispatch function receives a well-formed message object.
+    let message = json!({
+        "event": event,
+        "payload": payload,
+    });
+    let message_str = serde_json::to_string(&message)
+        .map_err(|e| json_error(&e))?;
+    let script = format!(
+        "window.ncui && window.ncui.__dispatch({message_str});"
+    );
+
+    // post_to_page returns Err(WindowRejection) when no host is installed
+    // (e.g. in tests or headless builds). In that case the event is silently
+    // dropped — there is no page to deliver it to. This mirrors the behaviour
+    // of devtools.tree which returns an empty tree when no host is installed.
+    let posted = runtime
+        .windows
+        .post_to_page(id, &script)
+        .unwrap_or(false);
+
+    serde_json::to_value(json!({
+        "emitted": posted,
+        "event": event,
+    }))
+    .map_err(|e| json_error(&e))
+}
+
 /// Reads the `consent_token` parameter, when present.
 ///
 /// `None` means the caller supplied no token. A present-but-malformed token is a

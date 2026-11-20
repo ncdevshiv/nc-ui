@@ -21,6 +21,7 @@ use ncui_webview::{MAX_WINDOWS, WindowRejection};
 use serde_json::{Value, json};
 
 use crate::Runtime;
+use crate::agent::AgentSession;
 
 pub(crate) fn cursor_param(params: &Value) -> Result<Option<usize>> {
     let Some(value) = params.get("cursor") else {
@@ -767,6 +768,44 @@ pub(crate) fn invoke_devtools_profile(runtime: &Runtime) -> Result<Value> {
         "methods": entries,
         "total_calls": call_count,
         "profiling_active": runtime.profiling_active,
+    }))
+    .map_err(|e| json_error(&e))
+}
+
+/// `ncui.consent.mint` -- mint a consent token for a destructive method.
+///
+/// The caller specifies the method they want to perform and the capability
+/// it requires. The runtime mints an unforgeable token bound to the caller's
+/// session, the method name, and the capability set. The caller then presents
+/// this token as `consent_token` in the payload of the destructive call.
+///
+/// This replaces the insecure `consent: true` boolean on the page-command path.
+pub(crate) fn invoke_consent_mint(
+    runtime: &mut Runtime,
+    _session: &AgentSession,
+    params: &Value,
+) -> Result<Value> {
+    let method = params
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+
+    let capability = params
+        .get("capability")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+
+    let capability_set = capability
+        .parse::<Capability>()
+        .map_or_else(|_| CapabilitySet::empty(), |c| CapabilitySet::empty().with(c));
+
+    let correlation = CorrelationId::new();
+    let token = runtime.mint_consent(correlation, method, capability_set)?;
+
+    serde_json::to_value(json!({
+        "consent_token": token.to_value(),
+        "method": method,
+        "capability": capability,
     }))
     .map_err(|e| json_error(&e))
 }

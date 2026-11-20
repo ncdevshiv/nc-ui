@@ -41,6 +41,7 @@ use self::params::{
     enforce_deadline,
     grant_param,
     invoke_component_inspect,
+    invoke_consent_mint,
     invoke_devtools_events,
     invoke_devtools_profile,
     invoke_app_emit,
@@ -273,6 +274,12 @@ pub fn method_table() -> Vec<MethodDescription> {
         entry(
             "ncui.devtools.summary",
             "A summary of the devtools subsystem: event count, capacity, profile methods, and call count.",
+            inspect,
+            false,
+        ),
+        entry(
+            "ncui.consent.mint",
+            "Mint a consent token for a destructive method. The token is bound to the calling session and must be presented as `consent_token` in the payload of the destructive call.",
             inspect,
             false,
         ),
@@ -774,6 +781,9 @@ fn invoke(
             serde_json::to_value(json!({ "reset": true }))
                 .map_err(|e| json_error(&e))
         }
+        "ncui.consent.mint" => {
+            invoke_consent_mint(runtime, session, &request.params)
+        }
         "ncui.devtools.summary" => {
             serde_json::to_value(runtime.devtools.summary())
                 .map_err(|e| json_error(&e))
@@ -1082,6 +1092,10 @@ mod tests {
                             Some(id) => json!({ "window": id.to_string(), "title": "renamed" }),
                             None => json!({ "window": "00000000000000000000000000000001" }),
                         },
+                        "ncui.consent.mint" => json!({
+                            "method": "fs.write_text",
+                            "capability": "filesystem.write"
+                        }),
                         _ => json!({ "consent": true }),
                     }
                 };

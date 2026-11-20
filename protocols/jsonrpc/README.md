@@ -168,6 +168,7 @@ is the one actually enforced.
 | `ncui.devtools.summary` | `inspect.runtime` | no | A summary of the devtools subsystem: event count, capacity, profile methods, and call count |
 | `ncui.app.emit` | `window` | no | Emit an application-defined event to a window's page (deep links, notification clicks, custom events) |
 | `ncui.window.drag.region` | `window` | no | Initiate a window drag from a drag region (titlebar) |
+| `ncui.consent.mint` | `inspect.runtime` | no | Mint a consent token for a destructive method |
 | `ncui.trace.start` | `inspect.runtime` | no | Begin verbose tracing of operations |
 | `ncui.trace.stop` | `inspect.runtime` | no | End verbose tracing of operations |
 | `ncui.profile.start` | `inspect.runtime` | no | Begin profiling: record per-method timing |

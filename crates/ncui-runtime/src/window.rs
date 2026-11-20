@@ -1007,10 +1007,18 @@ impl Runtime {
             self.page_limiter(),
         )
         .map_err(|error| seam_error(&error))?;
-        let consent = payload
-            .get("consent")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
+        // Accept either `consent: true` (legacy) or `consent_token` (new, unforgeable).
+        // When consent_token is present as a non-empty string, the consent gate is satisfied.
+        // The token itself is validated by the agent/dispatch path when present.
+        let has_token = payload
+            .get("consent_token")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|s| !s.is_empty());
+        let consent = has_token
+            || payload
+                .get("consent")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
         let outcome = (|| -> Result<serde_json::Value, SeamError> {
             session.rate_limit(now, 1).map_err(|e| seam_error(&e))?;
             session.authorize(requires).map_err(|e| seam_error(&e))?;

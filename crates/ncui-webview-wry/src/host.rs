@@ -494,7 +494,7 @@ fn engine() -> Option<&'static EventLoopProxy<HostEvent>> {
 /// is built so the CDP transport can find the port file without guessing.
 static CDP_USER_DATA_DIR: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
 
-/// Where this application's WebView2 data lives: under the local data root, in a directory
+/// Where this application's `WebView2` data lives: under the local data root, in a directory
 /// named for the running executable, so two applications do not share one browser state.
 fn webview_data_root() -> std::path::PathBuf {
     let name = std::env::current_exe()
@@ -510,9 +510,7 @@ fn webview_data_root() -> std::path::PathBuf {
 /// The platform's per-user local data root.
 #[cfg(target_os = "windows")]
 fn dirs_local() -> std::path::PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
+    std::env::var_os("LOCALAPPDATA").map_or_else(std::env::temp_dir, std::path::PathBuf::from)
 }
 
 /// The platform's per-user local data root.
@@ -1697,7 +1695,7 @@ impl WindowHost {
                     reply,
                 })
                 .ok()?;
-            Some(answers.recv_timeout(ENGINE_REQUEST_TIMEOUT).ok()?)
+            answers.recv_timeout(ENGINE_REQUEST_TIMEOUT).ok()
         }
         #[cfg(not(feature = "wry-engine"))]
         {

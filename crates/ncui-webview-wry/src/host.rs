@@ -499,7 +499,7 @@ static CDP_USER_DATA_DIR: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
 /// The callers sit behind `feature = "wry-engine"` — one in `create_window`, one in the
 /// transport test — and the cfg below mirrors that, so a build without the engine does not
 /// carry (and dead-code-deny) the helpers.
-#[cfg(all(feature = "wry-engine", any(windows, test)))]
+#[cfg(feature = "wry-engine")]
 fn webview_data_root() -> std::path::PathBuf {
     let name = std::env::current_exe()
         .ok()

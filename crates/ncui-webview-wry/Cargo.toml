@@ -26,6 +26,7 @@ gpu-surface = ["wry-engine", "dep:wgpu"]
 tray-icon = ["wry-engine", "dep:tray-icon"]
 [dependencies]
 ncui-webview = { workspace = true }
+ncui-webview-child = { workspace = true }
 ncui-core = { workspace = true }
 ncui-gpu = { workspace = true }
 serde = { workspace = true }

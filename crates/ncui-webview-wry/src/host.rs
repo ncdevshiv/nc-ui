@@ -36,6 +36,8 @@ use std::sync::{
 use std::sync::{OnceLock, atomic::AtomicU64};
 use std::time::Duration;
 
+use crate::child::{child_bounds, ChildWebviewError};
+use ncui_core::WindowId;
 use ncui_webview::{HostSeam, PageMessage, WebViewBackend};
 
 #[cfg(feature = "wry-engine")]
@@ -160,7 +162,7 @@ const MONITORS_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 #[cfg(feature = "wry-engine")]
 #[derive(Debug)]
-enum HostEvent {
+pub(crate) enum HostEvent {
     /// Build a window and its webview.
     Create(Box<CreateRequest>),
     /// Run a script in one window's page.
@@ -179,6 +181,31 @@ enum HostEvent {
     DragWindow {
         /// The window to drag.
         window: u64,
+    },
+    /// Build a child webview inside a parent window's frame.
+    CreateChild {
+        /// The parent window's engine identity, as its display string.
+        parent: String,
+        /// The child's starting URL and rectangle.
+        request: Box<ncui_webview_child::ChildWebviewRequest>,
+        /// Where the child's engine identity, or the failure, is delivered.
+        reply: Sender<std::result::Result<u64, ncui_webview_child::ChildWebviewError>>,
+    },
+    /// Move a live child webview to a new rectangle.
+    ChildBounds {
+        /// The child's engine identity.
+        child: u64,
+        /// The new rectangle.
+        request: Box<ncui_webview_child::ChildWebviewRequest>,
+        /// Where the acceptance is delivered.
+        reply: Sender<std::result::Result<(), ncui_webview_child::ChildWebviewError>>,
+    },
+    /// Close a live child webview.
+    CloseChild {
+        /// The child's engine identity.
+        child: u64,
+        /// Where the acceptance is delivered.
+        reply: Sender<std::result::Result<(), ncui_webview_child::ChildWebviewError>>,
     },
     /// Scale one window's page by a zoom factor.
     Zoom {
@@ -295,6 +322,10 @@ pub enum DevToolsAction {
 /// The number every window created by the engine is known by.
 #[cfg(feature = "wry-engine")]
 static NEXT_WINDOW: AtomicU64 = AtomicU64::new(1);
+
+/// The number every child webview created by the engine is known by.
+#[cfg(feature = "wry-engine")]
+static NEXT_CHILD: AtomicU64 = AtomicU64::new(1);
 
 /// The process-wide engine, created on first use.
 ///
@@ -430,6 +461,13 @@ struct EngineWindow {
     webview: WebView,
     /// Set while the window has not been closed.
     alive: Arc<AtomicBool>,
+}
+
+/// One live child webview inside a parent window's frame.
+#[cfg(feature = "wry-engine")]
+struct EngineChild {
+    /// The wry webview, built as a child of the parent's HWND.
+    webview: WebView,
 }
 
 /// The engine's proxy, installed before the application's work begins.
@@ -593,6 +631,7 @@ fn run_engine(
     proxy: EventLoopProxy<HostEvent>,
 ) -> ! {
     let mut windows: HashMap<u64, EngineWindow> = HashMap::new();
+    let mut children: HashMap<u64, EngineChild> = HashMap::new();
     // The tray belongs to the application rather than to a window, so it lives beside the windows
     // rather than inside one: an application whose window is closed is still an application a user
     // may need to reach.
@@ -618,6 +657,64 @@ fn run_engine(
                 if let Some(entry) = windows.get(&window) {
                     let _ = entry.window.drag_window();
                 }
+            }
+            Event::UserEvent(HostEvent::CreateChild {
+                parent,
+                request,
+                reply,
+            }) => {
+                let parsed_parent = parent.parse::<u64>().ok();
+                let answer = match parsed_parent.as_ref().and_then(|id| windows.get(id)) {
+                    Some(entry) => {
+                        let built = wry::WebViewBuilder::new()
+                            .with_url(request.url.clone())
+                            .with_bounds(child_bounds(&request))
+                            .build_as_child(&entry.window);
+                        match built {
+                            Ok(webview) => {
+                                let id = NEXT_CHILD.fetch_add(1, Ordering::SeqCst);
+                                children.insert(id, EngineChild { webview });
+                                Ok(id)
+                            }
+                            Err(error) => Err(ChildWebviewError::EngineFailed {
+                                reason: error.to_string(),
+                            }),
+                        }
+                    }
+                    None => Err(ChildWebviewError::ParentUnavailable {
+                        window: parent
+                            .parse::<WindowId>()
+                            .unwrap_or_else(|_| WindowId::new()),
+                    }),
+                };
+                let _ = reply.send(answer);
+            }
+            Event::UserEvent(HostEvent::ChildBounds {
+                child,
+                request,
+                reply,
+            }) => {
+                let answer = match children.get_mut(&child) {
+                    Some(surface) => surface
+                        .webview
+                        .set_bounds(child_bounds(&request))
+                        .map_err(|error| ChildWebviewError::EngineFailed {
+                            reason: error.to_string(),
+                        }),
+                    None => Err(ChildWebviewError::EngineFailed {
+                        reason: format!("child webview {child} is not live"),
+                    }),
+                };
+                let _ = reply.send(answer);
+            }
+            Event::UserEvent(HostEvent::CloseChild { child, reply }) => {
+                let answer = match children.remove(&child) {
+                    Some(_) => Ok(()),
+                    None => Err(ChildWebviewError::EngineFailed {
+                        reason: format!("child webview {child} is not live"),
+                    }),
+                };
+                let _ = reply.send(answer);
             }
             Event::UserEvent(HostEvent::Zoom {
                 window,

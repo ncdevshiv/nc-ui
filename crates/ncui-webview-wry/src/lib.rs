@@ -31,6 +31,7 @@
 )]
 
 pub mod cdp;
+pub mod child;
 pub mod host;
 mod host_scripts;
 

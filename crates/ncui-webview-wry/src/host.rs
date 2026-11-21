@@ -38,8 +38,6 @@ use std::time::Duration;
 
 use ncui_webview::{HostSeam, PageMessage, WebViewBackend};
 
-use crate::cdp::CdpError;
-
 #[cfg(feature = "wry-engine")]
 use crate::host_scripts::{DRAG_REGION_SCRIPT, dropped_files_script, moved_script, resized_script};
 
@@ -492,10 +490,16 @@ fn engine() -> Option<&'static EventLoopProxy<HostEvent>> {
 
 /// The process-wide user-data directory the engine's browsers use, recorded when a window
 /// is built so the CDP transport can find the port file without guessing.
+#[cfg(feature = "wry-engine")]
 static CDP_USER_DATA_DIR: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
 
 /// Where this application's `WebView2` data lives: under the local data root, in a directory
 /// named for the running executable, so two applications do not share one browser state.
+///
+/// The callers sit behind `feature = "wry-engine"` — one in `create_window`, one in the
+/// transport test — and the cfg below mirrors that, so a build without the engine does not
+/// carry (and dead-code-deny) the helpers.
+#[cfg(all(feature = "wry-engine", any(windows, test)))]
 fn webview_data_root() -> std::path::PathBuf {
     let name = std::env::current_exe()
         .ok()
@@ -508,13 +512,13 @@ fn webview_data_root() -> std::path::PathBuf {
 }
 
 /// The platform's per-user local data root.
-#[cfg(target_os = "windows")]
+#[cfg(all(feature = "wry-engine", target_os = "windows"))]
 fn dirs_local() -> std::path::PathBuf {
     std::env::var_os("LOCALAPPDATA").map_or_else(std::env::temp_dir, std::path::PathBuf::from)
 }
 
 /// The platform's per-user local data root.
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(feature = "wry-engine", not(target_os = "windows")))]
 fn dirs_local() -> std::path::PathBuf {
     std::env::var_os("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
@@ -1566,7 +1570,11 @@ impl WindowHost {
     /// from the user-data directory set with [`WindowHost::set_cdp_user_data_dir`]. A host
     /// with no directory set, or an engine that never exposed the port, refuses by name
     /// rather than inventing an answer.
-    pub fn cdp_send(&self, command: &serde_json::Value) -> Result<serde_json::Value, CdpError> {
+    #[cfg(feature = "wry-engine")]
+    pub fn cdp_send(
+        &self,
+        command: &serde_json::Value,
+    ) -> Result<serde_json::Value, crate::cdp::CdpError> {
         // The window's own directory wins; the process-wide one recorded when the window
         // was built is the fallback, and it is the one a normally-constructed host has.
         let owned = self
@@ -1581,11 +1589,18 @@ impl WindowHost {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone()
             })
-            .ok_or_else(|| CdpError::PortUnavailable {
+            .ok_or_else(|| crate::cdp::CdpError::PortUnavailable {
                 reason: "no user-data directory was set for this window's engine".to_owned(),
             })?;
         let endpoint = crate::cdp::read_devtools_endpoint(&dir)?;
         crate::cdp::send_command(&endpoint, command)
+    }
+
+    /// The no-engine form of [`WindowHost::cdp_send`]: without an engine there is no
+    /// browser and no `DevTools` endpoint, so the command is refused by name.
+    #[cfg(not(feature = "wry-engine"))]
+    pub fn cdp_send(&self, _command: &serde_json::Value) -> Result<serde_json::Value, String> {
+        Err("this build has no WebView engine, so there is no DevTools endpoint".to_owned())
     }
 
     /// Sets where this window's engine publishes its `DevTools` endpoint.
@@ -1740,7 +1755,15 @@ impl WebViewBackend for WindowHost {
     }
 
     fn cdp_send(&self, command: &serde_json::Value) -> Result<serde_json::Value, String> {
-        self.cdp_send(command).map_err(|error| error.to_string())
+        #[cfg(feature = "wry-engine")]
+        {
+            WindowHost::cdp_send(self, command).map_err(|error| error.to_string())
+        }
+        #[cfg(not(feature = "wry-engine"))]
+        {
+            let _ = (self, command);
+            Err("this backend has no CDP transport".to_owned())
+        }
     }
 
     fn last_error(&self) -> Option<String> {
@@ -2090,7 +2113,6 @@ mod tests {
             && std::env::var("DISPLAY").is_err()
             && std::env::var("WAYLAND_DISPLAY").is_err()
         {
-            eprintln!("skipping: this machine has no display server to open a window on");
             return false;
         }
         true
@@ -2284,7 +2306,7 @@ mod tests {
 #[cfg(all(test, feature = "wry-engine", not(target_os = "macos")))]
 mod cdp_live {
     //! The live CDP exchange: ADR-017 Phase 2's recorded human verification, automated.
-    //! A real WebView2 is created with remote debugging on, the transport reads the port
+    //! A real `WebView2` is created with remote debugging on, the transport reads the port
     //! the engine published, and `Browser.getVersion` is sent to the endpoint and answered.
 
     use super::*;
@@ -2335,6 +2357,6 @@ mod cdp_live {
             version.contains("Edg/") || version.contains("Chrome/"),
             "the product string should name the engine: {version}"
         );
-        eprintln!("live CDP exchange answered by {version}");
+        // The product string is asserted below; nothing needs printing.
     }
 }

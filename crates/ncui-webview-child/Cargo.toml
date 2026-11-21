@@ -1,0 +1,17 @@
+[package]
+name = "ncui-webview-child"
+description = "Embedded child webview surface: policy, registry and geometry contract for a webview that lives inside a parent window's frame (ADR-017 Phase 3)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors = ["NC-UI Contributors"]
+
+[lints]
+workspace = true
+
+[dependencies]
+ncui-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

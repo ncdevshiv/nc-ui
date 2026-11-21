@@ -1945,6 +1945,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ncui-webview-child"
+version = "0.1.0"
+dependencies = [
+ "ncui-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ncui-webview-wry"
 version = "0.1.0"
 dependencies = [

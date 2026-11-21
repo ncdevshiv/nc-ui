@@ -33,6 +33,7 @@ ncui-app = { path = "crates/ncui-app" }
 ncui-native = { path = "crates/ncui-native" }
 ncui-component = { path = "crates/ncui-component" }
 ncui-webview-wry = { path = "crates/ncui-webview-wry" }
+ncui-webview-child = { path = "crates/ncui-webview-child" }
 ncui-gpu = { path = "crates/ncui-gpu" }
 ncui-gpu-renderer = { path = "crates/ncui-gpu-renderer" }
 ncui-cli = { path = "crates/ncui-cli" }

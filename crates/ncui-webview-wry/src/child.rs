@@ -5,6 +5,8 @@
 //! inside the parent's frame, and moved with wry's `set_bounds`. The engine
 //! thread owns both, so every operation is a `HostEvent` the loop answers.
 
+#![cfg(feature = "wry-engine")]
+
 use std::sync::mpsc;
 use std::time::Duration;
 

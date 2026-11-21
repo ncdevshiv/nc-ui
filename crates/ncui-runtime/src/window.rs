@@ -18,7 +18,7 @@ use std::time::SystemTime;
 
 use ncui_core::{Capability, CapabilitySet, CorrelationId, WindowId};
 use ncui_security::audit::{AuditEvent, AuditOutcome};
-use ncui_webview_child;
+use ncui_webview_child::{ChildWebviewId, ChildWebviewRequest};
 use ncui_webview::{
     ActionTable, HostFactory, HostSeam, MountedComponent, PageMessage, SeamError, WindowRegistry,
     WindowRejection, WindowRequest, WindowSummary,

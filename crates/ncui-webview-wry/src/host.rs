@@ -36,7 +36,9 @@ use std::sync::{
 use std::sync::{OnceLock, atomic::AtomicU64};
 use std::time::Duration;
 
-use crate::child::{child_bounds, ChildWebviewError};
+#[cfg(feature = "wry-engine")]
+use crate::child::{ChildWebviewError, child_bounds};
+#[cfg(feature = "wry-engine")]
 use ncui_core::WindowId;
 use ncui_webview::{HostSeam, PageMessage, WebViewBackend};
 

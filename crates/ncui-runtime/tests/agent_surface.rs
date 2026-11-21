@@ -89,7 +89,7 @@ impl ncui_webview::WebViewBackend for AlwaysAlive {
     fn is_devtools_open(&self) -> Option<bool> {
         Some(false)
     }
-    fn cdp_send(&self, _command: &serde_json::Value) -> Result<serde_json::Value, String> {
+    fn cdp_send(&self, _command: &Value) -> Result<Value, String> {
         Ok(serde_json::json!({ "result": {} }))
     }
     fn drag_window(&self) -> bool {

@@ -28,7 +28,7 @@ fn main() -> ExitCode {
         // this thread; the application runs on a worker and reaches the loop through
         // its proxy. The process ends with the code the application finishes with,
         // which is why this call never returns.
-        ncui_runtime::window::run_engine_on_main_thread(|| run_application() as i32)
+        ncui_runtime::window::run_engine_on_main_thread(|| i32::from(run_application()))
     }
     #[cfg(not(all(target_os = "macos", feature = "wry-host")))]
     {

@@ -55,6 +55,11 @@ INSTRUMENTATION_MAP = {
         # so the whole port is reviewable in this directory and reproduces from a fresh clone.
         "package.json": "package.json",
         "Cargo.toml": "src-tauri/Cargo.toml",
+        # The lock pins the crate versions the CLI's pre-flight version check reads. Without it
+        # the clone still holds the upstream 1.x lock, the CLI refuses the build with "version
+        # mismatched Tauri packages" before Cargo ever resolves the pinned =2.12.5, and the
+        # pinned Cargo.toml never gets a chance to answer it.
+        "Cargo.lock": "src-tauri/Cargo.lock",
         "capabilities/default.json": "src-tauri/capabilities/default.json",
     },
 }

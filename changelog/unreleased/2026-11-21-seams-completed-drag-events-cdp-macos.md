@@ -110,3 +110,17 @@ entry point, and the runtime's re-export), and `devtools.rs` linked `[tree]`, `[
 
 Tested: `cargo doc --workspace --no-deps --all-features` with `RUSTDOCFLAGS=-D warnings`
 exits 0 on Windows; the macOS-only doc comments were audited by grep.
+
+- **The second run's failures were the next layer down, and each fix is at its owner:**
+  the macOS-only `run_application() as i32` cast is now `i32::from(...)` (clippy's lossless-cast
+  lint fires only where the macOS block compiles); the Tauri comparison leg now overlays a
+  pinned `Cargo.lock` alongside the pinned manifest — the CLI's pre-flight version check reads
+  the *lock*, which still held the upstream 1.x pins, so the build was refused before Cargo
+  ever resolved the pinned `=2.12.5`; and the runtime's application tests now skip on machines
+  that cannot open a real window (a headless Linux runner has no X11/Wayland server, and
+  AppKit requires the event loop on the main thread a test harness does not own) instead of
+  panicking inside the platform's event loop — the same decision the GPU surface probe makes.
+
+Tested: `cargo doc --workspace --no-deps --all-features` (RUSTDOCFLAGS=-D warnings) exits 0;
+the workspace suite and clippy re-run green on Windows, where the application tests still run
+for real with the guard in place.

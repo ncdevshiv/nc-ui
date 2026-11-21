@@ -28,7 +28,7 @@ use ncui_runtime::application::Application;
 
 /// Whether this machine can open a real window for these tests.
 ///
-/// A headless Linux runner has no X11/Wayland server to connect to, and AppKit (macOS)
+/// A headless Linux runner has no X11/Wayland server to connect to, and `AppKit` (macOS)
 /// requires the event loop to run on the main thread, which a test harness does not own
 /// (ADR-018). Both are facts about the machine rather than failures of the runtime, so the
 /// tests skip instead of panicking inside the platform's event loop — the same decision the

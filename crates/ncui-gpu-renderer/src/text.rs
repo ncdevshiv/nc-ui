@@ -1022,6 +1022,11 @@ mod tests {
         // Arabic joins: a letter drawn alone is in its isolated form, and the same letter inside a
         // word is in an initial, medial or final form — a different glyph. A shaper that left every
         // letter in its isolated form would draw a word as a row of disconnected letters.
+        //
+        // The join is the shaper's (`rustybuzz`), not the font's: for a font that carries no
+        // Arabic glyph-substitution table it falls back to the Unicode joining data, so the test
+        // asserts the join on whatever font the machine offers rather than requiring one that
+        // happens to ship the table.
         let Some(font) = system_font() else {
             return;
         };

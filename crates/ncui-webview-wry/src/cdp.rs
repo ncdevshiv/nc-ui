@@ -102,8 +102,25 @@ pub struct DevToolsEndpoint {
 /// [`CdpError::PortUnavailable`] naming what was wrong, so a caller can distinguish "the
 /// engine was not started with debugging" from "the file has not appeared yet".
 pub fn read_devtools_endpoint(user_data_dir: &Path) -> Result<DevToolsEndpoint, CdpError> {
-    let file = user_data_dir.join(DEVTOOLS_PORT_FILE);
-    let contents = std::fs::read_to_string(&file).map_err(|error| CdpError::PortUnavailable {
+    // WebView2 writes the file inside its `EBWebView` profile directory, one level below
+    // the user-data folder the application chose. Both places are looked in: the profile
+    // path is where the runtime actually puts it, and the folder itself covers a runtime
+    // that writes it at the root it was given.
+    let candidates = [
+        user_data_dir.join("EBWebView").join(DEVTOOLS_PORT_FILE),
+        user_data_dir.join(DEVTOOLS_PORT_FILE),
+    ];
+    let file = candidates
+        .iter()
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| CdpError::PortUnavailable {
+            reason: format!(
+                "no {} in {} (or its EBWebView profile directory)",
+                DEVTOOLS_PORT_FILE,
+                user_data_dir.display()
+            ),
+        })?;
+    let contents = std::fs::read_to_string(file).map_err(|error| CdpError::PortUnavailable {
         reason: format!("cannot read {}: {error}", file.display()),
     })?;
     let mut lines = contents.lines();

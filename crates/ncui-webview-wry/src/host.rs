@@ -490,6 +490,40 @@ fn engine() -> Option<&'static EventLoopProxy<HostEvent>> {
         .as_ref()
 }
 
+/// The process-wide user-data directory the engine's browsers use, recorded when a window
+/// is built so the CDP transport can find the port file without guessing.
+static CDP_USER_DATA_DIR: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+
+/// Where this application's WebView2 data lives: under the local data root, in a directory
+/// named for the running executable, so two applications do not share one browser state.
+fn webview_data_root() -> std::path::PathBuf {
+    let name = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.file_stem().map(|stem| stem.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "ncui".to_owned());
+    dirs_local().join(name).join("webview")
+}
+
+/// The platform's per-user local data root.
+#[cfg(target_os = "windows")]
+fn dirs_local() -> std::path::PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+/// The platform's per-user local data root.
+#[cfg(not(target_os = "windows"))]
+fn dirs_local() -> std::path::PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| std::path::PathBuf::from(home).join(".local/share"))
+        })
+        .unwrap_or_else(std::env::temp_dir)
+}
+
 /// Runs the engine's event loop on the main thread, and the application on a worker.
 ///
 /// macOS (`AppKit`) requires the event loop to be created and run on the main
@@ -1093,14 +1127,27 @@ fn build_window(
         navigation_seam.evaluate_navigation(&request).is_allowed()
     };
 
-    let builder = WebViewBuilder::new()
+    // One user-data directory for the process's browsers, under the runtime's own data
+    // root. A directory the runtime owns is what makes the CDP port findable: WebView2
+    // writes `DevToolsActivePort` into it, and the transport reads it from there rather
+    // than guessing. It also keeps this application's browser state separate from every
+    // other WebView2 consumer on the machine, which a shared default would not. The
+    // context outlives the builder because the builder only borrows it.
+    let dir = webview_data_root();
+    let _ = std::fs::create_dir_all(&dir);
+    *CDP_USER_DATA_DIR
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(dir.clone());
+    let mut web_context = wry::WebContext::new(Some(dir));
+    let builder = WebViewBuilder::new_with_web_context(&mut web_context)
         .with_ipc_handler(move |request: wry::http::Request<String>| {
             // Bridge the page's IPC payload into the in-process channel so the runtime can
             // evaluate it through the seam.
             let _ = ipc_tx.send(request.body().to_owned());
         })
         .with_navigation_handler(navigation_handler)
-        .with_initialization_script(format!("{BRIDGE_SCRIPT}\n{DRAG_REGION_SCRIPT}"));
+        .with_initialization_script(format!("{BRIDGE_SCRIPT}
+{DRAG_REGION_SCRIPT}"));
 
     // Remote debugging (ADR-017 Phase 2): an ephemeral port keeps two instances of the
     // same application from colliding, and the chosen port is published by the runtime in
@@ -2027,7 +2074,7 @@ mod tests {
     /// Windows ships a window manager on every consumer build, so it is always yes. On
     /// Linux the display server answers: no `DISPLAY` and no `WAYLAND_DISPLAY` means GTK
     /// cannot initialise, which is what the runner's log said.
-    fn require_display() -> bool {
+    pub(super) fn require_display() -> bool {
         if cfg!(target_os = "linux")
             && std::env::var("DISPLAY").is_err()
             && std::env::var("WAYLAND_DISPLAY").is_err()
@@ -2220,5 +2267,63 @@ mod tests {
 
         drop(first);
         drop(second);
+    }
+}
+
+#[cfg(all(test, feature = "wry-engine", not(target_os = "macos")))]
+mod cdp_live {
+    //! The live CDP exchange: ADR-017 Phase 2's recorded human verification, automated.
+    //! A real WebView2 is created with remote debugging on, the transport reads the port
+    //! the engine published, and `Browser.getVersion` is sent to the endpoint and answered.
+
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn a_live_engine_answers_a_cdp_command_over_the_transport() {
+        if !tests::require_display() {
+            return;
+        }
+        let host = WindowHost::new();
+        assert!(
+            host.is_alive(),
+            "the window did not come up: {:?}",
+            host.last_error()
+        );
+
+        // The engine writes the port file while starting its browser, inside the
+        // `EBWebView` profile directory of the user-data directory the host named. It is
+        // polled rather than assumed, because "not yet" is a normal state during a cold
+        // start, which on a busy machine is tens of seconds.
+        let port_file = webview_data_root()
+            .join("EBWebView")
+            .join(crate::cdp::DEVTOOLS_PORT_FILE);
+        let deadline = Instant::now() + Duration::from_secs(90);
+        while !port_file.is_file() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(200));
+        }
+        assert!(
+            port_file.is_file(),
+            "the engine never published {} under {}",
+            crate::cdp::DEVTOOLS_PORT_FILE,
+            port_file.display()
+        );
+
+        let answer = host
+            .cdp_send(&serde_json::json!({
+                "id": 1,
+                "method": "Browser.getVersion",
+            }))
+            .expect("the live engine answered the CDP command");
+        let version = answer
+            .get("result")
+            .and_then(|result| result.get("product"))
+            .and_then(serde_json::Value::as_str)
+            .expect("Browser.getVersion answers with a product string");
+        assert!(
+            version.contains("Edg/") || version.contains("Chrome/"),
+            "the product string should name the engine: {version}"
+        );
+        eprintln!("live CDP exchange answered by {version}");
     }
 }

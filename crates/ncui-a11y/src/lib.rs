@@ -38,6 +38,54 @@ pub mod tree;
 pub use focus::{FocusOwner, FocusRefused, FocusState, Key};
 pub use tree::{Node, Role, SemanticTree};
 
+/// The direction a run of text lays out in, which a screen reader is told alongside the
+/// language so it reads a right-to-left island the way its script is written.
+///
+/// This is the *metadata* a reader needs to announce an island correctly, not the shaping or
+/// bidi layout itself — those stay with the renderer that draws the glyphs. Carrying the
+/// direction here means an island whose content is Arabic or Hebrew is announced as
+/// right-to-left rather than read left-to-right by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextDirection {
+    /// Left-to-right: Latin, Cyrillic, Greek, CJK, and every script not listed right-to-left.
+    LeftToRight,
+    /// Right-to-left: Arabic, Hebrew, and the scripts that share their writing direction.
+    RightToLeft,
+}
+
+impl TextDirection {
+    /// The direction for a BCP 47 language tag, decided by its language subtag.
+    ///
+    /// Only the language subtag is consulted, and case-insensitively, so `he`, `he-IL`, and
+    /// `HE` all name Hebrew. A tag this does not recognise is left-to-right: the right-to-left
+    /// scripts are a small, fixed set, and defaulting the unknown to the direction most tags
+    /// have means a typo'd locale degrades to the common case rather than flipping a page.
+    #[must_use]
+    pub fn for_locale(locale: &str) -> Self {
+        // The language subtag is everything before the first `-` or `_`, lower-cased.
+        let language = locale
+            .split(['-', '_'])
+            .next()
+            .unwrap_or(locale)
+            .to_ascii_lowercase();
+        match language.as_str() {
+            "ar" | "he" | "fa" | "ur" | "ps" | "sd" | "ug" | "yi" | "dv" | "nqo" | "ckb" => {
+                Self::RightToLeft
+            }
+            _ => Self::LeftToRight,
+        }
+    }
+
+    /// The stable wire name a screen reader or the page is given.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LeftToRight => "ltr",
+            Self::RightToLeft => "rtl",
+        }
+    }
+}
+
 /// What a GPU island must provide to be reachable by a keyboard or a screen reader.
 ///
 /// ADR-002 warns that a GPU surface with no accessibility strategy is the failure to avoid, and
@@ -49,6 +97,17 @@ pub struct IslandDescriptor {
     pub order: u32,
     /// The label a screen reader announces for the island as a whole.
     pub label: String,
+    /// The language the island's text is in, as a BCP 47 tag (e.g. `"en"`, `"he-IL"`).
+    ///
+    /// A reader announces the language so it uses the right voice and reads the words
+    /// correctly. An island that does not know its language carries `"und"` (undetermined)
+    /// rather than guessing one, because a wrong language is worse than an unnamed one.
+    pub locale: String,
+    /// The direction the island's text lays out in, derived from `locale`.
+    ///
+    /// Told to the reader with the language, so a right-to-left island is read in the order
+    /// its script is written rather than reversed.
+    pub direction: TextDirection,
     /// The nodes the island exposes, which are merged into the host's semantic tree.
     pub nodes: Vec<Node>,
 }
@@ -102,6 +161,8 @@ mod tests {
         IslandDescriptor {
             order: 10,
             label: label.to_owned(),
+            locale: "en".to_owned(),
+            direction: TextDirection::LeftToRight,
             nodes,
         }
     }
@@ -110,6 +171,35 @@ mod tests {
     fn a_named_island_with_named_focusables_is_reachable() {
         let island = island("Toolbar", vec![Node::leaf(Role::Button, "Bold", 1, true)]);
         assert!(island.is_reachable());
+    }
+
+    #[test]
+    fn the_right_to_left_scripts_are_named_right_to_left() {
+        // The direction a reader is told is decided by the language subtag, case-insensitively,
+        // and ignores script/region subtags: `he`, `he-IL`, and `HE` all name Hebrew.
+        for locale in ["ar", "he", "he-IL", "HE", "fa", "ur", "ar_EG"] {
+            assert_eq!(
+                TextDirection::for_locale(locale),
+                TextDirection::RightToLeft,
+                "{locale} is a right-to-left script"
+            );
+        }
+        // Everything else — including the undetermined tag and an unrecognised one — is
+        // left-to-right, so an unknown locale degrades to the common direction rather than
+        // flipping a page.
+        for locale in ["en", "en-US", "fr", "de", "und", "", "zz"] {
+            assert_eq!(
+                TextDirection::for_locale(locale),
+                TextDirection::LeftToRight,
+                "{locale} is a left-to-right script"
+            );
+        }
+    }
+
+    #[test]
+    fn the_direction_has_a_stable_wire_name() {
+        assert_eq!(TextDirection::LeftToRight.as_str(), "ltr");
+        assert_eq!(TextDirection::RightToLeft.as_str(), "rtl");
     }
 
     #[test]

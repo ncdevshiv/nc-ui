@@ -59,6 +59,23 @@ pub enum SeamMessage {
     },
     /// Ask what the page is permitted to do.
     Describe,
+    /// The page's answer to a command the runtime handed it to run.
+    ///
+    /// A page-registered command handler runs in the page, so its result arrives as a message
+    /// of its own rather than as the return value of the call that started it: the runtime
+    /// cannot read a value back out of `evaluate_script`, so the handler posts its answer over
+    /// the same bridge under the reply id the runtime minted for it. The runtime holds the
+    /// original call open until this arrives.
+    CommandResult {
+        /// Whether the handler ran to completion.
+        ok: bool,
+        /// The handler's result. Null when `ok` is false or the handler returned nothing.
+        #[serde(default)]
+        payload: Value,
+        /// What went wrong, when `ok` is false.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<SeamError>,
+    },
 }
 
 /// A page request with the correlation id the bridge minted for it.
@@ -134,6 +151,20 @@ impl SeamMessage {
                 })
                 .ok_or_else(|| SeamResponse::malformed("`probe_navigation` needs a `url`")),
             "describe" => Ok(Self::Describe),
+            "command_result" => {
+                let error = value.get("error").map(|error| {
+                    serde_json::from_value::<SeamError>(error.clone()).unwrap_or_else(|_| {
+                        SeamError::dispatch(
+                            "the page handler reported a failure without a readable error",
+                        )
+                    })
+                });
+                Ok(Self::CommandResult {
+                    ok: value.get("ok").and_then(Value::as_bool).unwrap_or(false),
+                    payload: value.get("payload").cloned().unwrap_or(Value::Null),
+                    error,
+                })
+            }
             other => Err(SeamResponse::malformed(format!("unknown action `{other}`"))),
         }
     }
@@ -437,6 +468,16 @@ pub struct HostSeam {
     /// A page that names an action with no entry here gets a refusal — the default is
     /// "denied", never "allowed".
     actions: ActionTable,
+    /// The platform locale and the text direction it lays out in, told to a page that asks
+    /// `describe`.
+    ///
+    /// The runtime supplies both — the locale it reads from the platform and the direction that
+    /// locale implies — so the seam carries them as values rather than deriving them. A page is
+    /// told the direction alongside the language, so it lays out and formats to the machine
+    /// without keeping its own table of right-to-left scripts. Defaults to `"und"`/`"ltr"` when
+    /// the runtime does not say, which is the honest "unknown" rather than a guess.
+    locale: String,
+    text_direction: String,
 }
 
 impl HostSeam {
@@ -452,7 +493,21 @@ impl HostSeam {
             grant,
             navigation,
             actions: ActionTable::new(),
+            locale: "und".to_owned(),
+            text_direction: "ltr".to_owned(),
         }
+    }
+
+    /// Tells the seam the platform locale and the text direction it lays out in.
+    ///
+    /// The runtime derives the direction from the locale before handing both over, so the seam
+    /// reports a matched pair and a page never sees a locale with a direction that contradicts
+    /// it.
+    #[must_use]
+    pub fn with_locale(mut self, locale: impl Into<String>, direction: impl Into<String>) -> Self {
+        self.locale = locale.into();
+        self.text_direction = direction.into();
+        self
     }
 
     /// A seam that refuses everything.
@@ -529,6 +584,8 @@ impl HostSeam {
                 "described",
                 Some(json!({
                     "protocol_version": BRIDGE_PROTOCOL_VERSION,
+                    "locale": self.locale,
+                    "text_direction": self.text_direction,
                     "capabilities": self.grant.granted(),
                     "actions": self.actions.entries().into_iter().map(|(name, definition)| json!({
                         "name": name,
@@ -539,6 +596,11 @@ impl HostSeam {
             ),
             SeamMessage::ProbeNavigation { url } => self.probe_navigation(url),
             SeamMessage::Perform { name, payload } => self.perform(name, payload.clone(), dispatch),
+            // A completion is not a request the seam answers: it settles a call the runtime
+            // started, and the runtime reads it before this method runs. Reaching here means
+            // it arrived with no call to complete, so there is nothing to gate and nothing to
+            // run — the answer is benign because no page promise is waiting on it.
+            SeamMessage::CommandResult { .. } => SeamResponse::ok("completed", None),
         }
     }
 
@@ -565,6 +627,39 @@ impl HostSeam {
             Verdict::Allow => SeamResponse::ok("allowed", None),
             Verdict::Deny { reason } => SeamResponse::failure(SeamError::navigation_denied(reason)),
         }
+    }
+
+    /// Checks that an action is declared *and* granted, without running it.
+    ///
+    /// This is the gate `perform` applies, separated from the run. A page-registered
+    /// command handler is the one action whose answer does not come back from the dispatcher:
+    /// it runs in the page and returns over a second message, so the runtime starts it rather
+    /// than awaiting a value here. Starting it must pass the same gate — the action is
+    /// declared, and the page holds the capability it requires — or a handler would be a way to
+    /// run something the page was never granted. Keeping the gate in the seam, rather than
+    /// re-deriving it at the call site, is what keeps the answer the same as every other action.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same refusals `perform` would: a host that is not serving, an
+    /// undeclared action, or a capability the page's grant does not include.
+    pub fn authorize_perform(&self, action: &str) -> Result<(), SeamError> {
+        if self.lifecycle.is_crashed() {
+            return Err(SeamError::unavailable(
+                "the host crashed; the page is not being served",
+            ));
+        }
+        if !self.lifecycle.is_serving() {
+            return Err(SeamError::unavailable("the host is not serving"));
+        }
+        let Some(requires) = self.actions.requires(action) else {
+            return Err(SeamError::capability_denied(format!(
+                "`{action}` is not an action this host offers"
+            )));
+        };
+        self.grant
+            .require(requires)
+            .map_err(SeamError::capability_denied)
     }
 
     /// Runs an action after checking it is declared *and* granted.
@@ -739,6 +834,75 @@ mod tests {
                 "{}",
                 response.outcome
             );
+        }
+    }
+
+    #[test]
+    fn authorize_perform_admits_a_declared_and_granted_action() {
+        // The gate a page-handled command is started behind. It must answer exactly as the
+        // full `perform` would, because it *is* the same gate with the run taken out.
+        let seam = running_seam();
+        assert!(
+            seam.authorize_perform("describe_metrics").is_ok(),
+            "a declared, granted action is authorised"
+        );
+    }
+
+    #[test]
+    fn authorize_perform_refuses_an_undeclared_action() {
+        let seam = running_seam();
+        let error = seam
+            .authorize_perform("not.an.action")
+            .expect_err("an undeclared action is refused");
+        assert_eq!(error.code, "capability_denied", "{error:?}");
+    }
+
+    #[test]
+    fn authorize_perform_refuses_an_action_the_grant_does_not_cover() {
+        let seam = running_seam();
+        // `describe_metrics` requires `InspectRuntime`, which `running_seam` grants. An action
+        // requiring something else is refused even though it is declared.
+        let seam = seam.with_action(
+            "needs_more",
+            CapabilitySet::empty().with(Capability::Window),
+        );
+        let error = seam
+            .authorize_perform("needs_more")
+            .expect_err("an ungranted action is refused");
+        assert_eq!(error.code, "capability_denied", "{error:?}");
+    }
+
+    #[test]
+    fn a_command_result_round_trips_through_the_request_parser() {
+        // The page's answer to a handler the runtime handed it arrives as its own message. It
+        // must parse back into a `CommandResult` carrying the id it is settling, so the runtime
+        // can find the call it started and answer the page's original `invoke`.
+        let raw =
+            r#"{"id":"page-reply-7","action":"command_result","ok":true,"payload":{"sum":3}}"#;
+        let request = SeamRequest::parse(raw).expect("a command result parses");
+        assert_eq!(request.id, "page-reply-7");
+        match request.message {
+            SeamMessage::CommandResult { ok, payload, error } => {
+                assert!(ok, "a success result is ok");
+                assert_eq!(payload, json!({ "sum": 3 }));
+                assert!(error.is_none(), "a success carries no error");
+            }
+            other => panic!("expected a command result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_failed_command_result_carries_the_error() {
+        let raw = r#"{"id":"page-reply-8","action":"command_result","ok":false,"error":{"code":"handler_failed","message":"it threw","retryable":false}}"#;
+        let request = SeamRequest::parse(raw).expect("a failed result parses");
+        match request.message {
+            SeamMessage::CommandResult { ok, error, .. } => {
+                assert!(!ok, "a failure is not ok");
+                let error = error.expect("a failure carries an error");
+                assert_eq!(error.code, "handler_failed");
+                assert_eq!(error.message, "it threw");
+            }
+            other => panic!("expected a command result, got {other:?}"),
         }
     }
 

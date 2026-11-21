@@ -73,6 +73,9 @@ impl ncui_webview::WebViewBackend for AlwaysAlive {
     fn set_window_shape(&self, _shape: &ncui_webview::WindowShape) -> bool {
         true
     }
+    fn drag_window(&self) -> bool {
+        true
+    }
 }
 
 fn runtime() -> Runtime {
@@ -158,7 +161,7 @@ fn params_for(name: &str, created_window: Option<WindowId>) -> Value {
     );
     match name {
         "ncui.window.create" | "ncui.window.create.child" => json!({ "url": "https://example.com" }),
-        "ncui.window.close" | "ncui.window.theme" => json!({ "window": named }),
+        "ncui.window.close" | "ncui.window.theme" | "ncui.window.drag.region" => json!({ "window": named }),
         "ncui.window.post" => json!({ "window": named, "script": "1;" }),
         "ncui.app.emit" => json!({ "window": named, "event": "test" }),
         "ncui.window.state" => json!({ "window": named, "maximized": true }),
@@ -170,6 +173,10 @@ fn params_for(name: &str, created_window: Option<WindowId>) -> Value {
 /// Every method advertised by `ncui.describe` must be callable by a caller holding the
 /// authority it advertises, and every destructive method must require explicit consent.
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one sweep drives every advertised method with the parameters it needs; splitting it would hide the ordering the sweep depends on"
+)]
 fn the_advertised_surface_matches_the_enforced_surface() {
     let mut runtime = runtime();
     let mut administrator = session(AgentRole::Administrator);
@@ -226,12 +233,18 @@ fn the_advertised_surface_matches_the_enforced_surface() {
             let token = runtime
                 .mint_consent(correlation, name, requires)
                 .expect("a destructive method's requirements can be minted");
-            let allowed = call(
-                &mut runtime,
-                &mut administrator,
-                name,
-                json!({ "consent_token": token.to_value() }),
-            );
+            let mut consent_params = json!({ "consent_token": token.to_value() });
+            if name == "ncui.cdp.send" {
+                // The CDP seam requires the window and the command it forwards; the
+                // consent alone does not name them.
+                consent_params["window"] = json!(created_window.map_or_else(
+                    || "00000000000000000000000000000001".to_owned(),
+                    |id| id.to_string()
+                ));
+                consent_params["method"] = json!("Page.navigate");
+                consent_params["params"] = json!({ "url": "https://example.com" });
+            }
+            let allowed = call(&mut runtime, &mut administrator, name, consent_params);
             assert!(
                 allowed.error.is_none(),
                 "`{name}` was refused despite consent: {:?}",
@@ -242,6 +255,36 @@ fn the_advertised_surface_matches_the_enforced_surface() {
 
         if name == "ncui.test.run" || name == "ncui.benchmark.run" {
             // Subprocess-based; environment-dependent. Covered by their handlers existing.
+            continue;
+        }
+        // `ncui.window.close` is exercised on a window of its own, so the window the
+        // later window methods name is still open: closing the shared window here would
+        // make every later window method report a window that is genuinely gone, which
+        // is the method's honest answer and not a defect in it.
+        if name == "ncui.window.close" {
+            let created = call(
+                &mut runtime,
+                &mut administrator,
+                "ncui.window.create",
+                json!({ "url": "https://example.com" }),
+            );
+            let throwaway = created
+                .result
+                .as_ref()
+                .and_then(|value| value.get("id").and_then(|value| value.as_str()))
+                .and_then(|text| text.parse::<WindowId>().ok())
+                .expect("a window id");
+            let closed = call(
+                &mut runtime,
+                &mut administrator,
+                "ncui.window.close",
+                json!({ "window": throwaway.to_string() }),
+            );
+            assert!(
+                closed.error.is_none(),
+                "`ncui.window.close` failed on its own window: {:?}",
+                closed.error
+            );
             continue;
         }
         let params = params_for(name, created_window);

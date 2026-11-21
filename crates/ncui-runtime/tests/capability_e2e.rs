@@ -45,9 +45,9 @@ fn call(runtime: &mut Runtime, session: &mut AgentSession, method: &str, params:
 }
 
 #[test]
-fn app_emit_delivers_event_to_a_window() {
-    // ncui.app.emit should succeed when a host is installed and the
-    // target window exists. Without a host, it reports emitted:false.
+fn app_emit_refuses_an_unknown_window() {
+    // An emit to a window that is not open is an error naming the window, not
+    // an `emitted` success the page never received.
     let mut rt = runtime();
     let mut admin = session(AgentRole::Administrator);
     let response = call(&mut rt, &mut admin, "ncui.app.emit", json!({
@@ -55,9 +55,32 @@ fn app_emit_delivers_event_to_a_window() {
         "event": "zcode:deep-link",
         "payload": { "url": "zcode://open/file.txt" }
     }));
-    // Without a host, the emit is a no-op but should not error.
     let result = response.expect("response");
-    assert!(result.error.is_none(), "app.emit should not error without a host: {:?}", result.error);
+    assert!(
+        result.error.is_some(),
+        "emit to an unknown window must be refused, got: {:?}",
+        result.result
+    );
+}
+
+#[test]
+fn app_emit_broadcasts_when_no_window_is_named() {
+    // Omitting `window` (or passing "all") emits to every open window; with
+    // none open, the event reaches nobody and the answer says so.
+    let mut rt = runtime();
+    let mut admin = session(AgentRole::Administrator);
+    let response = call(&mut rt, &mut admin, "ncui.app.emit", json!({
+        "event": "zcode:updater",
+        "payload": { "version": "1.2.3" }
+    }));
+    let result = response.expect("response");
+    assert!(
+        result.error.is_none(),
+        "a broadcast with no windows must succeed: {:?}",
+        result.error
+    );
+    let payload = result.result.expect("payload");
+    assert_eq!(payload["emitted"], 0);
 }
 
 #[test]
@@ -129,9 +152,10 @@ fn cdp_send_requires_cdp_capability() {
 }
 
 #[test]
-fn cdp_send_validates_required_params() {
+fn cdp_send_refuses_an_unknown_window() {
     // ncui.cdp.send is destructive (Capability::Cdp), so it needs a consent token.
-    // Mint one, then call cdp.send with it.
+    // A command aimed at a window that is not open is a named refusal, not a
+    // `sent: true` that nothing received.
     let mut rt = runtime();
     let mut admin = session(AgentRole::Administrator);
 
@@ -150,10 +174,38 @@ fn cdp_send_validates_required_params() {
     }));
     let result = response.expect("response");
     assert!(
-        result.error.is_none(),
-        "cdp.send should not error: {:?}",
-        result.error
+        result.error.is_some(),
+        "cdp.send to an unknown window must be refused, got: {:?}",
+        result.result
     );
+}
+
+#[test]
+fn cdp_send_requires_window_and_method() {
+    // The window and the CDP method are both required: a silent default window
+    // or a default `Page.navigate` would send a command the caller never asked
+    // for, to a window the caller never named.
+    let mut rt = runtime();
+    let mut admin = session(AgentRole::Administrator);
+
+    let mint = call(&mut rt, &mut admin, "ncui.consent.mint", json!({
+        "method": "ncui.cdp.send",
+        "capability": "cdp"
+    }));
+    let token = mint.expect("response").result.expect("payload")["consent_token"].clone();
+
+    for params in [
+        json!({ "method": "Page.navigate", "consent_token": token.clone() }),
+        json!({ "window": "00000000000000000000000000000001", "consent_token": token }),
+    ] {
+        let response = call(&mut rt, &mut admin, "ncui.cdp.send", params);
+        let result = response.expect("response");
+        assert!(
+            result.error.is_some(),
+            "cdp.send without window and method must be refused: {:?}",
+            result.result
+        );
+    }
 }
 
 #[test]
@@ -208,16 +260,19 @@ fn devtools_summary_reports_subsystem_state() {
 }
 
 #[test]
-fn window_drag_region_validates_window_param() {
-    // ncui.window.drag.region should be callable by an administrator.
-    // Without a host, it reports success but doesn't actually drag.
+fn window_drag_region_refuses_when_there_is_nothing_to_drag() {
+    // ncui.window.drag.region targets the calling window. With no window open
+    // there is nothing to drag, and the refusal is reported rather than
+    // answered with a drag that never happened.
     let mut rt = runtime();
     let mut admin = session(AgentRole::Administrator);
     let response = call(&mut rt, &mut admin, "ncui.window.drag.region", json!({}));
     let result = response.expect("response");
-    assert!(result.error.is_none(), "drag.region should not error: {:?}", result.error);
-    let payload = result.result.expect("payload");
-    assert_eq!(payload["dragging"], true);
+    assert!(
+        result.error.is_some(),
+        "drag.region with no window must be refused, got: {:?}",
+        result.result
+    );
 }
 
 #[test]

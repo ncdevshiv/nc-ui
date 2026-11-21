@@ -322,6 +322,7 @@ fn platform_register(scheme: &str, line: &str) -> Result<(), ProtocolError> {
             None,
             PROTOCOL_TIMEOUT,
             1024,
+            None,
         )
         .map_err(|error| tool_error(REG, &error))?;
         if outcome.status != 0 {
@@ -349,6 +350,7 @@ fn platform_register(scheme: &str, line: &str) -> Result<(), ProtocolError> {
         None,
         PROTOCOL_TIMEOUT,
         1024,
+        None,
     )
     .map_err(|error| tool_error(REG, &error))?;
     if outcome.status != 0 {
@@ -371,6 +373,7 @@ fn platform_unregister(scheme: &str) -> Result<(), ProtocolError> {
         None,
         PROTOCOL_TIMEOUT,
         1024,
+        None,
     )
     .map_err(|error| tool_error(REG, &error))?;
     // A key that was not there is the state the caller asked for.
@@ -394,6 +397,7 @@ fn platform_registered(scheme: &str) -> Result<Option<String>, ProtocolError> {
         None,
         PROTOCOL_TIMEOUT,
         4096,
+        None,
     )
     .map_err(|error| tool_error(REG, &error))?;
     if outcome.status != 0 {
@@ -436,6 +440,7 @@ fn platform_register(scheme: &str, line: &str) -> Result<(), ProtocolError> {
         None,
         PROTOCOL_TIMEOUT,
         1024,
+        None,
     )
     .map_err(|error| tool_error("xdg-mime", &error))?;
     if outcome.status != 0 {

@@ -23,9 +23,115 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use ncui_app::AppManifest;
 use sha2::{Digest, Sha256};
+
+/// Which runtime binary a build ships, chosen by `ncui build --profile`.
+///
+/// The GPU-island renderer is the single heaviest subsystem in the runtime — measured at
+/// 6.4 MiB of the 11.3 MiB release build (`comparison/README.md`) — and an application that
+/// draws no islands pays for it in every byte it ships. Both profiles ship the *same* window
+/// host; `Minimal` links out only the graphics stack, which is why the difference is a cargo
+/// feature and not a code path. This is A3's constraint honoured rather than worked around:
+/// the capability is **optional at link time**, never removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Profile {
+    /// The window host **and** the GPU-island renderer. The full runtime, for applications
+    /// that draw islands.
+    #[default]
+    Standard,
+    /// The window host **without** the GPU-island renderer. For applications that open a
+    /// window and serve a page but draw no GPU islands: it links out `wgpu` and the text
+    /// shaper, landing far under the full build's size. A page that asked for an island on
+    /// this profile gets a clear "no island in this build" rather than a silent failure,
+    /// because the island route is `#[cfg(feature = "gpu-islands")]`-gated.
+    Minimal,
+}
+
+impl Profile {
+    /// Parses a `--profile` value.
+    ///
+    /// # Errors
+    ///
+    /// Returns the accepted names when the value is not one of them, so a typo reports what
+    /// would have worked rather than a bare "unknown".
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "standard" => Ok(Self::Standard),
+            "minimal" => Ok(Self::Minimal),
+            other => Err(format!(
+                "unknown profile {other:?}: expected \"standard\" or \"minimal\""
+            )),
+        }
+    }
+
+    /// The `cargo` feature this profile compiles `ncui-cli` with.
+    ///
+    /// `Standard` is `wry-host-gpu` — the window host plus the GPU-island renderer, the full
+    /// build. `Minimal` is `wry-host` — the window host alone, which omits the renderer
+    /// because `wry-host` no longer implies `gpu-islands`.
+    #[must_use]
+    pub const fn cargo_feature(self) -> &'static str {
+        match self {
+            Self::Standard => "wry-host-gpu",
+            Self::Minimal => "wry-host",
+        }
+    }
+
+    /// Whether this profile compiles the GPU-island renderer in.
+    #[must_use]
+    pub const fn includes_gpu_islands(self) -> bool {
+        matches!(self, Self::Standard)
+    }
+
+    /// Builds the runtime binary for this profile with `cargo build --release`, returning the
+    /// path to the compiled binary.
+    ///
+    /// A `--profile minimal` that shipped whatever binary happened to be in `target/release`
+    /// would be a lie: the size is the whole point, and a stale full build in that directory
+    /// would bundle the renderer the profile promised to omit. So the profile compiles its own
+    /// feature set rather than reusing an artifact it does not control.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when `cargo` is unavailable or the build fails, so a caller sees why
+    /// rather than a bare non-zero exit.
+    pub fn build_runtime(self, root: &Path) -> Result<PathBuf, String> {
+        // The workspace default carries no window host (so the crate builds headless), so
+        // both profiles name their feature explicitly rather than relying on defaults.
+        let status = Command::new("cargo")
+            .current_dir(root)
+            .args([
+                "build",
+                "--release",
+                "-p",
+                "ncui-cli",
+                "--no-default-features",
+            ])
+            .arg("--features")
+            .arg(self.cargo_feature())
+            .status()
+            .map_err(|error| format!("could not run cargo: {error}"))?;
+        if !status.success() {
+            return Err(format!(
+                "cargo build --release failed for the {self} profile"
+            ));
+        }
+        Ok(default_binary(root))
+    }
+}
+
+impl fmt::Display for Profile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::Standard => "standard",
+            Self::Minimal => "minimal",
+        };
+        f.write_str(name)
+    }
+}
 
 /// The manifest an application directory carries.
 const MANIFEST_NAME: &str = "ncui.app.json";
@@ -666,4 +772,47 @@ fn linux_protocol_entry(scheme: &str, binary_name: &str) -> Result<String, Bundl
          xdg-mime default \"ncui-$scheme.desktop\" \"x-scheme-handler/$scheme\"\n\
          echo \"registered $scheme to run $here/{binary_name}\"\n"
     ))
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::Profile;
+
+    #[test]
+    fn profile_parses_the_two_names_it_advertises() {
+        assert_eq!(Profile::parse("standard"), Ok(Profile::Standard));
+        assert_eq!(Profile::parse("minimal"), Ok(Profile::Minimal));
+    }
+
+    #[test]
+    fn an_unknown_profile_names_the_accepted_values() {
+        let error = Profile::parse("tiny").unwrap_err();
+        assert!(
+            error.contains("standard") && error.contains("minimal"),
+            "the error should name both accepted profiles, got: {error}"
+        );
+    }
+
+    #[test]
+    fn the_default_profile_is_the_standard_full_build() {
+        // A plain `ncui build` must keep shipping the renderer, so the default cannot be the
+        // size-optimised profile: that would silently change what every existing build carries.
+        assert_eq!(Profile::default(), Profile::Standard);
+        assert!(Profile::default().includes_gpu_islands());
+    }
+
+    #[test]
+    fn the_profiles_differ_exactly_in_the_gpu_island_renderer() {
+        // The whole point of the profile is the renderer: standard carries it, minimal does
+        // not, and both ship the same window host. If these ever agree the flag is a no-op.
+        assert!(Profile::Standard.includes_gpu_islands());
+        assert!(!Profile::Minimal.includes_gpu_islands());
+        assert_ne!(
+            Profile::Standard.cargo_feature(),
+            Profile::Minimal.cargo_feature(),
+            "the two profiles must compile different feature sets, or minimal ships the renderer"
+        );
+        assert_eq!(Profile::Standard.cargo_feature(), "wry-host-gpu");
+        assert_eq!(Profile::Minimal.cargo_feature(), "wry-host");
+    }
 }

@@ -57,7 +57,7 @@ pub(super) const DRAG_REGION_SCRIPT: &str = r#"(() => {
     if (!region) return;
     e.preventDefault();
     if (window.ncui && window.ncui.invoke) {
-      window.ncui.invoke("window.drag_region", {}).catch(() => {});
+      window.ncui.invoke("drag_region", {}).catch(() => {});
     }
   }, true);
 })();"#;

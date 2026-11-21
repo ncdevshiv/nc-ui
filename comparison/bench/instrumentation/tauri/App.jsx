@@ -1,4 +1,5 @@
-import { invoke } from '@tauri-apps/api/tauri'
+// Tauri 2 moved `invoke` from the `tauri` module to `core`.
+import { invoke } from '@tauri-apps/api/core'
 import {createSignal, onMount} from "solid-js"
 
 function App() {

@@ -746,7 +746,7 @@ fn invoke(
             .map_err(|e| json_error(&e))
         }
         "ncui.window.post" => invoke_window_post(runtime, &request.params),
-        "ncui.window.drag.region" => invoke_window_drag_region(runtime),
+        "ncui.window.drag.region" => invoke_window_drag_region(runtime, &request.params),
         "ncui.components.list" => {
             let components = runtime.windows.manifests().map_err(window_rejection)?;
             serde_json::to_value(json!({ "components": components })).map_err(|e| json_error(&e))
@@ -1099,13 +1099,32 @@ mod tests {
                     let token = runtime
                         .mint_consent(correlation, &method.name, method.requires)
                         .expect("mint");
-                    json!({ "consent_token": token.to_value() })
+                    let mut params = json!({ "consent_token": token.to_value() });
+                    if method.name == "ncui.cdp.send" {
+                        // The CDP seam requires the window and the command it
+                        // forwards; the consent alone does not name them.
+                        if let Some(object) = params.as_object_mut() {
+                            object.insert(
+                                "window".to_owned(),
+                                json!(created_window.map_or_else(
+                                    || "00000000000000000000000000000001".to_owned(),
+                                    |id| id.to_string()
+                                )),
+                            );
+                            object.insert("method".to_owned(), json!("Page.navigate"));
+                            object.insert(
+                                "params".to_owned(),
+                                json!({ "url": "https://example.com" }),
+                            );
+                        }
+                    }
+                    params
                 } else {
                     match method.name.as_str() {
                         "ncui.window.create" | "ncui.window.create.child" => json!({ "url": "https://example.com" }),
                         // Closing a window and asking about its theme take the same parameter and
                         // nothing else, so they are one arm.
-                        "ncui.window.close" | "ncui.window.theme" => match created_window {
+                        "ncui.window.close" | "ncui.window.theme" | "ncui.window.drag.region" => match created_window {
                             Some(id) => json!({ "window": id.to_string() }),
                             None => json!({ "window": "00000000000000000000000000000001" }),
                         },
@@ -1150,12 +1169,15 @@ mod tests {
                 if authorized {
                     let ok = response.error.is_none();
                     // A window method whose handler needs a webview host is answered
-                    // `not_found` when the role's runtime has none; that is a missing host,
-                    // not a grant refusal.
+                    // `not_found` when the role's runtime has none, and a method naming a
+                    // window the sweep's own `ncui.window.close` entry has already closed is
+                    // answered `not_found` for the same reason: the target is genuinely not
+                    // there. That is a missing target, not a grant refusal.
                     let unavailable_without_a_host =
                         matches!(
                             method.name.as_str(),
-                            "ncui.window.close" | "ncui.window.list"
+                            "ncui.window.close" | "ncui.window.list" | "ncui.cdp.send"
+                                | "ncui.app.emit"
                         ) && response.error.as_ref().map(|e| e.data.ncui_code.as_str())
                             == Some("not_found");
                     assert!(
@@ -1375,6 +1397,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one sweep drives every advertised method with the parameters it needs; splitting it would hide the ordering the sweep depends on"
+    )]
     fn every_advertised_method_has_a_handler() {
         let mut runtime = runtime();
         // Install a host so the window methods reach their handlers instead of being refused
@@ -1400,25 +1426,88 @@ mod tests {
                 // covered by `the_nested_build_methods_are_guarded` instead.
                 continue;
             }
+            // `ncui.window.close` is exercised on a window of its own, so the window the
+            // later window methods name is still open: closing the shared window here would
+            // make every later window method report a window that is genuinely gone, which
+            // is the method's honest answer and not a defect in it.
+            if method.name == "ncui.window.close" {
+                let request = Request::new(
+                    json!(1),
+                    "ncui.window.create",
+                    json!({ "url": "https://example.com" }),
+                );
+                let response = dispatch(
+                    &mut runtime,
+                    &mut session,
+                    &request,
+                    Duration::from_secs(0),
+                    Some(&registry),
+                )
+                .expect("response");
+                let throwaway = response
+                    .result
+                    .as_ref()
+                    .and_then(|value| value.get("id").and_then(|value| value.as_str()))
+                    .and_then(|text| text.parse::<WindowId>().ok())
+                    .expect("a window id");
+                let request = Request::new(
+                    json!(1),
+                    "ncui.window.close",
+                    json!({ "window": throwaway.to_string() }),
+                );
+                let response = dispatch(
+                    &mut runtime,
+                    &mut session,
+                    &request,
+                    Duration::from_secs(0),
+                    Some(&registry),
+                )
+                .expect("response");
+                assert!(
+                    response.error.is_none(),
+                    "advertised method `ncui.window.close` failed: {:?}",
+                    response.error
+                );
+                continue;
+            }
             let params = if method.destructive {
                 let correlation = CorrelationId::new();
                 let token = runtime
                     .mint_consent(correlation, &method.name, method.requires)
                     .expect("mint");
-                json!({ "consent_token": token.to_value() })
+                let mut params = json!({ "consent_token": token.to_value() });
+                if method.name == "ncui.cdp.send" {
+                    // The CDP seam requires the window and the command it forwards;
+                    // the consent alone does not name them.
+                    if let Some(object) = params.as_object_mut() {
+                        object.insert(
+                            "window".to_owned(),
+                            json!(created_window.map_or_else(
+                                || "00000000000000000000000000000001".to_owned(),
+                                |id| id.to_string()
+                            )),
+                        );
+                        object.insert("method".to_owned(), json!("Page.navigate"));
+                        object.insert(
+                            "params".to_owned(),
+                            json!({ "url": "https://example.com" }),
+                        );
+                    }
+                }
+                params
             } else {
                 match method.name.as_str() {
                     "ncui.window.create" | "ncui.window.create.child" => json!({ "url": "https://example.com" }),
-                    "ncui.window.close" => json!({
-                        "window": created_window
-                            .expect("create is listed before close")
-                            .to_string()
-                    }),
                     "ncui.window.post" => json!({
                         "window": created_window
                             .expect("create is listed before post")
                             .to_string(),
                         "script": "window.ncui.receive({});",
+                    }),
+                    "ncui.window.drag.region" => json!({
+                        "window": created_window
+                            .expect("create is listed before drag")
+                            .to_string(),
                     }),
                     "ncui.app.emit" => json!({
                         "window": created_window
@@ -1633,6 +1722,9 @@ mod tests {
             Some(ncui_webview::WindowState::default())
         }
         fn set_window_shape(&self, _shape: &ncui_webview::WindowShape) -> bool {
+            true
+        }
+        fn drag_window(&self) -> bool {
             true
         }
     }

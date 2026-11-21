@@ -15,6 +15,14 @@ workspace = true
 # Enables global shortcuts: the manifest declares them and the application holds them while
 # it runs. Off by default for the same reason the crate underneath gates them.
 global-shortcuts = ["ncui-native/global-hotkeys"]
+# Enables native file, save and folder dialogs. Off by default for the same reason the crate
+# underneath gates them: a modal dialog blocks on a person, so gating it keeps the default
+# build and the headless gate exactly as they are. When this feature is off but a page holds
+# `Capability::Dialog`, the dialog command still registers and honestly reports
+# `dialog_unavailable` rather than claiming success — the same shape the notification command
+# reports on a host with no notifier. The permission, option and path rules are plain Rust and
+# run either way.
+dialogs = ["ncui-native/dialogs"]
 
 default = []
 # The real window host. Off by default so the runtime compiles and its whole test suite
@@ -29,7 +37,6 @@ wry-host = [
     "dep:ncui-webview-wry",
     "ncui-webview-wry/wry-engine",
     "global-shortcuts",
-    "gpu-islands",
 ]
 # Enables the application tray icon. Implies the window host, because a tray icon belongs
 # to the engine's event loop and there is no tray without one.

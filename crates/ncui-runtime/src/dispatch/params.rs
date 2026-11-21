@@ -143,20 +143,35 @@ pub(crate) fn invoke_window_post(runtime: &mut Runtime, params: &Value) -> Resul
 /// `ncui.window.drag.region` -- initiate a window drag from a drag region.
 ///
 /// Called by the page when the user mousedowns on a `[data-ncui-drag-region]`
-/// element. The handler sends a `HostEvent::DragWindow` to the process-wide
-/// engine event loop, which calls `tao::window::Window::drag_window()`.
+/// element. The handler asks the calling window's engine to start a platform
+/// drag (`tao::window::Window::drag_window()`), which hands the move to the OS
+/// until the mouse is released.
 ///
 /// This is the NC-UI equivalent of Tauri 2's `app-region: drag` / Electron's
 /// `-webkit-app-region: drag`. Without it, an undecorated window cannot be
 /// moved by the user.
-pub(crate) fn invoke_window_drag_region(runtime: &mut Runtime) -> Result<Value> {
-    // The drag region request comes from the page, so it targets the calling
-    // window. We use a sentinel window ID of 0 to mean "the calling window"
-    // — the engine handler resolves this to the actual window that sent the
-    // message. If no host is installed, this is a no-op.
-    let _ = runtime;
-    serde_json::to_value(json!({ "dragging": true }))
-        .map_err(|e| json_error(&e))
+///
+/// The request targets the calling window, so the engine asked is the one whose
+/// page asked. A window with no engine, or an engine that refuses, is reported
+/// as the refusal it is: a `dragging: true` answered from a headless registry
+/// would tell the page a drag began that the user never felt.
+pub(crate) fn invoke_window_drag_region(runtime: &mut Runtime, params: &Value) -> Result<Value> {
+    let id = window_id_param(params)?;
+    let dragged = runtime.windows.drag_window(id).map_err(|_| {
+        NcError::new(ErrorKind::NotFound {
+            kind: "window".to_owned(),
+            id: id.to_string(),
+        })
+        .operation("dispatch::window_drag_region")
+    })?;
+    if dragged {
+        serde_json::to_value(json!({ "dragging": true })).map_err(|e| json_error(&e))
+    } else {
+        Err(NcError::new(ErrorKind::Conflict {
+            reason: format!("the engine could not start a drag for window {id}"),
+        })
+        .operation("dispatch::window_drag_region"))
+    }
 }
 
 /// The budget a caller gave a call, when it gave one.
@@ -812,31 +827,26 @@ pub(crate) fn invoke_consent_mint(
 
 /// `ncui.app.emit` -- emit an application-defined event to a window's page.
 ///
-/// This is the host-to-page event delivery path that Tauri 2 provides via `app.emit`.
-/// It constructs a `window.ncui.__dispatch(...)` script (the same mechanism used by
-/// the built-in `resized` and `moved` events) and evaluates it in the target window's
-/// page. The page's bridge dispatches the event to any listeners registered via
-/// `window.ncui.on(event, handler)`.
+/// The JSON-RPC wrapper over [`Runtime::emit`] / [`Runtime::emit_all`], the
+/// host-to-page event delivery path that Tauri 2 provides via `app.emit`. The
+/// page's bridge dispatches the event to listeners registered via
+/// `window.ncui.on(event, handler)`, exactly as the built-in `resized`/`moved`/
+/// `theme` events arrive.
 ///
 /// # Parameters
 ///
-/// - `window` (string, required): the window ID to emit to.
-/// - `event` (string, required): the event name. Must be a non-empty, bounded string.
+/// - `event` (string, required): the event name. Non-empty, at most 256 bytes.
 /// - `payload` (any, optional): the event payload. Defaults to `null`.
+/// - `window` (string, optional): the window ID to emit to. Omitted, or `"all"`,
+///   broadcasts to every open window.
 ///
-/// # Why this matters
-///
-/// Without this method, the host cannot deliver application-defined events to the page.
-/// That blocks deep links, notification click-through, updater events, browser-view
-/// events, and any custom host→page messaging. The built-in `resized`/`moved`/`theme`
-/// events are hardcoded in the engine; `app.emit` generalises that pattern so
-/// applications can define their own event vocabulary.
+/// A window that is not open, or whose engine refuses the script, is an error
+/// rather than a silent `emitted: false`: the caller is told the delivery did
+/// not happen.
 pub(crate) fn invoke_app_emit(runtime: &mut Runtime, params: &Value) -> Result<Value> {
-    let id = window_id_param(params)?;
     let event = params
         .get("event")
         .and_then(Value::as_str)
-        .filter(|s| !s.is_empty() && s.len() <= 256)
         .ok_or_else(|| {
             NcError::new(ErrorKind::Validation {
                 field: "event".to_owned(),
@@ -845,33 +855,23 @@ pub(crate) fn invoke_app_emit(runtime: &mut Runtime, params: &Value) -> Result<V
             .operation("dispatch::app_emit")
         })?;
     let payload = params.get("payload").cloned().unwrap_or(Value::Null);
-
-    // Build the dispatch script. The event name and payload are serialised as JSON
-    // so the page's __dispatch function receives a well-formed message object.
-    let message = json!({
-        "event": event,
-        "payload": payload,
-    });
-    let message_str = serde_json::to_string(&message)
-        .map_err(|e| json_error(&e))?;
-    let script = format!(
-        "window.ncui && window.ncui.__dispatch({message_str});"
-    );
-
-    // post_to_page returns Err(WindowRejection) when no host is installed
-    // (e.g. in tests or headless builds). In that case the event is silently
-    // dropped — there is no page to deliver it to. This mirrors the behaviour
-    // of devtools.tree which returns an empty tree when no host is installed.
-    let posted = runtime
-        .windows
-        .post_to_page(id, &script)
-        .unwrap_or(false);
-
-    serde_json::to_value(json!({
-        "emitted": posted,
-        "event": event,
-    }))
-    .map_err(|e| json_error(&e))
+    match params.get("window").and_then(Value::as_str) {
+        None | Some("all") => {
+            let delivered = runtime.emit_all(event, &payload)?;
+            serde_json::to_value(json!({ "emitted": delivered, "event": event }))
+                .map_err(|e| json_error(&e))
+        }
+        _ => {
+            let id = window_id_param(params)?;
+            runtime.emit(id, event, &payload)?;
+            serde_json::to_value(json!({
+                "emitted": 1,
+                "event": event,
+                "window": id.to_string(),
+            }))
+            .map_err(|e| json_error(&e))
+        }
+    }
 }
 
 /// Reads the `consent_token` parameter, when present.

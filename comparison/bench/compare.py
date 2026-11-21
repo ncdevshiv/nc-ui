@@ -50,6 +50,12 @@ INSTRUMENTATION_MAP = {
         "main.rs": "src-tauri/src/main.rs",
         "App.jsx": "src/App.jsx",
         "tauri.conf.json": "src-tauri/tauri.conf.json",
+        # The Tauri 2 port is a port, not a version bump: the manifest API, the menu API and the
+        # permissions model all changed. These three carry the upgrade alongside the three above
+        # so the whole port is reviewable in this directory and reproduces from a fresh clone.
+        "package.json": "package.json",
+        "Cargo.toml": "src-tauri/Cargo.toml",
+        "capabilities/default.json": "src-tauri/capabilities/default.json",
     },
 }
 
@@ -384,14 +390,23 @@ def build_electron(dest: Path) -> Path:
 
 
 def build_tauri(dest: Path) -> Path:
-    if not (dest / "node_modules").exists():
+    # Install whenever the installed api is missing or predates the manifest. The Tauri 2 port
+    # raises @tauri-apps/api from 1.2 to 2 through the instrumentation overlay, so a node_modules
+    # left by a 1.2 install satisfies the "exists" check while lacking the v2 `core` module the
+    # ported page imports; an up-to-date `npm install` is a fast no-op, a stale one is a build
+    # about a dependency that was never resolved.
+    api = dest / "node_modules" / "@tauri-apps" / "api" / "package.json"
+    manifest = dest / "package.json"
+    if not api.exists() or api.stat().st_mtime < manifest.stat().st_mtime:
         run(["npm", "install"], cwd=dest, timeout=900)
     if not (dest / "node_modules" / "esbuild-windows-64" / "esbuild.exe").exists():
         # npm's install-scripts policy can skip esbuild's postinstall, which is the step
         # that downloads the binary `vite build` links against.
         run(["node", "node_modules/esbuild/install.js"], cwd=dest, timeout=300)
     run(["npm", "run", "build"], cwd=dest, timeout=900)
-    run(["npm", "run", "tauri", "--", "build", "-b", "none"], cwd=dest, timeout=1200)
+    # Tauri 2 renamed the no-bundle flag: 1.2's `-b none` (which set `--bundles` to an empty
+    # set) became `--no-bundle`, and `--bundles` now only accepts real bundle types (msi, nsis).
+    run(["npm", "run", "tauri", "--", "build", "--no-bundle"], cwd=dest, timeout=1200)
     binary = dest / "src-tauri" / "target" / "release" / "app.exe"
     if not binary.exists():
         candidates = list((dest / "src-tauri" / "target" / "release").glob("*.exe"))
@@ -417,7 +432,12 @@ def build_ncui() -> Path:
             "-p",
             "ncui-cli",
             "--features",
-            "ncui-cli/wry-host",
+            # The renderer-carrying default profile, which is the build the distributed-size
+            # row reports. `ncui-cli/wry-host` alone is the `minimal` profile: it omits the
+            # GPU-islands renderer and measures ~4.9 MiB rather than ~11.3 MiB. These ported
+            # applications are compared against Electron's and Tauri's full runtimes, so the
+            # figure must be the default an application ships, not the stripped one.
+            "ncui-cli/wry-host-gpu",
         ],
         cwd=REPO,
         timeout=1200,

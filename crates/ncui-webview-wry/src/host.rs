@@ -32,6 +32,8 @@ use std::sync::{
 };
 #[cfg(feature = "wry-engine")]
 use std::sync::{OnceLock, atomic::AtomicU64};
+#[cfg(all(feature = "wry-engine", target_os = "macos"))]
+use std::sync::atomic::AtomicI32;
 use std::time::Duration;
 
 use ncui_webview::{HostSeam, PageMessage, WebViewBackend};
@@ -178,6 +180,9 @@ enum HostEvent {
         /// The window to drag.
         window: u64,
     },
+    /// Stop the engine's event loop, ending the process with the code the
+    /// application finished with.
+    Quit,
     /// Show the application's tray icon, or remove it, reporting whether the platform agreed.
     #[cfg(feature = "tray-icon")]
     Tray {
@@ -264,6 +269,14 @@ static NEXT_WINDOW: AtomicU64 = AtomicU64::new(1);
 /// lock would suggest it could be replaced.
 #[cfg(feature = "wry-engine")]
 static ENGINE: OnceLock<Option<EventLoopProxy<HostEvent>>> = OnceLock::new();
+
+/// The exit code the application finished with, which the engine's loop exits with.
+///
+/// On macOS the engine's loop owns the main thread (ADR-018), so the process ends
+/// inside that loop: the application's worker writes its exit code here and asks
+/// the loop to quit.
+#[cfg(all(feature = "wry-engine", target_os = "macos"))]
+static QUIT_CODE: AtomicI32 = AtomicI32::new(0);
 
 /// What a page hears when the tray icon is clicked.
 ///
@@ -386,8 +399,19 @@ struct EngineWindow {
     alive: Arc<AtomicBool>,
 }
 
+/// The engine's proxy, installed before the application's work begins.
+///
+/// On macOS this does not start anything: AppKit requires the event loop on the
+/// main thread and `tao` offers no any-thread switch there (ADR-018), so the loop
+/// is started by [`run_on_main_thread`] before the application's work begins and
+/// this only reads the proxy that was installed then.
+#[cfg(all(feature = "wry-engine", target_os = "macos"))]
+fn engine() -> Option<&'static EventLoopProxy<HostEvent>> {
+    ENGINE.get().and_then(Option::as_ref)
+}
+
 /// The engine's proxy, starting the loop on first use.
-#[cfg(feature = "wry-engine")]
+#[cfg(all(feature = "wry-engine", not(target_os = "macos")))]
 fn engine() -> Option<&'static EventLoopProxy<HostEvent>> {
     ENGINE
         .get_or_init(|| {
@@ -403,12 +427,8 @@ fn engine() -> Option<&'static EventLoopProxy<HostEvent>> {
                     }
                     // tao's Unix backend asserts the main thread unless the builder is told
                     // otherwise. The switch exists on X11/Wayland only. macOS (AppKit)
-                    // requires the main thread and tao exposes no any-thread option.
-                    // On macOS, the event loop must be created on the main thread (ADR-018).
-                    // otherwise, and the engine loop lives on its own thread by design. The
-                    // switch exists on the X11/Wayland targets only — AppKit requires the main
-                    // thread and tao exposes no such option for macOS, which is why that target
-                    // is absent here rather than configured.
+                    // requires the main thread and tao exposes no any-thread option, which is
+                    // why that target starts its loop in `run_on_main_thread` instead.
                     #[cfg(any(
                         target_os = "linux",
                         target_os = "dragonfly",
@@ -435,6 +455,43 @@ fn engine() -> Option<&'static EventLoopProxy<HostEvent>> {
         .as_ref()
 }
 
+/// Runs the engine's event loop on the main thread, and the application on a worker.
+///
+/// macOS (AppKit) requires the event loop to be created and run on the main
+/// thread, and `tao` offers no any-thread switch there — the host's usual
+/// worker-thread loop panics at startup (ADR-018). So on macOS the two roles the
+/// other platforms use are exchanged: the engine loop owns the main thread, and
+/// the application's work — the runtime pump that opens windows and serves
+/// pages — runs on a worker that reaches the loop through the same proxy every
+/// other thread uses.
+///
+/// When `app` returns, the loop is asked to quit and the process ends with the
+/// code `app` returned. This must be the first thing `main` does on macOS: a
+/// window created before the loop exists has no engine to be created in.
+#[cfg(all(feature = "wry-engine", target_os = "macos"))]
+pub fn run_on_main_thread(app: impl FnOnce() -> i32 + Send + 'static) -> ! {
+    let event_loop = EventLoopBuilder::<HostEvent>::with_user_event().build();
+    let proxy = event_loop.create_proxy();
+    let _ = ENGINE.set(Some(proxy.clone()));
+    let worker = thread::Builder::new()
+        .name("ncui-application".to_owned())
+        .spawn(move || {
+            let code = app();
+            QUIT_CODE.store(code, Ordering::SeqCst);
+        });
+    if let Ok(worker) = worker {
+        // Detached: it ends the loop when the application finishes, and the main
+        // thread is inside the loop by then and cannot wait here.
+        let _ = thread::Builder::new()
+            .name("ncui-application-quit".to_owned())
+            .spawn(move || {
+                let _ = worker.join();
+                let _ = proxy.send_event(HostEvent::Quit);
+            });
+    }
+    run_engine(event_loop, proxy)
+}
+
 /// Runs the loop, creating, evaluating in, and closing windows.
 ///
 /// The proxy is handed in rather than made here because the tray needs to send events to the loop it
@@ -456,7 +513,10 @@ fn engine() -> Option<&'static EventLoopProxy<HostEvent>> {
     clippy::too_many_lines,
     reason = "the event loop match arms are each a distinct window event; splitting them would obscure the event flow"
 )]
-fn run_engine(event_loop: tao::event_loop::EventLoop<HostEvent>, proxy: EventLoopProxy<HostEvent>) {
+fn run_engine(
+    event_loop: tao::event_loop::EventLoop<HostEvent>,
+    proxy: EventLoopProxy<HostEvent>,
+) -> ! {
     let mut windows: HashMap<u64, EngineWindow> = HashMap::new();
     // The tray belongs to the application rather than to a window, so it lives beside the windows
     // rather than inside one: an application whose window is closed is still an application a user
@@ -483,6 +543,9 @@ fn run_engine(event_loop: tao::event_loop::EventLoop<HostEvent>, proxy: EventLoo
                 if let Some(entry) = windows.get(&window) {
                     let _ = entry.window.drag_window();
                 }
+            }
+            Event::UserEvent(HostEvent::Quit) => {
+                *control_flow = ControlFlow::ExitWithCode(QUIT_CODE.load(Ordering::SeqCst));
             }
             #[cfg(feature = "tray-icon")]
             Event::UserEvent(HostEvent::Tray { request, reply }) => {

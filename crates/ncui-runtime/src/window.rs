@@ -734,6 +734,38 @@ impl Windows {
             Ok(entry.post_to_page(script))
         })
     }
+
+    /// Asks one window's engine to start a platform drag.
+    ///
+    /// `Ok(false)` means the window is open but its engine cannot drag — a
+    /// headless engine, or one whose platform refuses. The caller reports that
+    /// rather than answering a drag that never began.
+    pub fn drag_window(&self, window: WindowId) -> Result<bool, WindowRejection> {
+        self.with_registry_mut(|registry| {
+            let entry = registry
+                .get_mut(window)
+                .ok_or_else(|| WindowRejection::EngineUnavailable {
+                    reason: Some(format!("window {window} is not open")),
+                })?;
+            Ok(entry
+                .host
+                .as_ref()
+                .is_some_and(|engine| engine.drag_window()))
+        })
+    }
+
+    /// Evaluates a script in every open window's page, counting the deliveries.
+    pub fn post_to_all_pages(&self, script: &str) -> Result<usize, WindowRejection> {
+        self.with_registry_mut(|registry| {
+            let mut delivered = 0;
+            for entry in registry.all_mut() {
+                if entry.post_to_page(script) {
+                    delivered += 1;
+                }
+            }
+            Ok(delivered)
+        })
+    }
 }
 
 impl Runtime {
@@ -1143,6 +1175,18 @@ pub fn hosted_surface(
         .with_factory(factory);
     windows.monitors = monitors;
     windows
+}
+
+/// Runs the window engine's event loop on the main thread, with the application's
+/// work on a worker thread.
+///
+/// macOS only: AppKit requires the event loop on the main thread and `tao` offers
+/// no any-thread switch there, so the engine loop and the runtime pump exchange
+/// the threads they use on the other platforms (ADR-018). The process ends with
+/// the code the application's work finishes with.
+#[cfg(all(target_os = "macos", feature = "wry-host"))]
+pub fn run_engine_on_main_thread(app: impl FnOnce() -> i32 + Send + 'static) -> ! {
+    ncui_webview_wry::host::run_on_main_thread(app)
 }
 
 /// The places remembered for named windows, read from a file an application wrote.

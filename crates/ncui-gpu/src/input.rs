@@ -1399,6 +1399,8 @@ mod tests {
         let descriptor = IslandDescriptor {
             order: 5,
             label: "Grid toolbar".to_owned(),
+            locale: "en".to_owned(),
+            direction: ncui_a11y::TextDirection::LeftToRight,
             nodes: vec![ncui_a11y::Node::leaf(
                 ncui_a11y::Role::Button,
                 "Bold",

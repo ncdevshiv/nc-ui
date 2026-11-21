@@ -140,6 +140,10 @@
       </p>
     </main>
 
+    <!-- The reload bridge. Run `ncui run --watch`, change a file, and the page reloads with the
+         counter's value kept: the runtime snapshots `window.__ncui_state` before it reloads and
+         this script puts it back afterwards. Without this tag a reload starts the page fresh. -->
+    <script src="/__ncui/reload.js"></script>
     <script type="module" src="./app.js"></script>
   </body>
 </html>

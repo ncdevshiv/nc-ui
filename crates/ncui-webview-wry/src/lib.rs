@@ -34,3 +34,8 @@ pub mod host;
 mod host_scripts;
 
 pub use host::{WindowHost, WryHostFactory};
+
+/// Runs the engine's event loop on the main thread, with the application on a worker.
+/// macOS only — see [`host::run_on_main_thread`] (ADR-018).
+#[cfg(all(feature = "wry-engine", target_os = "macos"))]
+pub use host::run_on_main_thread;

@@ -235,6 +235,7 @@ fn cancellation_markers_do_not_accumulate_across_cycles() {
         let limits = limits();
         let metrics = Arc::new(MetricsRegistry::new(limits).expect("metrics"));
         let pool = WorkerPool::new(limits, metrics).expect("pool");
+        pool.start().expect("start the pool's threads");
         pool.transition(WorkerState::Suspended).expect("suspend");
 
         for _ in 0..8 {

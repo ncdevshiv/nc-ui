@@ -989,7 +989,7 @@
       "evidence": {
         "unit_tests": {
           "verified": true,
-          "evidence": "crates/ncui-workers/src/pool.rs \u2014 16 tests, including the cancellation-marker leak and bounded-shutdown tests added by process.soak_and_leaks"
+          "evidence": "crates/ncui-workers/src/pool.rs \u2014 17 tests, including the cancellation-marker leak and bounded-shutdown tests added by process.soak_and_leaks"
         },
         "integration_tests": {
           "verified": true,
@@ -1456,11 +1456,11 @@
       "evidence": {
         "unit_tests": {
           "verified": true,
-          "evidence": "crates/ncui-gpu/src/input.rs \u2014 36 unit tests over the island model: where a pointer lands, which row a scroll moves to, and the focus contract an island's nodes obey; crates/ncui-a11y/src/lib.rs \u2014 8 unit tests over the semantic tree and what makes an island reachable, including an unnamed focusable nested deep inside an island and a named island of static text; crates/ncui-gpu-renderer/src/glyphs.rs \u2014 7 unit tests over the glyph rasteriser and crates/ncui-gpu-renderer/src/text.rs \u2014 9 over shaping and outlines"
+          "evidence": "crates/ncui-gpu/src/input.rs \u2014 36 unit tests over the island model: where a pointer lands, which row a scroll moves to, and the focus contract an island's nodes obey; crates/ncui-a11y/src/lib.rs \u2014 10 unit tests over the semantic tree and what makes an island reachable, including an unnamed focusable nested deep inside an island and a named island of static text; crates/ncui-gpu-renderer/src/glyphs.rs \u2014 7 unit tests over the glyph rasteriser and crates/ncui-gpu-renderer/src/text.rs \u2014 9 over shaping and outlines"
         },
         "integration_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/tests/islands.rs \u2014 11 tests fetching frames and descriptions from a live server on a real GPU: a page fetches an island and gets the pixels the GPU drew, a page asks for rows and the GPU draws them where the model says, scrolling the rows moves which ones are drawn, a row with text is drawn with its letters, and a page asks for the accessible description of the rows it draws; crates/ncui-gpu-renderer/tests/render_offscreen.rs \u2014 4 tests that create a real device, draw a frame and read the pixels back"
+          "evidence": "crates/ncui-runtime/tests/islands.rs \u2014 13 tests fetching frames and descriptions from a live server on a real GPU: a page fetches an island and gets the pixels the GPU drew, a page asks for rows and the GPU draws them where the model says, scrolling the rows moves which ones are drawn, a row with text is drawn with its letters, and a page asks for the accessible description of the rows it draws; crates/ncui-gpu-renderer/tests/render_offscreen.rs \u2014 4 tests that create a real device, draw a frame and read the pixels back"
         },
         "failure_tests": {
           "verified": true,
@@ -1511,7 +1511,7 @@
         },
         "integration_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/tests/page_bridge.rs \u2014 8 tests driving a page's message through the seam, the capability check, the dispatch pipeline and the audit trail"
+          "evidence": "crates/ncui-runtime/tests/page_bridge.rs \u2014 11 tests driving a page's message through the seam, the capability check, the dispatch pipeline and the audit trail"
         },
         "failure_tests": {
           "verified": true,
@@ -3119,11 +3119,11 @@
       "evidence": {
         "unit_tests": {
           "verified": true,
-          "evidence": "crates/ncui-gpu-renderer/tests/island_pixels.rs \u2014 3 tests: an_island_is_handed_over_as_the_pixels_the_gpu_drew (the colour is where the island was and everything else is transparent, so the page shows through), an_island_larger_than_the_bound_is_refused_rather_than_transferred, and a_frame_with_a_rectangle_that_is_not_one_is_refused; crates/ncui-app/tests/assets.rs \u2014 18 tests, three about the route mechanism: a_route_answers_a_path_the_runtime_serves_itself (the responder is handed the whole target, query included), a_route_wins_over_a_file_at_the_same_path, and a_path_a_route_does_not_claim_is_still_served_from_the_filesystem"
+          "evidence": "crates/ncui-gpu-renderer/tests/island_pixels.rs \u2014 3 tests: an_island_is_handed_over_as_the_pixels_the_gpu_drew (the colour is where the island was and everything else is transparent, so the page shows through), an_island_larger_than_the_bound_is_refused_rather_than_transferred, and a_frame_with_a_rectangle_that_is_not_one_is_refused; crates/ncui-app/tests/assets.rs \u2014 27 tests, three about the route mechanism: a_route_answers_a_path_the_runtime_serves_itself (the responder is handed the whole target, query included), a_route_wins_over_a_file_at_the_same_path, and a_path_a_route_does_not_claim_is_still_served_from_the_filesystem"
         },
         "integration_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/tests/islands.rs \u2014 11 tests over real HTTP on a real GPU: a_page_fetches_an_island_and_gets_the_pixels_the_gpu_drew (a whole frame of four bytes a pixel, the named colour inside the island and transparency outside it), a_request_that_does_not_describe_a_frame_is_not_a_frame, and the_rest_of_the_origin_is_still_the_application"
+          "evidence": "crates/ncui-runtime/tests/islands.rs \u2014 13 tests over real HTTP on a real GPU: a_page_fetches_an_island_and_gets_the_pixels_the_gpu_drew (a whole frame of four bytes a pixel, the named colour inside the island and transparency outside it), a_request_that_does_not_describe_a_frame_is_not_a_frame, and the_rest_of_the_origin_is_still_the_application"
         },
         "failure_tests": {
           "verified": true,
@@ -3175,7 +3175,7 @@
         },
         "integration_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/tests/islands.rs \u2014 11 tests over real HTTP on a real GPU, two of them about rows: a_page_asks_for_rows_and_the_gpu_draws_them_where_the_model_says (three rows of different heights and colours are each drawn where their heights put them, and the third reaches the bottom of the island) and scrolling_the_rows_moves_which_ones_are_drawn (the scrolled-past row is not drawn, the last row has moved up by the scroll, and the frame below the island is transparent because it belongs to the page)"
+          "evidence": "crates/ncui-runtime/tests/islands.rs \u2014 13 tests over real HTTP on a real GPU, two of them about rows: a_page_asks_for_rows_and_the_gpu_draws_them_where_the_model_says (three rows of different heights and colours are each drawn where their heights put them, and the third reaches the bottom of the island) and scrolling_the_rows_moves_which_ones_are_drawn (the scrolled-past row is not drawn, the last row has moved up by the scroll, and the frame below the island is transparent because it belongs to the page)"
         },
         "failure_tests": {
           "verified": true,
@@ -3281,7 +3281,7 @@
         },
         "integration_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/tests/application.rs \u2014 34 tests over the whole application, three of them about the icon: an application whose manifest names an icon opens with it on a real window, an icon that cannot be read is refused by name, and an icon in a format the runtime cannot read is refused by name; crates/ncui-webview-wry/src/host.rs \u2014 8 unit tests, one of them a window with an icon coming up on the platform's own engine"
+          "evidence": "crates/ncui-runtime/tests/application.rs \u2014 34 tests over the whole application, three of them about the icon: an application whose manifest names an icon opens with it on a real window, an icon that cannot be read is refused by name, and an icon in a format the runtime cannot read is refused by name; crates/ncui-webview-wry/src/host.rs \u2014 9 unit tests, one of them a window with an icon coming up on the platform's own engine"
         },
         "failure_tests": {
           "verified": true,
@@ -3329,11 +3329,11 @@
       "evidence": {
         "unit_tests": {
           "verified": true,
-          "evidence": "crates/ncui-gpu-renderer/src/glyphs.rs \u2014 7 unit tests over the rasteriser: a square is covered and nothing around it is, a hole is left hollow by the winding rule, a curve is flattened and covered, two control points in a row imply a point on the curve, an outline that encloses nothing is refused, an oversized outline is refused, and the map records where it sits; crates/ncui-gpu-renderer/src/text.rs \u2014 15 unit tests over shaping, wrapping and outlines, including a_glyph_has_an_outline_of_whole_contours, a_letter_rasterises_into_coverage_with_a_hollow_counter, a_space_draws_nothing_rather_than_failing, and the five that pin wrapping: a run that fits is one line, a longer run breaks at its last space, a word wider than the box breaks between glyphs, a newline forces a break, and a box of no width is still one line"
+          "evidence": "crates/ncui-gpu-renderer/src/glyphs.rs \u2014 7 unit tests over the rasteriser: a square is covered and nothing around it is, a hole is left hollow by the winding rule, a curve is flattened and covered, two control points in a row imply a point on the curve, an outline that encloses nothing is refused, an oversized outline is refused, and the map records where it sits; crates/ncui-gpu-renderer/src/text.rs \u2014 29 unit tests over shaping, wrapping and outlines, including a_glyph_has_an_outline_of_whole_contours, a_letter_rasterises_into_coverage_with_a_hollow_counter, a_space_draws_nothing_rather_than_failing, and the five that pin wrapping: a run that fits is one line, a longer run breaks at its last space, a word wider than the box breaks between glyphs, a newline forces a break, and a box of no width is still one line"
         },
         "integration_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/tests/islands.rs \u2014 11 tests fetching frames from a live server on a real GPU, including a_row_with_text_is_drawn_with_its_letters and a_row_taller_than_one_line_wraps_its_text (the same row fetched with a text far wider than it and with a single letter; the wrapped frame's ink spans more of the row's height, which is what wrapping means): the same island is fetched twice, once plain and once with a 24-pixel letter on a 32-pixel row, and the second frame holds ink the first does not while keeping the row's own colour where the letter is not"
+          "evidence": "crates/ncui-runtime/tests/islands.rs \u2014 13 tests fetching frames from a live server on a real GPU, including a_row_with_text_is_drawn_with_its_letters and a_row_taller_than_one_line_wraps_its_text (the same row fetched with a text far wider than it and with a single letter; the wrapped frame's ink spans more of the row's height, which is what wrapping means): the same island is fetched twice, once plain and once with a 24-pixel letter on a 32-pixel row, and the second frame holds ink the first does not while keeping the row's own colour where the letter is not"
         },
         "failure_tests": {
           "verified": true,
@@ -3486,7 +3486,7 @@
       "evidence": {
         "unit_tests": {
           "verified": true,
-          "evidence": "crates/ncui-native/src/hotkey.rs \u2014 6 unit tests, one of which registers a real shortcut on the running platform and releases it: an_accelerator_is_read_into_a_modifier_set_and_a_key, a_shortcut_this_does_not_accept_is_refused_by_name, a_bare_key_is_refused_unless_it_is_a_function_key, the_vocabulary_names_what_a_shortcut_can_use, a_machine_that_cannot_register_shortcuts_says_so, and a_registered_shortcut_is_held_and_can_be_released; crates/ncui-app/src/manifest.rs \u2014 14 unit tests, including a_declared_shortcut_is_read_and_a_malformed_one_is_refused and the_example_application_s_manifest_is_one_this_accepts"
+          "evidence": "crates/ncui-native/src/hotkey.rs \u2014 6 unit tests, one of which registers a real shortcut on the running platform and releases it: an_accelerator_is_read_into_a_modifier_set_and_a_key, a_shortcut_this_does_not_accept_is_refused_by_name, a_bare_key_is_refused_unless_it_is_a_function_key, the_vocabulary_names_what_a_shortcut_can_use, a_machine_that_cannot_register_shortcuts_says_so, and a_registered_shortcut_is_held_and_can_be_released; crates/ncui-app/src/manifest.rs \u2014 24 unit tests, including a_declared_shortcut_is_read_and_a_malformed_one_is_refused and the_example_application_s_manifest_is_one_this_accepts"
         },
         "integration_tests": {
           "verified": true,
@@ -3540,7 +3540,7 @@
       "evidence": {
         "unit_tests": {
           "verified": true,
-          "evidence": "crates/ncui-webview/src/tray.rs \u2014 1 unit test over what a platform will accept: a tray whose image is not a whole buffer, whose tooltip says nothing, or whose tooltip is longer than a platform shows is refused, and one at the limit is accepted; crates/ncui-app/src/manifest.rs \u2014 14 unit tests, including a_tray_icon_is_read_and_a_malformed_one_is_refused, which covers an image outside the application, an absolute path, an empty image, a blank tooltip and a missing tooltip"
+          "evidence": "crates/ncui-webview/src/tray.rs \u2014 1 unit test over what a platform will accept: a tray whose image is not a whole buffer, whose tooltip says nothing, or whose tooltip is longer than a platform shows is refused, and one at the limit is accepted; crates/ncui-app/src/manifest.rs \u2014 24 unit tests, including a_tray_icon_is_read_and_a_malformed_one_is_refused, which covers an image outside the application, an absolute path, an empty image, a blank tooltip and a missing tooltip"
         },
         "integration_tests": {
           "verified": true,

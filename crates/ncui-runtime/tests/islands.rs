@@ -291,6 +291,34 @@ fn a_row_taller_than_one_line_wraps_its_text() {
 }
 
 #[test]
+fn a_row_of_right_to_left_text_is_drawn_through_the_whole_pipeline() {
+    // The defect this closes: right-to-left text was shaped left-to-right, so a Hebrew or Arabic
+    // row drew its letters backwards. The row is shaped as runs — the reordering is unit-tested in
+    // the shaper — and this asks the real GPU island for a Hebrew row and an Arabic row, so the
+    // whole path from a page's request to composited pixels runs on right-to-left text and comes
+    // back with the letters on it. What a frame can show is that the text was drawn at all; that it
+    // reads the right way is the shaper's test above.
+    if !has_gpu() {
+        return;
+    }
+    let (server, _scratch) = server();
+    // שלום (Hebrew "peace") and مرحبا (Arabic "hello"), percent-encoded because a row's text rides
+    // in the query.
+    let hebrew = "/__ncui/island?w=96&h=32&x=0&y=0&iw=96&ih=32\
+                  &rows=32:ffffffff:000000ff:16:%D7%A9%D7%9C%D7%95%D7%9D";
+    let (status, _, hebrew_body) = get(&server, hebrew);
+    assert_eq!(status, "200", "the Hebrew row is served");
+    assert_eq!(hebrew_body.len(), 96 * 32 * 4);
+    assert!(ink(&hebrew_body) > 20, "the Hebrew row draws its letters");
+
+    let arabic = "/__ncui/island?w=96&h=32&x=0&y=0&iw=96&ih=32\
+                  &rows=32:ffffffff:000000ff:16:%D9%85%D8%B1%D8%AD%D8%A8%D8%A7";
+    let (status, _, arabic_body) = get(&server, arabic);
+    assert_eq!(status, "200", "the Arabic row is served");
+    assert!(ink(&arabic_body) > 20, "the Arabic row draws its letters");
+}
+
+#[test]
 fn a_row_whose_text_is_not_encoded_is_refused() {
     // The text is percent-encoded because a comma separates rows and a colon separates fields. A
     // request that puts a comma in the text is a request whose rows cannot be read, and it is
@@ -438,6 +466,42 @@ fn scrolling_the_rows_moves_which_ones_are_drawn() {
         at(20),
         [0, 0, 0, 0],
         "the frame below the island belongs to the page, so it is transparent"
+    );
+}
+
+#[test]
+fn a_row_whose_text_overflows_its_height_is_elided_not_poured_past_it() {
+    // The defect this closes: a block of lines taller than its row was cut off at the bottom mid
+    // glyph, with nothing to say the text continued. Now the lines that fit are drawn whole and
+    // the last is marked with an ellipsis. The frame is taller than the row, so the assertion is
+    // also that the elided text stays inside its row — the space below is the page's, not the
+    // island's, and an overflowing block must not claim it.
+    if !has_gpu() {
+        return;
+    }
+    let (server, _scratch) = server();
+    // A long unbroken word (no spaces, so it wraps between glyphs) at a size that wraps it to
+    // several lines, in a row only tall enough for one or two — this is what forces the elision.
+    let target = "/__ncui/island?w=64&h=64&x=0&y=0&iw=64&ih=64\
+                  &rows=24:ffffffff:000000ff:16:aaaaaaaaaaaaaaaaaaaaaaaa";
+    let (status, _, body) = get(&server, target);
+    assert_eq!(status, "200", "the overflowing row is served");
+    assert_eq!(body.len(), 64 * 64 * 4);
+
+    // The row's own band carries ink: the fitting lines and the ellipsis are drawn.
+    let row_band = &body[..24 * 64 * 4];
+    let drawn = ink(row_band);
+    assert!(
+        drawn > 0,
+        "the elided row still shows its first line and marker"
+    );
+
+    // Below the row the frame is transparent: the elided block did not pour past its row.
+    let below = &body[24 * 64 * 4..];
+    assert_eq!(
+        ink(below),
+        0,
+        "text that did not fit must be elided, not drawn into the space below the row"
     );
 }
 

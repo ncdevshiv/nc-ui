@@ -5,6 +5,7 @@
   "version": "1.0.0",
   "entry": "index.html",
   "assets": "public",
+  "default_locale": "en",
   "window": {
     "title": "NC-UI Counter",
     "width": 900,
@@ -22,6 +23,13 @@
     {
       "accelerator": "Ctrl+Alt+N",
       "command": "increment"
+    }
+  ],
+  "page_commands": [
+    {
+      "command": "counter.summary",
+      "requires": [],
+      "summary": "The page's own summary of the counter, answered in JavaScript"
     }
   ]
 }

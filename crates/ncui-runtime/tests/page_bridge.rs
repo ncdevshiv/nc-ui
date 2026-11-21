@@ -34,6 +34,8 @@ struct EngineState {
     outgoing: Mutex<Vec<String>>,
     /// Scripts the host has asked the engine to evaluate.
     evaluated: Mutex<Vec<String>>,
+    /// Window drags the host has asked the engine to start.
+    drags: Mutex<Vec<()>>,
 }
 
 /// A page engine the test drives.
@@ -65,6 +67,15 @@ impl PageEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
+
+    /// How many window drags the engine was asked to start.
+    fn drag_count(&self) -> usize {
+        self.state
+            .drags
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
 }
 
 impl WebViewBackend for PageEngine {
@@ -92,6 +103,15 @@ impl WebViewBackend for PageEngine {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(script.to_owned());
+        true
+    }
+
+    fn drag_window(&self) -> bool {
+        self.state
+            .drags
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(());
         true
     }
 }
@@ -372,6 +392,11 @@ fn a_command_needing_an_ungranted_capability_is_refused_at_registration() {
 
 #[test]
 fn a_destructive_application_command_needs_consent() {
+    // Consent for a destructive page command is currently the `consent` bool: absent means
+    // withhold (the gate fails closed), present means the page states the user confirmed. This
+    // drives the real pump through both. The bool is a documented stopgap — see the E1 entry in
+    // `known-gaps.md`: replacing it with an unforgeable token needs the runtime's consent UI,
+    // which does not exist yet, and no production path mints a token a page could present.
     let (mut runtime, factory) = runtime_with_page_and_grant(&[Capability::FilesystemWrite]);
     let _registration = runtime
         .register_page_command(
@@ -435,5 +460,211 @@ fn a_page_cannot_reach_a_capability_the_window_was_not_granted() {
     assert!(
         !granted.contains(Capability::Deploy),
         "a page must not hold a deployment authority"
+    );
+}
+
+#[test]
+fn a_page_asking_for_describe_is_told_the_locale_and_its_direction() {
+    // C4's non-GPU half, end to end: the page asks `describe` over the bridge and the answer
+    // names the platform's locale and the text direction that locale lays out in. The page
+    // never keeps its own table of right-to-left scripts — the runtime derives the direction
+    // from the locale it reports, so the two cannot disagree.
+    let (mut runtime, factory) = runtime_with_page();
+    let _window = open_window(&mut runtime);
+    let engine = factory
+        .engines
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .first()
+        .cloned()
+        .expect("one engine");
+
+    engine.post("{\"id\":\"call-locale\",\"action\":\"describe\"}");
+    assert_eq!(runtime.pump_pages(Duration::from_secs(0)), 1);
+
+    let scripts = engine.scripts();
+    let answer = scripts
+        .iter()
+        .find(|script| script.contains("\"id\":\"call-locale\""))
+        .expect("the describe answer is delivered under the page's id");
+    assert!(
+        answer.contains("\"locale\":"),
+        "the answer names the platform locale: {answer}"
+    );
+    assert!(
+        answer.contains("\"ltr\"") || answer.contains("\"rtl\""),
+        "the answer names a text direction: {answer}"
+    );
+}
+
+#[test]
+fn a_page_registered_command_runs_in_the_page_and_answers_the_page() {
+    // The JavaScript half of "a command is not Rust-only": the page registers a handler, the
+    // runtime hands the call to it over the bridge, and the handler's answer settles the page's
+    // own invoke. This drives the real pump, so it exercises the runtime's interception, the
+    // capability gate, and the deferred reply together rather than any one of them in isolation.
+    let mut runtime = Runtime::start(Limits::default()).expect("runtime should start");
+    runtime.grant_page_capabilities(&[Capability::InspectRuntime]);
+    // Registered before the window registry is built, so the command is in the action table the
+    // window's seam enforces — the same order an application's startup registers its commands.
+    runtime
+        .page_commands
+        .register_js_command(
+            "js.greet",
+            CapabilitySet::empty().with(Capability::InspectRuntime),
+            "Greet from the page",
+        )
+        .expect("the js command registers");
+    let (mut runtime, factory) = attach_page(runtime);
+    let _window = open_window(&mut runtime);
+    let engine = factory
+        .engines
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .first()
+        .cloned()
+        .expect("one engine");
+
+    // The page invokes its own registered command.
+    engine.post(
+        "{\"id\":\"call-js-1\",\"action\":\"perform\",\"name\":\"js.greet\",\"payload\":{\"who\":\"page\"}}",
+    );
+    runtime.pump_pages(Duration::from_secs(0));
+
+    // The runtime did not answer the invoke directly: it handed the command to the page by
+    // evaluating a runCommand call carrying a reply id it minted.
+    let scripts = engine.scripts();
+    let run = scripts
+        .iter()
+        .find(|script| script.contains("__runCommand"))
+        .expect("the runtime hands a page command to the page")
+        .clone();
+    let reply_id = run
+        .split("__runCommand(\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("a reply id")
+        .to_owned();
+    assert!(
+        run.contains("js.greet"),
+        "the runCommand names the command it is running: {run}"
+    );
+
+    // The page runs its handler and posts the answer back under that reply id.
+    engine.post(&format!(
+        "{{\"id\":\"{reply_id}\",\"action\":\"command_result\",\"ok\":true,\"payload\":{{\"hello\":\"page\"}}}}"
+    ));
+    runtime.pump_pages(Duration::from_secs(0));
+
+    // The answer settles the page's ORIGINAL invoke, not the reply id the runtime minted.
+    let scripts = engine.scripts();
+    let settled = scripts.last().expect("the original invoke is settled");
+    assert!(
+        settled.contains("\"id\":\"call-js-1\"") && settled.contains("\"hello\":\"page\""),
+        "the handler's answer settles the page's own invoke: {settled}"
+    );
+}
+
+#[test]
+fn a_page_command_the_page_was_not_granted_is_refused_and_never_handed_over() {
+    // The gate is the same one every command passes: a page that lacks the capability the
+    // command requires never reaches its handler, and the runtime hands it nothing to run.
+    let runtime = Runtime::start(Limits::default()).expect("runtime should start");
+    runtime
+        .page_commands
+        .register_js_command(
+            "js.admin",
+            CapabilitySet::empty().with(Capability::Deploy),
+            "Admin only",
+        )
+        .expect("the js command registers");
+    let (mut runtime, factory) = attach_page(runtime);
+    let _window = open_window(&mut runtime);
+    let engine = factory
+        .engines
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .first()
+        .cloned()
+        .expect("one engine");
+
+    engine.post("{\"id\":\"call-js-2\",\"action\":\"perform\",\"name\":\"js.admin\"}");
+    runtime.pump_pages(Duration::from_secs(0));
+
+    let scripts = engine.scripts();
+    assert!(
+        scripts
+            .iter()
+            .any(|script| script.contains("\"code\":\"capability_denied\"")
+                && script.contains("\"id\":\"call-js-2\"")),
+        "an ungranted page command is refused at the seam: {scripts:?}"
+    );
+    assert!(
+        !scripts.iter().any(|script| script.contains("__runCommand")),
+        "the runtime must not hand an ungranted command to the page: {scripts:?}"
+    );
+}
+
+#[test]
+fn a_drag_region_mousedown_reaches_the_window_engine() {
+    // The injected drag-region script calls `drag_region` (the declared action
+    // name). The seam routes it to `ncui.window.drag.region`, the handler asks
+    // the calling window's engine, and the engine records the drag.
+    let (mut runtime, factory) = runtime_with_page_and_grant(&[Capability::Window]);
+    let _window = open_window(&mut runtime);
+    let engine = factory
+        .engines
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .first()
+        .cloned()
+        .expect("one engine");
+
+    engine.post("{\"id\":\"drag-1\",\"action\":\"perform\",\"name\":\"drag_region\"}");
+    let served = runtime.pump_pages(Duration::from_secs(0));
+    assert_eq!(served, 1, "the page's drag request must be served");
+
+    let scripts = engine.scripts();
+    assert!(
+        scripts
+            .iter()
+            .any(|s| s.contains("\"id\":\"drag-1\"") && s.contains("\"ok\":true")),
+        "a granted drag_region action must be served: {scripts:?}"
+    );
+    assert_eq!(
+        engine.drag_count(),
+        1,
+        "the drag must reach the window's engine, not be answered from the registry"
+    );
+}
+
+#[test]
+fn an_application_event_is_delivered_to_the_page() {
+    // Runtime::emit is the Rust half of ncui.app.emit; the page receives the
+    // same __dispatch script either path.
+    let (mut runtime, factory) = runtime_with_page();
+    let window = open_window(&mut runtime);
+    let engine = factory
+        .engines
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .first()
+        .cloned()
+        .expect("one engine");
+
+    runtime
+        .emit(
+            window,
+            "zcode:deep-link",
+            &json!({ "url": "zcode://open/file.txt" }),
+        )
+        .expect("the event is delivered to an open window");
+
+    let scripts = engine.scripts();
+    assert!(
+        scripts
+            .iter()
+            .any(|s| s.contains("__dispatch") && s.contains("zcode:deep-link")),
+        "the event must reach the page through the bridge: {scripts:?}"
     );
 }

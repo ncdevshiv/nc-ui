@@ -233,6 +233,8 @@ fn island_controls_join_the_same_keyboard_ring() {
     let island = IslandDescriptor {
         order: 100,
         label: "Viewport".to_owned(),
+        locale: "en".to_owned(),
+        direction: ncui_a11y::TextDirection::LeftToRight,
         nodes: vec![
             Node::leaf(Role::Slider, "Zoom", 101, true),
             Node::leaf(Role::Button, "Reset view", 102, true),
@@ -268,6 +270,8 @@ fn an_unreachable_island_is_refused_by_its_descriptor() {
     let trap = IslandDescriptor {
         order: 100,
         label: "Viewport".to_owned(),
+        locale: "en".to_owned(),
+        direction: ncui_a11y::TextDirection::LeftToRight,
         nodes: vec![Node::leaf(Role::Button, "", 101, true)],
     };
     assert!(
@@ -278,6 +282,8 @@ fn an_unreachable_island_is_refused_by_its_descriptor() {
     let silent = IslandDescriptor {
         order: 100,
         label: "  ".to_owned(),
+        locale: "en".to_owned(),
+        direction: ncui_a11y::TextDirection::LeftToRight,
         nodes: vec![Node::leaf(Role::Button, "Zoom", 101, true)],
     };
     assert!(

@@ -149,6 +149,7 @@ impl ProcessRunner {
             request.stdin.as_deref(),
             timeout,
             self.max_output,
+            Some(self.root.as_path()),
         )
     }
 
@@ -174,35 +175,52 @@ impl ProcessRunner {
             });
         }
 
-        // A bare name is resolved by the operating system through `PATH`. That is what
-        // lets an application use `git` or `ffmpeg` without shipping it, and the
-        // `process.spawn` capability is what makes that the application's decision.
-        if !program.contains('/') && !program.contains('\\') {
-            return Ok(PathBuf::from(program));
+        // A path with a separator is resolved inside the application and contained: a
+        // relative path that leaves the root, or one that escapes through a link, is refused
+        // rather than followed.
+        if program.contains('/') || program.contains('\\') {
+            let resolved = SafePath::resolve(&self.root, program).map_err(|error| {
+                ProcessError::OutsideRoot {
+                    program: program.to_owned(),
+                    reason: error.to_string(),
+                }
+            })?;
+            let canonical = resolved
+                .canonicalize()
+                .map_err(|_| ProcessError::NotFound {
+                    program: program.to_owned(),
+                })?;
+            if !SafePath::is_contained(&self.root, &canonical) {
+                return Err(ProcessError::OutsideRoot {
+                    program: program.to_owned(),
+                    reason: "the path resolves outside the application through a link".to_owned(),
+                });
+            }
+            if !canonical.is_file() {
+                return Err(ProcessError::NotExecutable {
+                    program: program.to_owned(),
+                });
+            }
+            return Ok(canonical);
         }
 
-        let resolved =
-            SafePath::resolve(&self.root, program).map_err(|error| ProcessError::OutsideRoot {
-                program: program.to_owned(),
-                reason: error.to_string(),
-            })?;
-        let canonical = resolved
-            .canonicalize()
-            .map_err(|_| ProcessError::NotFound {
-                program: program.to_owned(),
-            })?;
-        if !SafePath::is_contained(&self.root, &canonical) {
-            return Err(ProcessError::OutsideRoot {
-                program: program.to_owned(),
-                reason: "the path resolves outside the application through a link".to_owned(),
-            });
+        // A bare name — no separator. If it names a file inside the application, resolve it
+        // there rather than on `PATH` and not against whatever directory the host happens to
+        // be running in: a sidecar is a program the application ships (`sidecar.py`,
+        // `tools/index`), and one that only worked when the host's working directory matched
+        // the application's would run or not depending on who launched it.
+        let in_root = self.root.join(program);
+        if let Ok(canonical) = in_root.canonicalize()
+            && canonical.is_file()
+            && SafePath::is_contained(&self.root, &canonical)
+        {
+            return Ok(canonical);
         }
-        if !canonical.is_file() {
-            return Err(ProcessError::NotExecutable {
-                program: program.to_owned(),
-            });
-        }
-        Ok(canonical)
+
+        // Anything else — `git`, `ffmpeg` — the operating system resolves on `PATH`, which is
+        // what lets an application use a tool without shipping it, and the `process.spawn`
+        // capability is what makes that the application's decision.
+        Ok(PathBuf::from(program))
     }
 }
 
@@ -218,6 +236,7 @@ pub(crate) fn run_command(
     stdin: Option<&str>,
     timeout: Duration,
     max_output: usize,
+    root: Option<&Path>,
 ) -> Result<RunOutput, ProcessError> {
     let mut command = Command::new(program);
     command
@@ -226,6 +245,13 @@ pub(crate) fn run_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env_clear();
+    // A sidecar's relative arguments (a script path next to the manifest) resolve against
+    // the child's working directory, so the contained runner pins it to the app root. The
+    // platform-tool capabilities pass `None` and keep the inherited directory, which their
+    // PATH-resolved tools do not depend on.
+    if let Some(root) = root {
+        command.current_dir(root);
+    }
     for (name, value) in scrubbed_environment() {
         command.env(name, value);
     }

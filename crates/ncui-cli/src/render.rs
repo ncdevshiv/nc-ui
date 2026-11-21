@@ -61,6 +61,7 @@ fn to_text(payload: &Value, command: &Command) -> String {
         Command::Install { .. } => install_text(payload),
         Command::Uninstall { .. } => uninstall_text(payload),
         Command::Installed { .. } => installed_text(payload),
+        Command::New { .. } => new_text(payload),
         Command::Help => crate::usage::text(),
     }
 }
@@ -95,6 +96,25 @@ fn uninstall_text(payload: &Value) -> String {
         field(&removed, "name"),
         field(&removed, "directory")
     )
+}
+
+/// The text form of a scaffold.
+///
+/// It names what was written and the one command that opens it, so the first-run-to-window path is
+/// on the screen when the command finishes rather than in a page of documentation.
+fn new_text(payload: &Value) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "scaffolded {}", field(payload, "scaffolded"));
+    let _ = writeln!(out, "in        {}", field(payload, "directory"));
+    for file in payload
+        .get("files")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice)
+    {
+        let _ = writeln!(out, "          wrote {file}");
+    }
+    let _ = writeln!(out, "run       {}", field(payload, "next"));
+    out
 }
 
 /// The text form of the list of installed applications.
@@ -155,6 +175,9 @@ fn build_text(payload: &Value, check: bool) -> String {
         field(payload, "version")
     );
     let _ = writeln!(out, "identity {}", field(payload, "identity"));
+    // The profile is the reader's answer to "why is this bundle (not) the size I expected": a
+    // minimal build omits the GPU-island renderer, so a size difference is a choice, not a bug.
+    let _ = writeln!(out, "profile  {}", field(payload, "profile"));
     if !check {
         let _ = writeln!(out, "runtime  {}", field(payload, "runtime"));
     }

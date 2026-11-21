@@ -300,6 +300,93 @@ impl Runtime {
             .register(name, requires, summary, handler)
     }
 
+    /// Delivers one application-defined event to one window's page.
+    ///
+    /// This is the Rust half of `ncui.app.emit`: an embedding application calls it
+    /// directly, the JSON-RPC method wraps it, and both deliver the same
+    /// `__dispatch` script through the same seam — one event path, not two that
+    /// agree by accident. The page receives it through
+    /// `window.ncui.on(event, handler)`, exactly as the built-in `resized` and
+    /// `moved` events arrive.
+    ///
+    /// # Errors
+    ///
+    /// A window that is not open is a [`ncui_core::ErrorKind::NotFound`], and an
+    /// engine that refuses the script is a [`ncui_core::ErrorKind::Conflict`].
+    /// Both are reported rather than silently dropped: a caller that believed an
+    /// event was delivered when the page never ran it would build state that does
+    /// not exist.
+    pub fn emit(
+        &mut self,
+        window: ncui_core::WindowId,
+        event: &str,
+        payload: &serde_json::Value,
+    ) -> Result<()> {
+        let script = Self::event_script(event, payload)?;
+        let delivered = self.windows.post_to_page(window, &script).map_err(|_| {
+            NcError::new(ErrorKind::NotFound {
+                kind: "window".to_owned(),
+                id: window.to_string(),
+            })
+            .operation("runtime::emit")
+        })?;
+        if delivered {
+            Ok(())
+        } else {
+            Err(NcError::new(ErrorKind::Conflict {
+                reason: format!("the engine refused the event script for window {window}"),
+            })
+            .operation("runtime::emit"))
+        }
+    }
+
+    /// Delivers one application-defined event to every open window's page.
+    ///
+    /// Returns the number of windows the event reached. A window whose engine
+    /// refuses the script is skipped rather than failing the broadcast — the other
+    /// windows still receive it, and the count tells the caller exactly how many
+    /// did.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same validation error as [`Runtime::emit`] for an event name
+    /// that is empty or longer than 256 bytes.
+    pub fn emit_all(&mut self, event: &str, payload: &serde_json::Value) -> Result<usize> {
+        let script = Self::event_script(event, payload)?;
+        match self.windows.post_to_all_pages(&script) {
+            Ok(delivered) => Ok(delivered),
+            // No host installed: there is no page to deliver to. That is zero
+            // windows reached, not a failure — the count is the answer.
+            Err(_) => Ok(0),
+        }
+    }
+
+    /// The `__dispatch` script one application event is delivered as.
+    ///
+    /// The event name is bounded because it reaches a page as code: a four-megabyte
+    /// "event name" would be an allocation the caller controls. The same ceiling
+    /// the JSON-RPC method applies is applied here, where both callers share it.
+    fn event_script(event: &str, payload: &serde_json::Value) -> Result<String> {
+        if event.is_empty() || event.len() > 256 {
+            return Err(NcError::new(ErrorKind::Validation {
+                field: "event".to_owned(),
+                reason: "`event` must be a non-empty string of at most 256 bytes".to_owned(),
+            })
+            .operation("runtime::emit"));
+        }
+        let message = serde_json::json!({ "event": event, "payload": payload });
+        let serialised = serde_json::to_string(&message).map_err(|error| {
+            NcError::new(ErrorKind::Validation {
+                field: "payload".to_owned(),
+                reason: error.to_string(),
+            })
+            .operation("runtime::emit")
+        })?;
+        Ok(format!(
+            "window.ncui && window.ncui.__dispatch({serialised});"
+        ))
+    }
+
     /// Installs the window surface, with its registry and its host.
     ///
     /// A runtime without a host refuses every window operation rather than inventing

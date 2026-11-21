@@ -16,7 +16,7 @@ of it.
 | App | Framework | Upstream | Commit | NC-UI port |
 | --- | --- | --- | --- | --- |
 | `electron-quick-start` | Electron 45 | `electron/electron-quick-start` | `ecfb901f` | `ports/electron-quick-start` |
-| `example-tauri-app` | Tauri 1.2 | `AlexMercedCoder/example-tauri-app` | `c178b4f8` | `ports/tauri-word-signal` |
+| `example-tauri-app` | Tauri 2 | `AlexMercedCoder/example-tauri-app` | `c178b4f8` | `ports/tauri-word-signal` |
 
 Both are the real upstream sources, cloned by the harness into `comparison/.originals/` (git-ignored,
 pinned by commit in `manifest.json`). The harness copies the benchmark instrumentation from
@@ -79,9 +79,11 @@ the launch that does carry it. It measures:
   the handler.
 - **Distributed size** — the bytes a user would install: the Electron distribution plus the
   application's own files, the Tauri binary plus its built frontend, or the NC-UI runtime plus
-  the port directory. The NC-UI runtime is rebuilt by the harness with `ncui-cli/wry-host` on
-  every run, so the figure is always the renderer-carrying build rather than whatever
-  `target/release/ncui.exe` happened to contain.
+  the port directory. The NC-UI runtime is rebuilt by the harness with `ncui-cli/wry-host-gpu`
+  on every run, so the figure is always the renderer-carrying default build rather than whatever
+  `target/release/ncui.exe` happened to contain. (`wry-host` without `-gpu` is the `minimal`
+  profile, which omits the GPU-islands renderer and measures ~4.9 MiB; it is not the build this
+  row compares, because Electron and Tauri are measured with their full runtimes.)
 
 ## Running it
 
@@ -122,29 +124,91 @@ the rough ratios rather than a single run's third decimal.
 
 ### `example-tauri-app`
 
-| Metric | Tauri 1.2 | NC-UI | Verdict |
+The Tauri application is measured on **Tauri 2**, the current major, not the 1.2 it was
+originally cloned at. Tauri 2 overhauled the menu API, added the capabilities and permissions
+model, and moved `invoke` in the page from the `tauri` module to `core`, so measuring it on 1.2
+would have been a comparison against a version the project no longer ships against. The port is
+carried by the instrumentation (`bench/instrumentation/tauri/`) and reproduces from a fresh clone.
+
+| Metric | Tauri 2 | NC-UI | Verdict |
 | --- | --- | --- | --- |
-| Cold start to a visible window | 52.4 ms | 51.8 ms | level |
-| Idle working set (process tree) | 335.9 MiB | 350.9 MiB | Tauri, 4.5 % smaller |
+| Cold start to a visible window | 52.9 ms | 55.1 ms | level |
+| Idle working set (process tree) | 334.9 MiB | 330.4 MiB | NC-UI, 1.3 % smaller |
 | Idle CPU (framework process) | 0.00 % | 0.00 % | level |
-| IPC round trip (200 calls, median) | 0.281 ms | 0.329 ms | Tauri, 1.2× faster |
-| Distributed size | 3.2 MiB | 11.3 MiB | Tauri, 3.5× smaller |
+| IPC round trip (200 calls, median) | 1.398 ms | 0.348 ms | NC-UI, 4.0× faster |
+| Distributed size | 8.5 MiB | 11.4 MiB | Tauri, 1.3× smaller |
+
+### Reproducing these numbers
+
+The tables above are one run's reading. The harness is re-run to confirm the legs still hold, and
+because a comparison that cannot be re-run is a claim rather than a measurement. The most recent
+reproduction, **2026-11-14**, ran `python comparison/bench/compare.py` on Windows (repeats 5, rounds
+200). The Electron leg and the Tauri leg were run in separate passes, each writing
+`bench/results/windows.json`; the shape of the result is the same on every row, and the individual
+timings move a little between runs, which is the machine, not the comparison.
+
+**`electron-quick-start`** — Electron and the NC-UI port:
+
+| Metric | Electron | NC-UI (electron port) |
+| --- | --- | --- |
+| Cold start to a visible window | 261.1 ms | 51.6 ms |
+| Idle working set (process tree) | 291.8 MiB | 331.2 MiB |
+| Idle CPU (framework process) | 0.00 % | 0.00 % |
+| IPC round trip (200 calls, median) | 0.210 ms | 0.310 ms |
+| Distributed size | 356.8 MiB | 11.4 MiB |
+
+**`example-tauri-app`** — Tauri 2 and the NC-UI port:
+
+| Metric | Tauri 2 | NC-UI (tauri port) |
+| --- | --- | --- |
+| Cold start to a visible window | 52.9 ms | 55.1 ms |
+| Idle working set (process tree) | 334.9 MiB | 330.4 MiB |
+| Idle CPU (framework process) | 0.00 % | 0.00 % |
+| IPC round trip (200 calls, median) | 1.398 ms | 0.348 ms |
+| Distributed size | 8.5 MiB | 11.4 MiB |
+
+Against Electron the verdicts are as they have been: NC-UI starts dramatically faster and is
+smaller by two orders of magnitude on disk, is level on idle CPU, and is slower on IPC and larger
+at idle — the architectural causes below, not a regression. Against Tauri 2 one verdict changed,
+and re-running is what surfaced it: **Tauri 2's own IPC is ~6× slower than Tauri 1.2's** (1.398 ms
+against the 0.252 ms measured before the upgrade, reproduced across two independent runs at 1.398
+and 1.548 ms), which moves that row from a Tauri win to an NC-UI win. NC-UI's own IPC figure did
+not move — it is the same 0.31–0.37 ms it measured against Electron and against Tauri 1.2, which
+is the check that the row moved because Tauri's side changed, not because the measurement did.
+Startup, idle memory, idle CPU and size are all level or within a few percent either way. The
+Tauri 2 IPC regression is Tauri's own, in a path this harness does not change: the page calls
+`invoke` and the app answers through `return_string`, both unmodified from the upstream shape.
+
+### What the Tauri 2 port changed, and why it is a port
+
+Upgrading the comparison's Tauri app from 1.2 to 2 was a port, not a version bump, and the
+mechanical changes are recorded here because they are the difference between measuring the
+current framework and measuring a museum piece. The menu API was rewritten (CustomMenuItem and
+`add_native_item` gave way to `MenuItem::with_id` and `PredefinedMenuItem`, and the event now
+resolves its window through the app handle). The allowlist became the capabilities and
+permissions model (`capabilities/default.json` granting `core:default`). `invoke` moved from the
+`tauri` module to `core` in the page. The build config schema changed (`distDir` to
+`frontendDist`, `tauri.windows` to `app.windows`) and the CLI's no-bundle flag was renamed
+(`-b none` to `--no-bundle`). The whole port lives in `bench/instrumentation/tauri/`, so it is
+reviewable in one place and the harness reapplies it to a fresh clone on every run.
 
 ### What the numbers say, honestly
 
 NC-UI is not superior on every metric, and this section does not claim it is. It is
 dramatically smaller and starts dramatically faster than Electron, it is level with Tauri on
-startup, and all three measure 0.00 % CPU at idle. It is slower than both on IPC, larger than
-both at idle, and larger than Tauri on disk. The reasons are architectural rather than
+startup, and all three measure 0.00 % CPU at idle. It is slower than Electron on IPC, larger than
+both at idle, and larger than Tauri on disk; against Tauri 2 it is the faster of the two on IPC,
+because Tauri 2's own bridge regressed (below). The reasons are architectural rather than
 accidental:
 
-- **The release build carries the GPU island renderer.** `wry-host` enables `gpu-islands`,
-  because the counter example's canvas is the feature and the documented `ncui run` command
-  must serve it rather than show a blank rectangle. That is why the distributed size is
-  11.3 MiB. The renderer's cost is measured rather than assumed: the same build with the window
-  host but without `gpu-islands` measures 4.88 MiB, so the renderer is 6.4 MiB, and a build with
+- **The release build carries the GPU island renderer.** The default (`standard`) profile builds
+  `ncui-cli/wry-host-gpu`, which enables `gpu-islands`, because the counter example's canvas is
+  the feature and the documented `ncui run` command must serve it rather than show a blank
+  rectangle. That is why the distributed size is 11.3 MiB. The renderer's cost is measured rather
+  than assumed: the same build with the window host but without `gpu-islands` (the `minimal`
+  profile, `ncui-cli/wry-host`) measures ~4.9 MiB, so the renderer is ~6.4 MiB, and a build with
   no window host at all measures 1.64 MiB and refuses to open a window. Both were built and
-  measured on this machine on 2026-11-08, and the difference is recorded here rather than hidden.
+  measured on this machine, and the difference is recorded here rather than hidden.
 
 - **IPC.** A NC-UI page call crosses the webview boundary twice (the page's `postMessage`, the
   host's `evaluate_script`) and the host's event loop runs on its own thread, so the response
@@ -154,10 +218,13 @@ accidental:
   99.8 % is the boundary. The measured 0.375 ms is what that costs, and it has moved twice: a
   blocking wait on the engine's message channel took it from 16.4 ms to 0.52 ms, and removing
   the asset server's 2 ms accept poll — which was waking the process five hundred times a
-  second and competing with every round trip — took it to 0.375 ms. Tauri's 0.281 ms is the
-  same WebView2 boundary with a slightly shorter path. The reply can only be delivered by
-  evaluating a script in the page, because `wry`'s public API exposes no `PostWebMessageAsJson`
-  seam and `unsafe_code = "forbid"` rules out calling the COM interface directly.
+  second and competing with every round trip — took it to 0.375 ms. Tauri 1.2's 0.252 ms was the
+  same WebView2 boundary with a slightly shorter path; Tauri 2 measures 1.398 ms on the identical
+  workload, a regression in Tauri's own bridge that this harness does not touch and that moves
+  the IPC row to NC-UI. Against Electron NC-UI is still the slower of the two. The reply can only
+  be delivered by evaluating a script in the page, because `wry`'s public API exposes no
+  `PostWebMessageAsJson` seam and `unsafe_code = "forbid"` rules out calling the COM interface
+  directly.
 - **Memory.** The runtime process is not where the difference is, and the decomposition is
   measured rather than assumed: `ncui.exe` is about **26 MiB** against Electron's **95 MiB**
   main process — 3.7× smaller — and the WebView2 renderer (53 MiB) and GPU process (68 MiB)
@@ -171,12 +238,15 @@ accidental:
 - **Idle CPU.** Level, and it was not always: an idle NC-UI application measured 0.78 % of a
   core against 0.00 % for both incumbents. The cause was not the page loop but the asset
   server, which accepted on a non-blocking listener and slept 2 ms between attempts — about
-  five hundred wakeups a second for an application serving nothing. The wait is now a channel
-  receive that `stop` wakes at once, with a 250 ms timeout kept only as the net that
-  guarantees termination, and the same measurement reads 0.00 %. One caveat belongs with the
-  figure: the two-second window's resolution is one Windows clock tick, 0.78 %, so a single
-  tick shows up in the p90 of some repeats for Electron as well as for NC-UI. That is the
-  measurement's floor, not work either framework is doing.
+  five hundred wakeups a second for an application serving nothing. The accept now blocks in
+  the kernel, exactly as the incumbents' do, and a stop wakes it by opening one throwaway
+  loopback connection rather than by a timed poll; the same measurement reads 0.00 %. That
+  change also removed a latency defect the poll had been hiding: because an incoming
+  connection cannot wake a timed wait, every fresh connection used to cost the poll interval
+  before `accept()` ran (~253,000 µs p50 for a page's asset fetch); it now costs ~560 µs. One
+  caveat belongs with the idle figure: the two-second window's resolution is one Windows clock
+  tick, 0.78 %, so a single tick shows up in the p90 of some repeats for Electron as well as
+  for NC-UI. That is the measurement's floor, not work either framework is doing.
 - **Size.** The NC-UI runtime carries the scheduler, metrics, audit log, worker pool,
   capability machinery and the GPU island renderer that a Tauri binary does not; 11.3 MiB is
   what that costs, and the renderer alone is 6.4 MiB of it (a build with the window host but

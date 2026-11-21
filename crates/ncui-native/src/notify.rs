@@ -213,6 +213,7 @@ impl Notifier {
             Some(&format!("{title}\n{body}")),
             NOTIFICATION_TIMEOUT,
             MAX_BODY_BYTES,
+            None,
         )
         .map_err(|error| tool_error("powershell", &error))?;
         if outcome.status != 0 || !outcome.stdout.contains(SHOWN_MARKER) {
@@ -239,6 +240,7 @@ impl Notifier {
             None,
             NOTIFICATION_TIMEOUT,
             MAX_BODY_BYTES,
+            None,
         )
         .map_err(|error| tool_error("osascript", &error))?;
         if outcome.status != 0 {
@@ -260,6 +262,7 @@ impl Notifier {
             None,
             NOTIFICATION_TIMEOUT,
             MAX_BODY_BYTES,
+            None,
         )
         .map_err(|error| tool_error("notify-send", &error))?;
         if outcome.status != 0 {

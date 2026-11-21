@@ -67,7 +67,7 @@ mod enabled {
     use ncui_gpu_renderer::glyphs::Coverage;
     use ncui_gpu_renderer::island::{IslandPixels, render_to_pixels};
     use ncui_gpu_renderer::surface::SurfaceSize;
-    use ncui_gpu_renderer::text::{ShapedLine, default_font};
+    use ncui_gpu_renderer::text::{ELLIPSIS, ShapedLine, default_font, elide_line, fit_lines};
 
     /// The path prefix a page fetches an island's frame from.
     pub const ISLAND_PREFIX: &str = "/__ncui/island";
@@ -118,7 +118,7 @@ mod enabled {
         pub fn route(self) -> Route {
             let surface = std::sync::Arc::new(self);
             let responder: Responder =
-                std::sync::Arc::new(move |target: &str| surface.answer(target));
+                std::sync::Arc::new(move |target: &str, _body: &[u8]| surface.answer(target));
             Route::new(ISLAND_PREFIX, responder)
         }
 
@@ -236,14 +236,23 @@ mod enabled {
             let lines = font
                 .wrap(&text.text, text.size, bounds.width)
                 .map_err(|error| format!("row {index}: {error}"))?;
-            // The block of lines is centred in the row when it fits and top-aligned when it
-            // does not, so a block taller than its row loses its last lines rather than its
-            // first. A single line lands where it always did.
-            let step = lines.first().map_or(0.0, ShapedLine::height);
-            let block = lines.len() as f32 * step;
+            // A block taller than its row is elided, not clipped: the lines that fit are drawn
+            // whole and the last of them is cut short and marked with an ellipsis, so a reader
+            // sees the text continues rather than a line sliced mid-glyph. A block that fits is
+            // centred, and a single line lands where it always did.
+            let (visible, elided) = fit_lines(&lines, row.height);
+            let mut shown: Vec<ShapedLine> = lines[..visible].to_vec();
+            if elided {
+                let marker = font.shape(ELLIPSIS, text.size).ok();
+                if let (Some(ellipsis), Some(last)) = (marker, shown.last_mut()) {
+                    elide_line(last, &ellipsis, bounds.width);
+                }
+            }
+            let step = shown.first().map_or(0.0, ShapedLine::height);
+            let block = shown.len() as f32 * step;
             let top = bounds.y + (row.height - block).max(0.0) / 2.0;
-            let mut baseline = top + lines.first().map_or(0.0, |line| line.ascent);
-            for line in &lines {
+            let mut baseline = top + shown.first().map_or(0.0, |line| line.ascent);
+            for line in &shown {
                 let mut pen = bounds.x;
                 for glyph in &line.glyphs {
                     if let Some(coverage) = cache.coverage(glyph.glyph_id, text.size) {
@@ -480,9 +489,16 @@ mod enabled {
                 }));
             }
             nodes.push(list);
+            // The island's language and direction are the platform's, so a reader announces a
+            // right-to-left island the way its script is written. The renderer draws the glyphs;
+            // this is the metadata the reader is told alongside them.
+            let locale = crate::describe::platform_locale();
+            let direction = ncui_a11y::TextDirection::for_locale(&locale);
             let descriptor = ncui_a11y::IslandDescriptor {
                 order: 0,
                 label: label.clone(),
+                locale: locale.clone(),
+                direction,
                 nodes,
             };
             if !descriptor.is_reachable() {
@@ -495,6 +511,8 @@ mod enabled {
             let description = serde_json::json!({
                 "label": label,
                 "order": descriptor.order,
+                "locale": locale,
+                "direction": direction.as_str(),
                 "rows": rows,
             });
             serde_json::to_vec(&description).ok()

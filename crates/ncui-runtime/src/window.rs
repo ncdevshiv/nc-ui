@@ -755,6 +755,107 @@ impl Windows {
         })
     }
 
+    /// Scales one window's page by `factor`, where `1.0` is the platform default.
+    ///
+    /// `Ok(false)` means the window is open but its engine cannot scale — a
+    /// headless engine, or one whose platform refuses. The caller reports that
+    /// rather than answering a zoom that never happened.
+    pub fn set_zoom(&self, window: WindowId, factor: f64) -> Result<bool, WindowRejection> {
+        self.with_registry_mut(|registry| {
+            let entry =
+                registry
+                    .get_mut(window)
+                    .ok_or_else(|| WindowRejection::EngineUnavailable {
+                        reason: Some(format!("window {window} is not open")),
+                    })?;
+            Ok(entry
+                .host
+                .as_ref()
+                .is_some_and(|engine| engine.set_zoom(factor)))
+        })
+    }
+
+    /// Opens one window's platform web inspector, reporting whether the engine accepted.
+    pub fn open_devtools(&self, window: WindowId) -> Result<bool, WindowRejection> {
+        self.with_registry_mut(|registry| {
+            let entry =
+                registry
+                    .get_mut(window)
+                    .ok_or_else(|| WindowRejection::EngineUnavailable {
+                        reason: Some(format!("window {window} is not open")),
+                    })?;
+            Ok(entry
+                .host
+                .as_ref()
+                .is_some_and(|engine| engine.open_devtools()))
+        })
+    }
+
+    /// Closes one window's platform web inspector, reporting whether the engine accepted.
+    pub fn close_devtools(&self, window: WindowId) -> Result<bool, WindowRejection> {
+        self.with_registry_mut(|registry| {
+            let entry =
+                registry
+                    .get_mut(window)
+                    .ok_or_else(|| WindowRejection::EngineUnavailable {
+                        reason: Some(format!("window {window} is not open")),
+                    })?;
+            Ok(entry
+                .host
+                .as_ref()
+                .is_some_and(|engine| engine.close_devtools()))
+        })
+    }
+
+    /// Whether one window's platform web inspector is open.
+    ///
+    /// `Ok(None)` means the window is open but its engine cannot say — a platform that
+    /// opens the inspector without a state query. Reported as unknown, not as closed.
+    pub fn is_devtools_open(&self, window: WindowId) -> Result<Option<bool>, WindowRejection> {
+        self.with_registry_mut(|registry| {
+            let entry = registry
+                .get(window)
+                .ok_or_else(|| WindowRejection::EngineUnavailable {
+                    reason: Some(format!("window {window} is not open")),
+                })?;
+            Ok(entry
+                .host
+                .as_ref()
+                .and_then(|engine| engine.is_devtools_open()))
+        })
+    }
+
+    /// Sends one CDP command to a window's own `DevTools` endpoint (ADR-017 Phase 2).
+    ///
+    /// The window's engine was created with remote debugging enabled and the endpoint it
+    /// opened is published in the window's user-data directory; this asks the engine to
+    /// carry the command there. An engine without the transport — a headless fallback, or
+    /// a build whose platform does not expose the port — refuses by name rather than
+    /// answering a delivery that never happened.
+    pub fn cdp_send(
+        &self,
+        window: WindowId,
+        command: &serde_json::Value,
+    ) -> Result<Result<serde_json::Value, String>, WindowRejection> {
+        self.with_registry_mut(|registry| {
+            let entry = registry
+                .get(window)
+                .ok_or_else(|| WindowRejection::EngineUnavailable {
+                    reason: Some(format!("window {window} is not open")),
+                })?;
+            let Some(_backend) = entry.host.as_ref() else {
+                return Ok(Err("this window's engine has no CDP transport".to_owned()));
+            };
+            // The CDP transport is a capability of the engine itself: a backend that has
+            // one answers, and a backend without one refuses by name. The trait keeps the
+            // runtime decoupled from the engine crate.
+            let Some(backend) = entry.host.as_ref() else {
+                return Ok(Err("this window's engine has no CDP transport".to_owned()));
+            };
+            Ok(backend.cdp_send(command).map_err(|error| error.clone()))
+        })
+    }
+
     /// Evaluates a script in every open window's page, counting the deliveries.
     pub fn post_to_all_pages(&self, script: &str) -> Result<usize, WindowRejection> {
         self.with_registry_mut(|registry| {
@@ -1278,6 +1379,10 @@ mod tests {
     struct LiveBackend;
 
     impl ncui_webview::WebViewBackend for LiveBackend {
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+
         fn last_error(&self) -> Option<String> {
             None
         }
@@ -1479,6 +1584,10 @@ mod tests {
     struct PlacedBackend(ncui_webview::WindowGeometry);
 
     impl ncui_webview::WebViewBackend for PlacedBackend {
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+
         fn last_error(&self) -> Option<String> {
             None
         }
@@ -1654,6 +1763,10 @@ mod tests {
     }
 
     impl ncui_webview::WebViewBackend for Stateful {
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+
         fn last_error(&self) -> Option<String> {
             None
         }

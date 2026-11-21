@@ -30,9 +30,11 @@
     reason = "test assertions must abort loudly on failure"
 )]
 
+pub mod cdp;
 pub mod host;
 mod host_scripts;
 
+pub use cdp::{CdpError, DevToolsEndpoint, send_command as cdp_send_command};
 pub use host::{WindowHost, WryHostFactory};
 
 /// Runs the engine's event loop on the main thread, with the application on a worker.

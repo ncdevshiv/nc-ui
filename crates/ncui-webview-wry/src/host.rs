@@ -38,6 +38,8 @@ use std::time::Duration;
 
 use ncui_webview::{HostSeam, PageMessage, WebViewBackend};
 
+use crate::cdp::CdpError;
+
 #[cfg(feature = "wry-engine")]
 use crate::host_scripts::{DRAG_REGION_SCRIPT, dropped_files_script, moved_script, resized_script};
 
@@ -180,6 +182,24 @@ enum HostEvent {
         /// The window to drag.
         window: u64,
     },
+    /// Scale one window's page by a zoom factor.
+    Zoom {
+        /// The window whose page is scaled.
+        window: u64,
+        /// The zoom factor, where `1.0` is the platform default.
+        factor: f64,
+        /// Where the acceptance is reported.
+        reply: Sender<bool>,
+    },
+    /// Open, close, or query the platform's web inspector for one window.
+    DevTools {
+        /// The window whose inspector is meant.
+        window: u64,
+        /// What to do to it.
+        action: DevToolsAction,
+        /// Where the acceptance (or the queried state) is reported.
+        reply: Sender<bool>,
+    },
     /// Stop the engine's event loop, ending the process with the code the
     /// application finished with.
     ///
@@ -261,6 +281,17 @@ struct CreateRequest {
     error: Arc<Mutex<Option<String>>>,
     /// Where the window's identity, or the failure, is delivered.
     reply: Sender<Result<u64, String>>,
+}
+
+/// What to do to a window's web inspector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DevToolsAction {
+    /// Open the inspector.
+    Open,
+    /// Close the inspector.
+    Close,
+    /// Report whether the inspector is open.
+    Query,
 }
 
 /// The number every window created by the engine is known by.
@@ -549,6 +580,36 @@ fn run_engine(
                 if let Some(entry) = windows.get(&window) {
                     let _ = entry.window.drag_window();
                 }
+            }
+            Event::UserEvent(HostEvent::Zoom {
+                window,
+                factor,
+                reply,
+            }) => {
+                let accepted = windows
+                    .get(&window)
+                    .is_some_and(|entry| entry.webview.zoom(factor).is_ok());
+                let _ = reply.send(accepted);
+            }
+            Event::UserEvent(HostEvent::DevTools {
+                window,
+                action,
+                reply,
+            }) => {
+                let answer = windows.get(&window).map(|entry| match action {
+                    DevToolsAction::Open => {
+                        entry.webview.open_devtools();
+                        // wry's Windows backend opens the inspector but reports no state,
+                        // so this is an acceptance, not a verified state.
+                        true
+                    }
+                    DevToolsAction::Close => {
+                        entry.webview.close_devtools();
+                        true
+                    }
+                    DevToolsAction::Query => entry.webview.is_devtools_open(),
+                });
+                let _ = reply.send(answer.unwrap_or(false));
             }
             #[cfg(all(feature = "wry-engine", target_os = "macos"))]
             Event::UserEvent(HostEvent::Quit) => {
@@ -1041,6 +1102,20 @@ fn build_window(
         .with_navigation_handler(navigation_handler)
         .with_initialization_script(format!("{BRIDGE_SCRIPT}\n{DRAG_REGION_SCRIPT}"));
 
+    // Remote debugging (ADR-017 Phase 2): an ephemeral port keeps two instances of the
+    // same application from colliding, and the chosen port is published by the runtime in
+    // the user-data directory's `DevToolsActivePort` file, which the CDP transport reads.
+    // The default arguments are repeated because supplying any argument replaces wry's
+    // defaults rather than adding to them.
+    #[cfg(target_os = "windows")]
+    let builder = {
+        use wry::WebViewBuilderExtWindows as _;
+        builder.with_additional_browser_args(
+            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+             --remote-debugging-port=0",
+        )
+    };
+
     let builder = match request {
         Some(request) => builder.with_url(request.url.clone()),
         None => builder.with_url("about:blank"),
@@ -1212,6 +1287,10 @@ pub struct WindowHost {
     /// This window's identity inside the engine.
     #[cfg(feature = "wry-engine")]
     window: Option<u64>,
+    /// Where the engine publishes its `DevTools` endpoint (`DevToolsActivePort`), when the
+    /// application set one. Absent means the CDP transport cannot find the port and says
+    /// so rather than searching the disk.
+    cdp_user_data_dir: Mutex<Option<std::path::PathBuf>>,
 }
 
 impl Default for WindowHost {
@@ -1243,6 +1322,7 @@ impl WindowHost {
                 ipc_tx,
                 ipc_rx: Mutex::new(ipc_rx),
                 seam: Arc::new(HostSeam::disabled()),
+                cdp_user_data_dir: Mutex::new(None),
             }
         }
     }
@@ -1431,6 +1511,141 @@ impl WindowHost {
         }
     }
 
+    /// Sends one CDP command to this window's own `DevTools` endpoint (ADR-017 Phase 2).
+    ///
+    /// The engine was created with `--remote-debugging-port=0`; the port it picked is read
+    /// from the user-data directory set with [`WindowHost::set_cdp_user_data_dir`]. A host
+    /// with no directory set, or an engine that never exposed the port, refuses by name
+    /// rather than inventing an answer.
+    pub fn cdp_send(&self, command: &serde_json::Value) -> Result<serde_json::Value, CdpError> {
+        let dir = self
+            .cdp_user_data_dir
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| CdpError::PortUnavailable {
+                reason: "no user-data directory was set for this window's engine".to_owned(),
+            })?;
+        let endpoint = crate::cdp::read_devtools_endpoint(&dir)?;
+        crate::cdp::send_command(&endpoint, command)
+    }
+
+    /// Sets where this window's engine publishes its `DevTools` endpoint.
+    ///
+    /// Must be set before the window's browser starts to be effective: the file is written
+    /// at engine startup. Setting it late is not an error, but the transport will report
+    /// the file as missing until the engine next starts.
+    pub fn set_cdp_user_data_dir(&self, dir: std::path::PathBuf) {
+        *self
+            .cdp_user_data_dir
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(dir);
+    }
+
+    /// Scales this window's page by `factor`, where `1.0` is the platform default.
+    ///
+    /// `false` when the engine could not be reached or has no such window. The result is
+    /// not read back: the platform applies the scale and the next paint shows it.
+    pub fn set_zoom(&self, factor: f64) -> bool {
+        #[cfg(feature = "wry-engine")]
+        {
+            let (Some(engine), Some(window)) = (&self.engine, self.window) else {
+                return false;
+            };
+            let (reply, answers) = mpsc::channel();
+            if engine
+                .send_event(HostEvent::Zoom {
+                    window,
+                    factor,
+                    reply,
+                })
+                .is_err()
+            {
+                return false;
+            }
+            answers
+                .recv_timeout(ENGINE_REQUEST_TIMEOUT)
+                .unwrap_or(false)
+        }
+        #[cfg(not(feature = "wry-engine"))]
+        {
+            let _ = (self, factor);
+            false
+        }
+    }
+
+    /// Opens the platform's web inspector for this window.
+    ///
+    /// `false` when the engine cannot open one, or cannot answer whether it did — which on
+    /// some platforms is the honest answer (wry's Windows backend opens the inspector but
+    /// cannot report its state), and is reported as such rather than claimed as success.
+    pub fn open_devtools(&self) -> bool {
+        self.devtools_request(DevToolsAction::Open)
+    }
+
+    /// Closes the platform's web inspector for this window. See [`WindowHost::open_devtools`].
+    pub fn close_devtools(&self) -> bool {
+        self.devtools_request(DevToolsAction::Close)
+    }
+
+    /// Whether the platform's web inspector is open for this window.
+    ///
+    /// `None` when the engine cannot say — a platform that opens the inspector without a
+    /// state query is reported as unknown, not as closed.
+    #[must_use]
+    pub fn is_devtools_open(&self) -> Option<bool> {
+        self.devtools_query()
+    }
+
+    fn devtools_request(&self, action: DevToolsAction) -> bool {
+        #[cfg(feature = "wry-engine")]
+        {
+            let (Some(engine), Some(window)) = (&self.engine, self.window) else {
+                return false;
+            };
+            let (reply, answers) = mpsc::channel();
+            if engine
+                .send_event(HostEvent::DevTools {
+                    window,
+                    action,
+                    reply,
+                })
+                .is_err()
+            {
+                return false;
+            }
+            answers
+                .recv_timeout(ENGINE_REQUEST_TIMEOUT)
+                .unwrap_or(false)
+        }
+        #[cfg(not(feature = "wry-engine"))]
+        {
+            let _ = (self, action);
+            false
+        }
+    }
+
+    fn devtools_query(&self) -> Option<bool> {
+        #[cfg(feature = "wry-engine")]
+        {
+            let (engine, window) = (self.engine.as_ref()?, self.window?);
+            let (reply, answers) = mpsc::channel();
+            engine
+                .send_event(HostEvent::DevTools {
+                    window,
+                    action: DevToolsAction::Query,
+                    reply,
+                })
+                .ok()?;
+            Some(answers.recv_timeout(ENGINE_REQUEST_TIMEOUT).ok()?)
+        }
+        #[cfg(not(feature = "wry-engine"))]
+        {
+            let _ = self;
+            None
+        }
+    }
+
     /// Clone of the producer side of the IPC channel.
     ///
     /// Mostly useful for wiring: the `wry` handler already holds its own clone, but a
@@ -1462,6 +1677,14 @@ impl WindowHost {
 }
 
 impl WebViewBackend for WindowHost {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn cdp_send(&self, command: &serde_json::Value) -> Result<serde_json::Value, String> {
+        self.cdp_send(command).map_err(|error| error.to_string())
+    }
+
     fn last_error(&self) -> Option<String> {
         self.last_error.lock().ok().and_then(|g| g.clone())
     }
@@ -1509,6 +1732,22 @@ impl WebViewBackend for WindowHost {
 
     fn window_theme(&self) -> Option<ncui_webview::Theme> {
         self.window_theme()
+    }
+
+    fn set_zoom(&self, factor: f64) -> bool {
+        self.set_zoom(factor)
+    }
+
+    fn open_devtools(&self) -> bool {
+        self.open_devtools()
+    }
+
+    fn close_devtools(&self) -> bool {
+        self.close_devtools()
+    }
+
+    fn is_devtools_open(&self) -> Option<bool> {
+        self.is_devtools_open()
     }
 
     fn evaluate_script(&self, script: &str) -> bool {
@@ -1662,6 +1901,7 @@ fn spawn_real(request: Option<ncui_webview::WindowRequest>, seam: Arc<HostSeam>)
             seam,
             engine: None,
             window: None,
+            cdp_user_data_dir: Mutex::new(None),
         };
     };
 
@@ -1689,6 +1929,7 @@ fn spawn_real(request: Option<ncui_webview::WindowRequest>, seam: Arc<HostSeam>)
             seam,
             engine: None,
             window: None,
+            cdp_user_data_dir: Mutex::new(None),
         };
     }
 
@@ -1716,6 +1957,7 @@ fn spawn_real(request: Option<ncui_webview::WindowRequest>, seam: Arc<HostSeam>)
         seam,
         engine: Some(engine.clone()),
         window,
+        cdp_user_data_dir: Mutex::new(None),
     }
 }
 

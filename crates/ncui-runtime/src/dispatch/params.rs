@@ -174,6 +174,97 @@ pub(crate) fn invoke_window_drag_region(runtime: &mut Runtime, params: &Value) -
     }
 }
 
+/// `ncui.window.zoom` -- scale a window's page by a factor.
+///
+/// `1.0` is the platform default; the factor is applied by the platform, and the next
+/// paint shows it. A window that is not open, or an engine that cannot scale, is reported
+/// as the refusal it is rather than answered with a zoom that never happened.
+pub(crate) fn invoke_window_zoom(runtime: &mut Runtime, params: &Value) -> Result<Value> {
+    let id = window_id_param(params)?;
+    let factor = params
+        .get("factor")
+        .and_then(Value::as_f64)
+        .filter(|factor| (0.25..=5.0).contains(factor))
+        .ok_or_else(|| {
+            validation("factor", "must be a number between 0.25 and 5.0")
+                .operation("dispatch::window_zoom")
+        })?;
+    let applied = runtime.windows.set_zoom(id, factor).map_err(|_| {
+        NcError::new(ErrorKind::NotFound {
+            kind: "window".to_owned(),
+            id: id.to_string(),
+        })
+        .operation("dispatch::window_zoom")
+    })?;
+    if applied {
+        serde_json::to_value(json!({ "zoomed": true, "factor": factor }))
+            .map_err(|e| json_error(&e))
+    } else {
+        Err(NcError::new(ErrorKind::Conflict {
+            reason: format!("the engine could not scale window {id}"),
+        })
+        .operation("dispatch::window_zoom"))
+    }
+}
+
+/// Resolves the window for a devtools request, refusing an unknown window by name.
+fn devtools_window(runtime: &Runtime, params: &Value) -> Result<WindowId> {
+    let id = window_id_param(params)?;
+    // The state call is the existence probe: `Ok(_)` for a live window (its engine may
+    // still answer "unknown"), `Err` for one that is not open.
+    if runtime.windows.is_devtools_open(id).is_err() {
+        return Err(NcError::new(ErrorKind::NotFound {
+            kind: "window".to_owned(),
+            id: id.to_string(),
+        })
+        .operation("dispatch::window_devtools"));
+    }
+    Ok(id)
+}
+
+/// `ncui.window.devtools.open` -- open a window's platform web inspector.
+pub(crate) fn invoke_window_devtools_open(runtime: &mut Runtime, params: &Value) -> Result<Value> {
+    let id = devtools_window(runtime, params)?;
+    let opened = runtime.windows.open_devtools(id).map_err(|_| {
+        NcError::new(ErrorKind::NotFound {
+            kind: "window".to_owned(),
+            id: id.to_string(),
+        })
+        .operation("dispatch::window_devtools")
+    })?;
+    serde_json::to_value(json!({ "opened": opened })).map_err(|e| json_error(&e))
+}
+
+/// `ncui.window.devtools.close` -- close a window's platform web inspector.
+pub(crate) fn invoke_window_devtools_close(runtime: &mut Runtime, params: &Value) -> Result<Value> {
+    let id = devtools_window(runtime, params)?;
+    let closed = runtime.windows.close_devtools(id).map_err(|_| {
+        NcError::new(ErrorKind::NotFound {
+            kind: "window".to_owned(),
+            id: id.to_string(),
+        })
+        .operation("dispatch::window_devtools")
+    })?;
+    serde_json::to_value(json!({ "closed": closed })).map_err(|e| json_error(&e))
+}
+
+/// `ncui.window.devtools.state` -- whether a window's platform web inspector is open.
+///
+/// `"unknown"` is an answer, not a gap: a platform that opens the inspector without a
+/// state query (wry's Windows backend) is reported as unknown rather than as closed.
+pub(crate) fn invoke_window_devtools_state(runtime: &mut Runtime, params: &Value) -> Result<Value> {
+    let id = devtools_window(runtime, params)?;
+    let state = runtime.windows.is_devtools_open(id).map_err(|_| {
+        NcError::new(ErrorKind::NotFound {
+            kind: "window".to_owned(),
+            id: id.to_string(),
+        })
+        .operation("dispatch::window_devtools")
+    })?;
+    let state = state.map_or("unknown", |open| if open { "open" } else { "closed" });
+    serde_json::to_value(json!({ "state": state })).map_err(|e| json_error(&e))
+}
+
 /// The budget a caller gave a call, when it gave one.
 ///
 /// Bounded at both ends because it reaches a comparison against a clock: a budget of zero and a

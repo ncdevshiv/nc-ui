@@ -1,6 +1,6 @@
 # ADR-017: Child webviews and CDP-equivalent protocol
 
-**Status:** Proposed  
+**Status:** Accepted — Phase 1 implemented (`ncui.window.create.child`), Phase 2 implemented (the CDP WebSocket transport, 2026-11-22), Phase 3 open  
 **Date:** 2026-11-20  
 **Context:** ZCode's Browser tool requires child webviews and a DevTools Protocol (CDP) equivalent. NC-UI currently has neither. This ADR evaluates the design options, their trade-offs, and recommends an approach.
 
@@ -119,12 +119,12 @@ ZCode's Browser tool needs two capabilities that NC-UI does not have:
 
 This gives ZCode's Browser tool a working native port immediately — the browser view is a real NC-UI window with its own URL bar and content, even if it's not visually embedded.
 
-### Phase 2: CDP bridge via WebSocket (Option D) — medium-term
+### Phase 2: CDP bridge via WebSocket (Option D) — implemented 2026-11-22
 
-1. Add a `cdp` feature to `ncui-webview-wry` that launches a WebView2 with `--remote-debugging-port=0`.
-2. Connect to the CDP WebSocket from the host.
-3. Expose a `ncui.cdp.send` method that forwards CDP commands to the child webview.
-4. Gate behind `Capability::Window` and a new `Capability::Cdp`.
+1. The engine is always created with `--remote-debugging-port=0` on Windows (an ephemeral port, so two instances never collide).
+2. `ncui-webview-wry/src/cdp.rs` reads the port and bearer path from the user-data directory's `DevToolsActivePort` file and speaks the WebSocket handshake and one framed exchange over a loopback `TcpStream` — no new dependency.
+3. `ncui.cdp.send` (requiring `Capability::Cdp`) carries the command through the window's backend to the endpoint and returns the endpoint's `result`; the page-side `__cdpSend` relay remains for pages that want to observe the traffic.
+4. The engine-side call is a `WebViewBackend` method that a host without the transport refuses by name.
 
 This gives ZCode the CDP protocol it expects, with no `unsafe` code and no policy exception.
 

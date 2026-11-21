@@ -41,6 +41,10 @@ impl HostFactory for AlwaysReady {
 struct AlwaysAlive;
 
 impl ncui_webview::WebViewBackend for AlwaysAlive {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
     fn last_error(&self) -> Option<String> {
         None
     }
@@ -72,6 +76,21 @@ impl ncui_webview::WebViewBackend for AlwaysAlive {
     }
     fn set_window_shape(&self, _shape: &ncui_webview::WindowShape) -> bool {
         true
+    }
+    fn set_zoom(&self, factor: f64) -> bool {
+        (0.25..=5.0).contains(&factor)
+    }
+    fn open_devtools(&self) -> bool {
+        true
+    }
+    fn close_devtools(&self) -> bool {
+        true
+    }
+    fn is_devtools_open(&self) -> Option<bool> {
+        Some(false)
+    }
+    fn cdp_send(&self, _command: &serde_json::Value) -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!({ "result": {} }))
     }
     fn drag_window(&self) -> bool {
         true
@@ -163,13 +182,18 @@ fn params_for(name: &str, created_window: Option<WindowId>) -> Value {
         "ncui.window.create" | "ncui.window.create.child" => {
             json!({ "url": "https://example.com" })
         }
-        "ncui.window.close" | "ncui.window.theme" | "ncui.window.drag.region" => {
-            json!({ "window": named })
-        }
+        "ncui.window.close"
+        | "ncui.window.theme"
+        | "ncui.window.drag.region"
+        | "ncui.window.devtools.open"
+        | "ncui.window.devtools.close"
+        | "ncui.window.devtools.state" => json!({ "window": named }),
+        "ncui.window.zoom" => json!({ "window": named, "factor": 1.25 }),
         "ncui.window.post" => json!({ "window": named, "script": "1;" }),
         "ncui.app.emit" => json!({ "window": named, "event": "test" }),
         "ncui.window.state" => json!({ "window": named, "maximized": true }),
         "ncui.window.shape" => json!({ "window": named, "title": "renamed" }),
+        "ncui.cdp.send" => json!({ "window": named, "method": "Browser.getVersion" }),
         _ => json!({ "deep": true }),
     }
 }

@@ -72,6 +72,10 @@ impl PageEngine {
 }
 
 impl WebViewBackend for PageEngine {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
     fn last_error(&self) -> Option<String> {
         None
     }

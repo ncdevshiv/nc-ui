@@ -40,9 +40,10 @@ use self::cdp_handler::invoke_cdp_send;
 use self::params::{
     consent_token_param, deadline_param, enforce_deadline, grant_param, invoke_app_emit,
     invoke_component_inspect, invoke_consent_mint, invoke_devtools_events, invoke_devtools_profile,
-    invoke_devtools_tree, invoke_logs_query, invoke_state_inspect, invoke_window_drag_region,
-    invoke_window_post, remembered_place, window_change_param, window_id_param, window_rejection,
-    window_request_param, window_shape_param,
+    invoke_devtools_tree, invoke_logs_query, invoke_state_inspect, invoke_window_devtools_close,
+    invoke_window_devtools_open, invoke_window_devtools_state, invoke_window_drag_region,
+    invoke_window_post, invoke_window_zoom, remembered_place, window_change_param, window_id_param,
+    window_rejection, window_request_param, window_shape_param,
 };
 
 /// The methods this runtime implements, with the authority each one needs.
@@ -140,6 +141,30 @@ pub fn method_table() -> Vec<MethodDescription> {
         entry(
             "ncui.window.drag.region",
             "Initiate a window drag from a drag region (titlebar). Called by the page when the user mousedowns on a [data-ncui-drag-region] element.",
+            CapabilitySet::empty().with(Capability::Window),
+            false,
+        ),
+        entry(
+            "ncui.window.zoom",
+            "Scale a window's page by a factor, where 1.0 is the platform default and the accepted range is 0.25 to 5.0.",
+            CapabilitySet::empty().with(Capability::Window),
+            false,
+        ),
+        entry(
+            "ncui.window.devtools.open",
+            "Open a window's platform web inspector.",
+            CapabilitySet::empty().with(Capability::Window),
+            false,
+        ),
+        entry(
+            "ncui.window.devtools.close",
+            "Close a window's platform web inspector.",
+            CapabilitySet::empty().with(Capability::Window),
+            false,
+        ),
+        entry(
+            "ncui.window.devtools.state",
+            "Whether a window's platform web inspector is open: open, closed, or unknown when the platform cannot say.",
             CapabilitySet::empty().with(Capability::Window),
             false,
         ),
@@ -733,6 +758,10 @@ fn invoke(
         }
         "ncui.window.post" => invoke_window_post(runtime, &request.params),
         "ncui.window.drag.region" => invoke_window_drag_region(runtime, &request.params),
+        "ncui.window.zoom" => invoke_window_zoom(runtime, &request.params),
+        "ncui.window.devtools.open" => invoke_window_devtools_open(runtime, &request.params),
+        "ncui.window.devtools.close" => invoke_window_devtools_close(runtime, &request.params),
+        "ncui.window.devtools.state" => invoke_window_devtools_state(runtime, &request.params),
         "ncui.components.list" => {
             let components = runtime.windows.manifests().map_err(window_rejection)?;
             serde_json::to_value(json!({ "components": components })).map_err(|e| json_error(&e))
@@ -1097,14 +1126,24 @@ mod tests {
                         "ncui.window.create" | "ncui.window.create.child" => {
                             json!({ "url": "https://example.com" })
                         }
-                        // Closing a window and asking about its theme take the same parameter and
-                        // nothing else, so they are one arm.
-                        "ncui.window.close" | "ncui.window.theme" | "ncui.window.drag.region" => {
-                            match created_window {
-                                Some(id) => json!({ "window": id.to_string() }),
-                                None => json!({ "window": "00000000000000000000000000000001" }),
+                        // Closing a window, asking about its theme, driving the inspector
+                        // and starting a drag take the same parameter and nothing else, so
+                        // they are one arm.
+                        "ncui.window.close"
+                        | "ncui.window.theme"
+                        | "ncui.window.drag.region"
+                        | "ncui.window.devtools.open"
+                        | "ncui.window.devtools.close"
+                        | "ncui.window.devtools.state" => match created_window {
+                            Some(id) => json!({ "window": id.to_string() }),
+                            None => json!({ "window": "00000000000000000000000000000001" }),
+                        },
+                        "ncui.window.zoom" => match created_window {
+                            Some(id) => json!({ "window": id.to_string(), "factor": 1.25 }),
+                            None => {
+                                json!({ "window": "00000000000000000000000000000001", "factor": 1.25 })
                             }
-                        }
+                        },
                         "ncui.window.post" => match created_window {
                             Some(id) => json!({ "window": id.to_string(), "script": "1;" }),
                             None => {
@@ -1504,6 +1543,25 @@ mod tests {
                             .to_string(),
                         "maximized": true,
                     }),
+                    "ncui.window.zoom" => json!({
+                        "window": created_window
+                            .expect("create is listed before zoom")
+                            .to_string(),
+                        "factor": 1.25,
+                    }),
+                    "ncui.window.devtools.open"
+                    | "ncui.window.devtools.close"
+                    | "ncui.window.devtools.state" => json!({
+                        "window": created_window
+                            .expect("create is listed before devtools")
+                            .to_string(),
+                    }),
+                    "ncui.cdp.send" => json!({
+                        "window": created_window
+                            .expect("create is listed before cdp")
+                            .to_string(),
+                        "method": "Browser.getVersion",
+                    }),
                     "ncui.window.shape" => json!({
                         "window": created_window
                             .expect("create is listed before shape")
@@ -1671,6 +1729,32 @@ mod tests {
     struct AlwaysAlive;
 
     impl ncui_webview::WebViewBackend for AlwaysAlive {
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+
+        fn set_zoom(&self, factor: f64) -> bool {
+            // The test's engine accepts any factor in the documented range, which is what
+            // a real host does with it: the platform applies the scale.
+            (0.25..=5.0).contains(&factor)
+        }
+
+        fn open_devtools(&self) -> bool {
+            true
+        }
+
+        fn close_devtools(&self) -> bool {
+            true
+        }
+
+        fn is_devtools_open(&self) -> Option<bool> {
+            Some(false)
+        }
+
+        fn cdp_send(&self, _command: &Value) -> Result<Value, String> {
+            Ok(serde_json::json!({ "result": {} }))
+        }
+
         fn window_theme(&self) -> Option<ncui_webview::Theme> {
             Some(ncui_webview::Theme::Light)
         }

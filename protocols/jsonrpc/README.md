@@ -154,6 +154,10 @@ is the one actually enforced.
 | `ncui.window.close` | `window` | no | Close a window by identity |
 | `ncui.window.state` | `window` | no | How a window is presented, and how to change it: fullscreen, maximised, minimised, shown or hidden, or focused. The answer also reports the platform's frame — decorated, resizable, always on top — as the platform has it. A page is told when its window is resized or moved, through `resized` and `moved` events |
 | `ncui.window.theme` | `window` | no | Whether the platform is drawing its interface light or dark, and a `theme` event when it changes |
+| `ncui.window.zoom` | `window` | no | Scale a window's page by a factor between 0.25 and 5.0, where 1.0 is the platform default |
+| `ncui.window.devtools.open` | `window` | no | Open a window's platform web inspector |
+| `ncui.window.devtools.close` | `window` | no | Close a window's platform web inspector |
+| `ncui.window.devtools.state` | `window` | no | Whether a window's inspector is open: `open`, `closed`, or `unknown` when the platform cannot say |
 | `ncui.window.shape` | `window` | no | Change a window's title, place, size, always-on-top or resizability |
 | `ncui.components.list` | `inspect.runtime` | no | Every component declared by mounted windows' manifests |
 | `ncui.gpu.inspect` | `inspect.gpu` | no | GPU islands, their render modes, the input contract they demonstrate, and the device's health |

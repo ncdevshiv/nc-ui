@@ -6,17 +6,16 @@ use serde_json::{Value, json};
 use super::json_error;
 use crate::Runtime;
 
-/// `ncui.cdp.send` -- hand a CDP command to a window's page relay.
+/// `ncui.cdp.send` -- deliver a CDP command to a window's own `DevTools` endpoint.
 ///
-/// The command is delivered to the target window's page as a
-/// `window.ncui.__cdpSend(command)` call. The bridge defines `__cdpSend` on
-/// every page, so a delivery reported here really ran: the page's relay (an
-/// `ncui.on("ncui:cdp", ...)` listener, or the `window.__ncuiCdpLog` ring)
-/// receives the command and is responsible for the exchange with the debugging
-/// endpoint it holds. The host-side CDP transport itself is ADR-017 Phase 2.
+/// The window's engine was created with remote debugging enabled (ADR-017 Phase 2), and
+/// this asks the engine to carry the command to the endpoint it opened. A page that also
+/// wants to observe the traffic keeps its `ncui.on("ncui:cdp", ...)` relay; the transport
+/// and the relay are independent paths to the same commands.
 ///
-/// A window that is not open, or an engine that refuses the script, is an
-/// error rather than a `sent: true` that nothing received.
+/// A window that is not open, an engine without the transport, or an endpoint that refuses
+/// the command is an error naming what happened, never a `sent: true` that nothing
+/// received.
 pub(crate) fn invoke_cdp_send(runtime: &mut Runtime, params: &Value) -> Result<Value> {
     let window_id = params
         .get("window")
@@ -24,7 +23,7 @@ pub(crate) fn invoke_cdp_send(runtime: &mut Runtime, params: &Value) -> Result<V
         .ok_or_else(|| {
             NcError::new(ErrorKind::Validation {
                 field: "window".to_owned(),
-                reason: "`window` is required: name the window whose page relays the command"
+                reason: "`window` is required: name the window whose page the command targets"
                     .to_owned(),
             })
             .operation("dispatch::cdp_send")
@@ -58,33 +57,25 @@ pub(crate) fn invoke_cdp_send(runtime: &mut Runtime, params: &Value) -> Result<V
         "params": cdp_params,
     });
 
-    let script = format!(
-        "window.ncui && window.ncui.__cdpSend && window.ncui.__cdpSend({});",
-        serde_json::to_string(&cdp_command).map_err(|e| json_error(&e))?
-    );
-
-    let delivered = runtime
+    let answer = runtime
         .windows
-        .post_to_page(parsed_id, &script)
+        .cdp_send(parsed_id, &cdp_command)
         .map_err(|_| {
             NcError::new(ErrorKind::NotFound {
                 kind: "window".to_owned(),
                 id: window_id.to_owned(),
             })
             .operation("dispatch::cdp_send")
+        })?
+        .map_err(|reason| {
+            NcError::new(ErrorKind::Conflict { reason }).operation("dispatch::cdp_send")
         })?;
 
-    if delivered {
-        serde_json::to_value(json!({
-            "sent": true,
-            "method": method,
-            "window": window_id,
-        }))
-        .map_err(|e| json_error(&e))
-    } else {
-        Err(NcError::new(ErrorKind::Conflict {
-            reason: format!("the engine refused the CDP script for window {window_id}"),
-        })
-        .operation("dispatch::cdp_send"))
-    }
+    serde_json::to_value(json!({
+        "sent": true,
+        "method": method,
+        "window": window_id,
+        "result": answer.get("result").cloned().unwrap_or(Value::Null),
+    }))
+    .map_err(|e| json_error(&e))
 }

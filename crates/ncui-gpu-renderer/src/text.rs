@@ -1026,7 +1026,12 @@ mod tests {
         // The join is the shaper's (`rustybuzz`), not the font's: for a font that carries no
         // Arabic glyph-substitution table it falls back to the Unicode joining data, so the test
         // asserts the join on whatever font the machine offers rather than requiring one that
-        // happens to ship the table.
+        // happens to ship the table. The font is still the machine's, because the glyph ids the
+        // assertion compares are the font's.
+        //
+        // A font that has the join data but not the Arabic glyphs (an uncovered script) shapes
+        // everything to the `.notdef` glyph, which is the same id for the isolated letter and the
+        // word — a coverage fact about the machine, not a defect in the shaper, so it skips.
         let Some(font) = system_font() else {
             return;
         };
@@ -1039,6 +1044,11 @@ mod tests {
         };
         let isolated_id = isolated.glyphs[0].glyph_id;
         assert_eq!(isolated.glyphs.len(), 1, "one letter alone is one glyph");
+        if isolated_id == 0 {
+            // `.notdef`: the machine's font does not cover Arabic. Skip rather than assert a
+            // property of a glyph that is not beh at all.
+            return;
+        }
         // Each beh in the word is joined to a neighbour, so none keeps the isolated form.
         assert!(
             joined

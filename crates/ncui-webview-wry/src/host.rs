@@ -25,6 +25,8 @@
 //! thread; the default build (feature off) is a small, honest fallback so the crate still
 //! compiles everywhere, including Linux CI without `webkit2gtk`.
 
+#[cfg(all(feature = "wry-engine", target_os = "macos"))]
+use std::sync::atomic::AtomicI32;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{
     Arc, Mutex,
@@ -32,8 +34,6 @@ use std::sync::{
 };
 #[cfg(feature = "wry-engine")]
 use std::sync::{OnceLock, atomic::AtomicU64};
-#[cfg(all(feature = "wry-engine", target_os = "macos"))]
-use std::sync::atomic::AtomicI32;
 use std::time::Duration;
 
 use ncui_webview::{HostSeam, PageMessage, WebViewBackend};

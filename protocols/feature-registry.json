@@ -28,7 +28,7 @@
         },
         "tracing": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 every request's error is attached to its correlation id, which is the field a log record carries"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 every request's error is attached to its correlation id, which is the field a log record carries"
         },
         "metrics": {
           "verified": true,
@@ -80,7 +80,7 @@
         },
         "tracing": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 every authorization decision produces an AuditEvent carrying the capabilities used"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 every authorization decision produces an AuditEvent carrying the capabilities used"
         },
         "metrics": {
           "verified": true,
@@ -135,7 +135,7 @@
         },
         "metrics": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 a version mismatch surfaces as a capability_denied error carrying the failed correlation id"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 a version mismatch surfaces as a capability_denied error carrying the failed correlation id"
         },
         "documentation": {
           "verified": true,
@@ -233,7 +233,7 @@
         },
         "tracing": {
           "verified": true,
-          "evidence": "every frame carries a correlation id, which the runtime attaches to its audit event (crates/ncui-runtime/src/dispatch.rs)"
+          "evidence": "every frame carries a correlation id, which the runtime attaches to its audit event (crates/ncui-runtime/src/dispatch/mod.rs)"
         },
         "metrics": {
           "verified": true,
@@ -289,7 +289,7 @@
         },
         "metrics": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 in-flight depth is reported by ncui.ipc.inspect and the method table"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 in-flight depth is reported by ncui.ipc.inspect and the method table"
         },
         "documentation": {
           "verified": true,
@@ -388,11 +388,11 @@
         },
         "tracing": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 ncui.feature.status reports which revision a subscriber last observed"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 ncui.feature.status reports which revision a subscriber last observed"
         },
         "metrics": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 store revision is reported through ncui.state.inspect"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 store revision is reported through ncui.state.inspect"
         },
         "documentation": {
           "verified": true,
@@ -494,7 +494,7 @@
         },
         "metrics": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 ncui.scheduler.inspect reports ready depth against capacity"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 ncui.scheduler.inspect reports ready depth against capacity"
         },
         "documentation": {
           "verified": true,
@@ -545,7 +545,7 @@
         },
         "metrics": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 ncui.scheduler.inspect reports the ready queue"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 ncui.scheduler.inspect reports the ready queue"
         },
         "documentation": {
           "verified": true,
@@ -593,7 +593,7 @@
         },
         "tracing": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 every dispatched request produces an AuditEvent, including refusals"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 every dispatched request produces an AuditEvent, including refusals"
         },
         "metrics": {
           "verified": true,
@@ -648,7 +648,7 @@
         },
         "metrics": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 a failed authentication surfaces as a capability_denied error on the response"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 a failed authentication surfaces as a capability_denied error on the response"
         },
         "documentation": {
           "verified": true,
@@ -735,7 +735,7 @@
         },
         "integration_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 three calls against a burst of two, the third refused"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 three calls against a burst of two, the third refused"
         },
         "failure_tests": {
           "verified": true,
@@ -747,7 +747,7 @@
         },
         "tracing": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 a rate-limited request still produces an audit event"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 a rate-limited request still produces an audit event"
         },
         "metrics": {
           "verified": true,
@@ -759,7 +759,7 @@
         },
         "security_review": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 rate limiting runs after authentication"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 rate limiting runs after authentication"
         },
         "api_review": {
           "verified": true,
@@ -811,7 +811,7 @@
         },
         "security_review": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 notifications are audited even though they return no response"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 notifications are audited even though they return no response"
         },
         "api_review": {
           "verified": true,
@@ -941,7 +941,7 @@
         },
         "integration_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 ncui.logs.query is reached through the authorized pipeline"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 ncui.logs.query is reached through the authorized pipeline"
         },
         "failure_tests": {
           "verified": true,
@@ -1040,7 +1040,7 @@
       "evidence": {
         "unit_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 the crate's dispatch tests, exercised alongside crates/ncui-runtime/tests/agent_surface.rs"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 the crate's dispatch tests, exercised alongside crates/ncui-runtime/tests/agent_surface.rs"
         },
         "integration_tests": {
           "verified": true,
@@ -1048,7 +1048,7 @@
         },
         "failure_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 an unknown method is NotFound; an excessive limit is refused, not clamped; and a request whose `params` is a positional list is refused with the field named rather than read as a request that named no parameters (a_request_whose_params_are_not_an_object_is_refused)"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 an unknown method is NotFound; an excessive limit is refused, not clamped; and a request whose `params` is a positional list is refused with the field named rather than read as a request that named no parameters (a_request_whose_params_are_not_an_object_is_refused)"
         },
         "benchmarks": {
           "verified": false,
@@ -1056,11 +1056,11 @@
         },
         "tracing": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 the failing method is prefixed onto the error operation"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 the failing method is prefixed onto the error operation"
         },
         "metrics": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 ncui.metrics.query and ncui.logs.query are reachable through the surface"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 ncui.metrics.query and ncui.logs.query are reachable through the surface"
         },
         "documentation": {
           "verified": true,
@@ -1068,7 +1068,7 @@
         },
         "security_review": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 the pipeline order is a documented security property, and a notification is audited rather than bypassing it"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 the pipeline order is a documented security property, and a notification is audited rather than bypassing it"
         },
         "api_review": {
           "verified": true,
@@ -1096,7 +1096,7 @@
         },
         "integration_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 reachable through ncui.describe over the pipeline"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 reachable through ncui.describe over the pipeline"
         },
         "failure_tests": {
           "verified": true,
@@ -1367,11 +1367,11 @@
         },
         "tracing": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs - an adapter call enters the same pipeline, so it inherits the runtime's spans rather than adding any of its own"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs - an adapter call enters the same pipeline, so it inherits the runtime's spans rather than adding any of its own"
         },
         "metrics": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs - the same counters a JSON-RPC call increments; asserted by an_adapter_call_produces_an_audit_event"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs - the same counters a JSON-RPC call increments; asserted by an_adapter_call_produces_an_audit_event"
         },
         "documentation": {
           "verified": true,
@@ -1782,7 +1782,7 @@
         },
         "tracing": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs - the soak drives dispatch itself, so it inherits the runtime's spans; it adds none of its own"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs - the soak drives dispatch itself, so it inherits the runtime's spans; it adds none of its own"
         },
         "metrics": {
           "verified": true,
@@ -2392,7 +2392,7 @@
         },
         "failure_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/tests/window_actions.rs - a_page_without_the_capability_is_refused_before_the_registry_is_reached, a_page_cannot_open_a_window_at_a_url_the_policy_refuses, a_page_cannot_widen_the_grant_of_the_window_it_opens and closing_a_window_closes_the_callers_window_whatever_the_page_names; crates/ncui-runtime/src/dispatch.rs \u2014 a place given as one coordinate is refused rather than half-applied, and a coordinate outside any display a window could be on is refused with the bound that produced it; crates/ncui-webview/src/request.rs \u2014 a floor below the minimum, a floor above the window's own size, and a floor naming one dimension and not the other are each refused with the field that produced it"
+          "evidence": "crates/ncui-runtime/tests/window_actions.rs - a_page_without_the_capability_is_refused_before_the_registry_is_reached, a_page_cannot_open_a_window_at_a_url_the_policy_refuses, a_page_cannot_widen_the_grant_of_the_window_it_opens and closing_a_window_closes_the_callers_window_whatever_the_page_names; crates/ncui-runtime/src/dispatch/mod.rs \u2014 a place given as one coordinate is refused rather than half-applied, and a coordinate outside any display a window could be on is refused with the bound that produced it; crates/ncui-webview/src/request.rs \u2014 a floor below the minimum, a floor above the window's own size, and a floor naming one dimension and not the other are each refused with the field that produced it"
         },
         "benchmarks": {
           "verified": true,
@@ -2400,11 +2400,11 @@
         },
         "tracing": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs - every window opened is traced with its id and url, and every window closed with its id"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs - every window opened is traced with its id and url, and every window closed with its id"
         },
         "metrics": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs - window.created and window.closed are counted, and a_page_with_the_capability_opens_a_window_at_an_allowed_url asserts the count"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs - window.created and window.closed are counted, and a_page_with_the_capability_opens_a_window_at_an_allowed_url asserts the count"
         },
         "documentation": {
           "verified": true,
@@ -2975,11 +2975,11 @@
         },
         "tracing": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/window.rs \u2014 a places file that cannot be parsed is warned about by path with the reason, and a file that cannot be written is warned about by path; crates/ncui-runtime/src/dispatch.rs \u2014 opening a window logs the name it was remembered under, so a window that stopped being remembered is visible in the trace"
+          "evidence": "crates/ncui-runtime/src/window.rs \u2014 a places file that cannot be parsed is warned about by path with the reason, and a file that cannot be written is warned about by path; crates/ncui-runtime/src/dispatch/mod.rs \u2014 opening a window logs the name it was remembered under, so a window that stopped being remembered is visible in the trace"
         },
         "metrics": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 window.remembered counts every window opened under a name, so an application whose named windows stopped being remembered shows as a count that stopped rising"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 window.remembered counts every window opened under a name, so an application whose named windows stopped being remembered shows as a count that stopped rising"
         },
         "documentation": {
           "verified": true,
@@ -2987,7 +2987,7 @@
         },
         "security_review": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/window.rs \u2014 a place is read as input: a geometry no window could have is never written down, a damaged file is treated as no memory, and the file is written under the application's own state directory; crates/ncui-runtime/src/dispatch.rs \u2014 the name is bounded at 128 bytes and may not be empty or carry a control character, so it can be neither a path nor a line break in the file a person reads, and the remembered place goes through the same WindowRequest builders the registry validates every other window with"
+          "evidence": "crates/ncui-runtime/src/window.rs \u2014 a place is read as input: a geometry no window could have is never written down, a damaged file is treated as no memory, and the file is written under the application's own state directory; crates/ncui-runtime/src/dispatch/mod.rs \u2014 the name is bounded at 128 bytes and may not be empty or carry a control character, so it can be neither a path nor a line break in the file a person reads, and the remembered place goes through the same WindowRequest builders the registry validates every other window with"
         },
         "api_review": {
           "verified": true,
@@ -3029,11 +3029,11 @@
         },
         "tracing": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 a change that was applied is logged with the window, the field that changed and the state the platform reported afterwards, so a window that stopped going fullscreen is visible rather than silent"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 a change that was applied is logged with the window, the field that changed and the state the platform reported afterwards, so a window that stopped going fullscreen is visible rather than silent"
         },
         "metrics": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 window.state_changes counts every presentation change, so an application whose window stopped being maximised shows as a count that stopped rising"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 window.state_changes counts every presentation change, so an application whose window stopped being maximised shows as a count that stopped rising"
         },
         "documentation": {
           "verified": true,
@@ -3082,11 +3082,11 @@
         },
         "tracing": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 a reshape that was applied is logged with the window, the title it now carries and its new size, so a window that stopped being renamed is visible rather than silent"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 a reshape that was applied is logged with the window, the title it now carries and its new size, so a window that stopped being renamed is visible rather than silent"
         },
         "metrics": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 window.reshapes counts every reshape, so an application whose window stopped changing shape shows as a count that stopped rising"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 window.reshapes counts every reshape, so an application whose window stopped changing shape shows as a count that stopped rising"
         },
         "documentation": {
           "verified": true,
@@ -3223,7 +3223,7 @@
       "evidence": {
         "unit_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 26 unit tests, three of them about the deadline: a_call_that_runs_past_its_deadline_is_answered_as_having_timed_out (a cargo run given a one-millisecond budget is answered `timeout`, and request.timeouts counts it), a_deadline_that_is_not_a_budget_is_refused (zero, a year, a string and a negative number each reach the caller as a validation error naming the field), and a_call_within_its_deadline_is_not_touched"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 26 unit tests, three of them about the deadline: a_call_that_runs_past_its_deadline_is_answered_as_having_timed_out (a cargo run given a one-millisecond budget is answered `timeout`, and request.timeouts counts it), a_deadline_that_is_not_a_budget_is_refused (zero, a year, a string and a negative number each reach the caller as a validation error naming the field), and a_call_within_its_deadline_is_not_touched"
         },
         "integration_tests": {
           "verified": true,
@@ -3231,31 +3231,31 @@
         },
         "failure_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 the two refusal cases above: a call past its budget is not a success, and a budget outside the bounds is refused before the handler runs; the check never rewrites a failure as a timeout, because the failure is the more useful answer"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 the two refusal cases above: a call past its budget is not a success, and a budget outside the bounds is refused before the handler runs; the check never rewrites a failure as a timeout, because the failure is the more useful answer"
         },
         "benchmarks": {
           "verified": true,
-          "evidence": "not performance-sensitive: crates/ncui-runtime/src/dispatch.rs adds one clock reading at the start of a call and one comparison at the end, which is below what the harness resolves. The figure that matters for a call is its own latency, and crates/ncui-bench/benches/latency.rs measures that per method"
+          "evidence": "not performance-sensitive: crates/ncui-runtime/src/dispatch/mod.rs adds one clock reading at the start of a call and one comparison at the end, which is below what the harness resolves. The figure that matters for a call is its own latency, and crates/ncui-bench/benches/latency.rs measures that per method"
         },
         "tracing": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 a call that exceeded its budget is warned about with the method, the budget and the elapsed time, so a call that stopped meeting its deadline is visible rather than inferred from latency"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 a call that exceeded its budget is warned about with the method, the budget and the elapsed time, so a call that stopped meeting its deadline is visible rather than inferred from latency"
         },
         "metrics": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 request.timeouts counts every call that ran past the budget its caller gave it, so a method that has become slower than its callers' budgets shows as a count that rises"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 request.timeouts counts every call that ran past the budget its caller gave it, so a method that has become slower than its callers' budgets shows as a count that rises"
         },
         "documentation": {
           "verified": true,
-          "evidence": "protocols/jsonrpc/README.md \u2014 the Deadlines section states the bounds, what a caller is owed, and that a handler is not interrupted; crates/ncui-runtime/src/dispatch.rs \u2014 deadline_param states why the budget is bounded at both ends"
+          "evidence": "protocols/jsonrpc/README.md \u2014 the Deadlines section states the bounds, what a caller is owed, and that a handler is not interrupted; crates/ncui-runtime/src/dispatch/mod.rs \u2014 deadline_param states why the budget is bounded at both ends"
         },
         "security_review": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 the budget is bounded at both ends so a caller cannot ask for a deadline that outlives the process, a value that is not a whole number of milliseconds is refused rather than coerced, and the check only turns a *success* into a timeout, so a budget cannot be used to conceal a refusal or a defect"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 the budget is bounded at both ends so a caller cannot ask for a deadline that outlives the process, a value that is not a whole number of milliseconds is refused rather than coerced, and the check only turns a *success* into a timeout, so a budget cannot be used to conceal a refusal or a defect"
         },
         "api_review": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 the budget is read from the request's own parameters by deadline_param, so it applies to every method without each handler knowing about it, and the response carries elapsed_ms in the error the pipeline already returns"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 the budget is read from the request's own parameters by deadline_param, so it applies to every method without each handler knowing about it, and the response carries elapsed_ms in the error the pipeline already returns"
         }
       },
       "platforms": {
@@ -3701,11 +3701,11 @@
         },
         "integration_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/tests/application.rs \u2014 34 tests over the whole application, including the_window_reports_the_platforms_theme: it launches a real window and asserts the theme that comes back is one of the two, so the answer is the platform's and not the test's; crates/ncui-runtime/src/dispatch.rs \u2014 the advertised-method and role tests drive `ncui.window.theme` through the pipeline with a window that exists, so the method is exercised as an agent would call it"
+          "evidence": "crates/ncui-runtime/tests/application.rs \u2014 34 tests over the whole application, including the_window_reports_the_platforms_theme: it launches a real window and asserts the theme that comes back is one of the two, so the answer is the platform's and not the test's; crates/ncui-runtime/src/dispatch/mod.rs \u2014 the advertised-method and role tests drive `ncui.window.theme` through the pipeline with a window that exists, so the method is exercised as an agent would call it"
         },
         "failure_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 a window whose engine cannot ask the platform is refused with a conflict rather than answered \"light\", because the second is a claim about the user's machine that nothing checked; crates/ncui-runtime/src/window.rs \u2014 a window that does not exist reports nothing, which is the other `None`, and a backend that cannot ask is the same; crates/ncui-webview-wry/src/host.rs \u2014 a theme this runtime does not know is not mapped to one it does, so an open platform enum cannot make a page follow a setting the user does not have"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 a window whose engine cannot ask the platform is refused with a conflict rather than answered \"light\", because the second is a claim about the user's machine that nothing checked; crates/ncui-runtime/src/window.rs \u2014 a window that does not exist reports nothing, which is the other `None`, and a backend that cannot ask is the same; crates/ncui-webview-wry/src/host.rs \u2014 a theme this runtime does not know is not mapped to one it does, so an open platform enum cannot make a page follow a setting the user does not have"
         },
         "benchmarks": {
           "verified": true,
@@ -3713,11 +3713,11 @@
         },
         "tracing": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 a page that asks which theme the platform is drawing is logged at debug with the window and the answer, so a page that asks repeatedly is visible; the host's own failure to read the theme is what the conflict carries back to the caller"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 a page that asks which theme the platform is drawing is logged at debug with the window and the answer, so a page that asks repeatedly is visible; the host's own failure to read the theme is what the conflict carries back to the caller"
         },
         "metrics": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch.rs \u2014 every page action goes through the dispatch pipeline, which audits it and records per-method timing when profiling is on, so a page asking for the theme is counted and timed like any other method rather than being a path around the pipeline"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 every page action goes through the dispatch pipeline, which audits it and records per-method timing when profiling is on, so a page asking for the theme is counted and timed like any other method rather than being a path around the pipeline"
         },
         "documentation": {
           "verified": true,

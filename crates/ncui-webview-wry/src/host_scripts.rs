@@ -85,10 +85,16 @@ mod tests {
             std::path::PathBuf::from("C:\\data\\doc.pdf"),
         ];
         let script = dropped_files_script(&paths);
-        assert!(script.contains("\"event\":\"drop\""), "missing event: {script}");
+        assert!(
+            script.contains("\"event\":\"drop\""),
+            "missing event: {script}"
+        );
         assert!(script.contains("file.txt"), "missing path: {script}");
         assert!(script.contains("doc.pdf"), "missing path: {script}");
-        assert!(script.contains("__dispatch"), "missing __dispatch: {script}");
+        assert!(
+            script.contains("__dispatch"),
+            "missing __dispatch: {script}"
+        );
     }
 
     #[test]

@@ -24,10 +24,10 @@ use ncui_security::audit::AuditOutcome;
 use ncui_security::authz::Authorizer;
 use serde_json::{Value, json};
 
+use self::cargo::{invoke_benchmark_run, invoke_test_run};
 use crate::Runtime;
 use crate::agent::AgentSession;
 use crate::describe::{MethodDescription, describe};
-use self::cargo::{invoke_benchmark_run, invoke_test_run};
 use crate::health;
 use crate::rpc::{Request, Response};
 
@@ -38,26 +38,11 @@ mod params;
 
 use self::cdp_handler::invoke_cdp_send;
 use self::params::{
-    consent_token_param,
-    deadline_param,
-    enforce_deadline,
-    grant_param,
-    invoke_component_inspect,
-    invoke_consent_mint,
-    invoke_devtools_events,
-    invoke_devtools_profile,
-    invoke_app_emit,
-    invoke_devtools_tree,
-    invoke_logs_query,
-    invoke_state_inspect,
-    invoke_window_drag_region,
-    invoke_window_post,
-    remembered_place,
-    window_change_param,
-    window_id_param,
-    window_rejection,
-    window_request_param,
-    window_shape_param,
+    consent_token_param, deadline_param, enforce_deadline, grant_param, invoke_app_emit,
+    invoke_component_inspect, invoke_consent_mint, invoke_devtools_events, invoke_devtools_profile,
+    invoke_devtools_tree, invoke_logs_query, invoke_state_inspect, invoke_window_drag_region,
+    invoke_window_post, remembered_place, window_change_param, window_id_param, window_rejection,
+    window_request_param, window_shape_param,
 };
 
 /// The methods this runtime implements, with the authority each one needs.
@@ -615,7 +600,8 @@ fn invoke(
                 &ncui_observability::metrics::Labels::new(),
                 1,
             );
-            serde_json::to_value(json!({ "id": id.to_string(), "child": true })).map_err(|e| json_error(&e))
+            serde_json::to_value(json!({ "id": id.to_string(), "child": true }))
+                .map_err(|e| json_error(&e))
         }
         "ncui.window.close" => {
             let id = window_id_param(&request.params)?;
@@ -797,29 +783,17 @@ fn invoke(
         }))
         .map_err(|e| json_error(&e)),
         "ncui.app.emit" => invoke_app_emit(runtime, &request.params),
-        "ncui.devtools.tree" => {
-            invoke_devtools_tree(runtime)
-        }
-        "ncui.devtools.events" => {
-            invoke_devtools_events(runtime, &request.params)
-        }
-        "ncui.devtools.profile" => {
-            invoke_devtools_profile(runtime)
-        }
+        "ncui.devtools.tree" => invoke_devtools_tree(runtime),
+        "ncui.devtools.events" => invoke_devtools_events(runtime, &request.params),
+        "ncui.devtools.profile" => invoke_devtools_profile(runtime),
         "ncui.devtools.profile.reset" => {
             runtime.devtools.reset_profile();
-            serde_json::to_value(json!({ "reset": true }))
-                .map_err(|e| json_error(&e))
+            serde_json::to_value(json!({ "reset": true })).map_err(|e| json_error(&e))
         }
-        "ncui.consent.mint" => {
-            invoke_consent_mint(runtime, session, &request.params)
-        }
-        "ncui.cdp.send" => {
-            invoke_cdp_send(runtime, &request.params)
-        }
+        "ncui.consent.mint" => invoke_consent_mint(runtime, session, &request.params),
+        "ncui.cdp.send" => invoke_cdp_send(runtime, &request.params),
         "ncui.devtools.summary" => {
-            serde_json::to_value(runtime.devtools.summary())
-                .map_err(|e| json_error(&e))
+            serde_json::to_value(runtime.devtools.summary()).map_err(|e| json_error(&e))
         }
         "ncui.metrics.query" => {
             let series = runtime.metrics.snapshot();
@@ -835,7 +809,6 @@ fn invoke(
         .operation("dispatch::invoke")),
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1121,13 +1094,17 @@ mod tests {
                     params
                 } else {
                     match method.name.as_str() {
-                        "ncui.window.create" | "ncui.window.create.child" => json!({ "url": "https://example.com" }),
+                        "ncui.window.create" | "ncui.window.create.child" => {
+                            json!({ "url": "https://example.com" })
+                        }
                         // Closing a window and asking about its theme take the same parameter and
                         // nothing else, so they are one arm.
-                        "ncui.window.close" | "ncui.window.theme" | "ncui.window.drag.region" => match created_window {
-                            Some(id) => json!({ "window": id.to_string() }),
-                            None => json!({ "window": "00000000000000000000000000000001" }),
-                        },
+                        "ncui.window.close" | "ncui.window.theme" | "ncui.window.drag.region" => {
+                            match created_window {
+                                Some(id) => json!({ "window": id.to_string() }),
+                                None => json!({ "window": "00000000000000000000000000000001" }),
+                            }
+                        }
                         "ncui.window.post" => match created_window {
                             Some(id) => json!({ "window": id.to_string(), "script": "1;" }),
                             None => {
@@ -1176,7 +1153,9 @@ mod tests {
                     let unavailable_without_a_host =
                         matches!(
                             method.name.as_str(),
-                            "ncui.window.close" | "ncui.window.list" | "ncui.cdp.send"
+                            "ncui.window.close"
+                                | "ncui.window.list"
+                                | "ncui.cdp.send"
                                 | "ncui.app.emit"
                         ) && response.error.as_ref().map(|e| e.data.ncui_code.as_str())
                             == Some("not_found");
@@ -1488,16 +1467,15 @@ mod tests {
                             )),
                         );
                         object.insert("method".to_owned(), json!("Page.navigate"));
-                        object.insert(
-                            "params".to_owned(),
-                            json!({ "url": "https://example.com" }),
-                        );
+                        object.insert("params".to_owned(), json!({ "url": "https://example.com" }));
                     }
                 }
                 params
             } else {
                 match method.name.as_str() {
-                    "ncui.window.create" | "ncui.window.create.child" => json!({ "url": "https://example.com" }),
+                    "ncui.window.create" | "ncui.window.create.child" => {
+                        json!({ "url": "https://example.com" })
+                    }
                     "ncui.window.post" => json!({
                         "window": created_window
                             .expect("create is listed before post")

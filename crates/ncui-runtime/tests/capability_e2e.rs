@@ -39,7 +39,12 @@ fn session(role: AgentRole) -> AgentSession {
     s
 }
 
-fn call(runtime: &mut Runtime, session: &mut AgentSession, method: &str, params: Value) -> Option<ncui_runtime::rpc::Response> {
+fn call(
+    runtime: &mut Runtime,
+    session: &mut AgentSession,
+    method: &str,
+    params: Value,
+) -> Option<ncui_runtime::rpc::Response> {
     let request = Request::new(json!(1), method, params);
     dispatch(runtime, session, &request, Duration::from_secs(0), None)
 }
@@ -50,11 +55,16 @@ fn app_emit_refuses_an_unknown_window() {
     // an `emitted` success the page never received.
     let mut rt = runtime();
     let mut admin = session(AgentRole::Administrator);
-    let response = call(&mut rt, &mut admin, "ncui.app.emit", json!({
-        "window": "00000000000000000000000000000001",
-        "event": "zcode:deep-link",
-        "payload": { "url": "zcode://open/file.txt" }
-    }));
+    let response = call(
+        &mut rt,
+        &mut admin,
+        "ncui.app.emit",
+        json!({
+            "window": "00000000000000000000000000000001",
+            "event": "zcode:deep-link",
+            "payload": { "url": "zcode://open/file.txt" }
+        }),
+    );
     let result = response.expect("response");
     assert!(
         result.error.is_some(),
@@ -69,10 +79,15 @@ fn app_emit_broadcasts_when_no_window_is_named() {
     // none open, the event reaches nobody and the answer says so.
     let mut rt = runtime();
     let mut admin = session(AgentRole::Administrator);
-    let response = call(&mut rt, &mut admin, "ncui.app.emit", json!({
-        "event": "zcode:updater",
-        "payload": { "version": "1.2.3" }
-    }));
+    let response = call(
+        &mut rt,
+        &mut admin,
+        "ncui.app.emit",
+        json!({
+            "event": "zcode:updater",
+            "payload": { "version": "1.2.3" }
+        }),
+    );
     let result = response.expect("response");
     assert!(
         result.error.is_none(),
@@ -89,14 +104,26 @@ fn consent_mint_produces_a_valid_token() {
     // the method, and the capability.
     let mut rt = runtime();
     let mut admin = session(AgentRole::Administrator);
-    let response = call(&mut rt, &mut admin, "ncui.consent.mint", json!({
-        "method": "fs.write_text",
-        "capability": "filesystem.write"
-    }));
+    let response = call(
+        &mut rt,
+        &mut admin,
+        "ncui.consent.mint",
+        json!({
+            "method": "fs.write_text",
+            "capability": "filesystem.write"
+        }),
+    );
     let result = response.expect("response");
-    assert!(result.error.is_none(), "consent.mint should succeed: {:?}", result.error);
+    assert!(
+        result.error.is_none(),
+        "consent.mint should succeed: {:?}",
+        result.error
+    );
     let payload = result.result.expect("payload");
-    assert!(payload.get("consent_token").is_some(), "must return a consent_token");
+    assert!(
+        payload.get("consent_token").is_some(),
+        "must return a consent_token"
+    );
     assert_eq!(payload["method"], "fs.write_text");
 }
 
@@ -107,13 +134,17 @@ fn consent_token_is_consume_once() {
     let mut admin = session(AgentRole::Administrator);
 
     // Mint a token
-    let mint_response = call(&mut rt, &mut admin, "ncui.consent.mint", json!({
-        "method": "fs.write_text",
-        "capability": "filesystem.write"
-    }));
+    let mint_response = call(
+        &mut rt,
+        &mut admin,
+        "ncui.consent.mint",
+        json!({
+            "method": "fs.write_text",
+            "capability": "filesystem.write"
+        }),
+    );
     let mint_result = mint_response.expect("response");
-    let token = mint_result.result.expect("payload")["consent_token"]
-        .to_string();
+    let token = mint_result.result.expect("payload")["consent_token"].to_string();
 
     // The token exists in the minted ledger
     assert!(!token.is_empty(), "token must not be empty");
@@ -124,9 +155,14 @@ fn window_create_child_requires_window_capability() {
     // ncui.window.create.child should be refused without Capability::Window.
     let mut rt = runtime();
     let mut observer = session(AgentRole::Observer);
-    let response = call(&mut rt, &mut observer, "ncui.window.create.child", json!({
-        "url": "https://example.com"
-    }));
+    let response = call(
+        &mut rt,
+        &mut observer,
+        "ncui.window.create.child",
+        json!({
+            "url": "https://example.com"
+        }),
+    );
     let result = response.expect("response");
     assert!(
         result.error.is_some(),
@@ -139,16 +175,18 @@ fn cdp_send_requires_cdp_capability() {
     // ncui.cdp.send should be refused without Capability::Cdp.
     let mut rt = runtime();
     let mut observer = session(AgentRole::Observer);
-    let response = call(&mut rt, &mut observer, "ncui.cdp.send", json!({
-        "window": "00000000000000000000000000000001",
-        "method": "Page.navigate",
-        "params": { "url": "https://example.com" }
-    }));
-    let result = response.expect("response");
-    assert!(
-        result.error.is_some(),
-        "observer should be denied cdp.send"
+    let response = call(
+        &mut rt,
+        &mut observer,
+        "ncui.cdp.send",
+        json!({
+            "window": "00000000000000000000000000000001",
+            "method": "Page.navigate",
+            "params": { "url": "https://example.com" }
+        }),
     );
+    let result = response.expect("response");
+    assert!(result.error.is_some(), "observer should be denied cdp.send");
 }
 
 #[test]
@@ -160,18 +198,28 @@ fn cdp_send_refuses_an_unknown_window() {
     let mut admin = session(AgentRole::Administrator);
 
     // Mint a consent token for cdp.send
-    let mint = call(&mut rt, &mut admin, "ncui.consent.mint", json!({
-        "method": "ncui.cdp.send",
-        "capability": "cdp"
-    }));
+    let mint = call(
+        &mut rt,
+        &mut admin,
+        "ncui.consent.mint",
+        json!({
+            "method": "ncui.cdp.send",
+            "capability": "cdp"
+        }),
+    );
     let token = mint.expect("response").result.expect("payload")["consent_token"].clone();
 
-    let response = call(&mut rt, &mut admin, "ncui.cdp.send", json!({
-        "window": "00000000000000000000000000000001",
-        "method": "Page.navigate",
-        "params": { "url": "https://example.com" },
-        "consent_token": token
-    }));
+    let response = call(
+        &mut rt,
+        &mut admin,
+        "ncui.cdp.send",
+        json!({
+            "window": "00000000000000000000000000000001",
+            "method": "Page.navigate",
+            "params": { "url": "https://example.com" },
+            "consent_token": token
+        }),
+    );
     let result = response.expect("response");
     assert!(
         result.error.is_some(),
@@ -188,10 +236,15 @@ fn cdp_send_requires_window_and_method() {
     let mut rt = runtime();
     let mut admin = session(AgentRole::Administrator);
 
-    let mint = call(&mut rt, &mut admin, "ncui.consent.mint", json!({
-        "method": "ncui.cdp.send",
-        "capability": "cdp"
-    }));
+    let mint = call(
+        &mut rt,
+        &mut admin,
+        "ncui.consent.mint",
+        json!({
+            "method": "ncui.cdp.send",
+            "capability": "cdp"
+        }),
+    );
     let token = mint.expect("response").result.expect("payload")["consent_token"].clone();
 
     for params in [
@@ -215,7 +268,11 @@ fn devtools_tree_returns_window_list() {
     let mut admin = session(AgentRole::Administrator);
     let response = call(&mut rt, &mut admin, "ncui.devtools.tree", json!({}));
     let result = response.expect("response");
-    assert!(result.error.is_none(), "devtools.tree should succeed: {:?}", result.error);
+    assert!(
+        result.error.is_none(),
+        "devtools.tree should succeed: {:?}",
+        result.error
+    );
     let payload = result.result.expect("payload");
     assert!(payload.get("windows").is_some(), "must have windows array");
     assert!(payload.get("uptime_ms").is_some(), "must have uptime");
@@ -228,7 +285,11 @@ fn devtools_events_returns_empty_ring_when_no_events() {
     let mut admin = session(AgentRole::Administrator);
     let response = call(&mut rt, &mut admin, "ncui.devtools.events", json!({}));
     let result = response.expect("response");
-    assert!(result.error.is_none(), "devtools.events should succeed: {:?}", result.error);
+    assert!(
+        result.error.is_none(),
+        "devtools.events should succeed: {:?}",
+        result.error
+    );
     let payload = result.result.expect("payload");
     assert!(payload.get("events").is_some(), "must have events array");
 }
@@ -240,7 +301,11 @@ fn devtools_profile_returns_empty_when_not_profiling() {
     let mut admin = session(AgentRole::Administrator);
     let response = call(&mut rt, &mut admin, "ncui.devtools.profile", json!({}));
     let result = response.expect("response");
-    assert!(result.error.is_none(), "devtools.profile should succeed: {:?}", result.error);
+    assert!(
+        result.error.is_none(),
+        "devtools.profile should succeed: {:?}",
+        result.error
+    );
     let payload = result.result.expect("payload");
     assert!(payload.get("methods").is_some(), "must have methods array");
     assert_eq!(payload["total_calls"], 0, "no profiling calls yet");
@@ -253,10 +318,20 @@ fn devtools_summary_reports_subsystem_state() {
     let mut admin = session(AgentRole::Administrator);
     let response = call(&mut rt, &mut admin, "ncui.devtools.summary", json!({}));
     let result = response.expect("response");
-    assert!(result.error.is_none(), "devtools.summary should succeed: {:?}", result.error);
+    assert!(
+        result.error.is_none(),
+        "devtools.summary should succeed: {:?}",
+        result.error
+    );
     let payload = result.result.expect("payload");
-    assert!(payload.get("event_count").is_some(), "must have event_count");
-    assert!(payload.get("event_capacity").is_some(), "must have event_capacity");
+    assert!(
+        payload.get("event_count").is_some(),
+        "must have event_count"
+    );
+    assert!(
+        payload.get("event_capacity").is_some(),
+        "must have event_capacity"
+    );
 }
 
 #[test]
@@ -280,16 +355,18 @@ fn app_emit_is_gated_by_window_capability() {
     // ncui.app.emit should be refused for roles without Capability::Window.
     let mut rt = runtime();
     let mut observer = session(AgentRole::Observer);
-    let response = call(&mut rt, &mut observer, "ncui.app.emit", json!({
-        "window": "00000000000000000000000000000001",
-        "event": "test",
-        "payload": {}
-    }));
-    let result = response.expect("response");
-    assert!(
-        result.error.is_some(),
-        "observer should be denied app.emit"
+    let response = call(
+        &mut rt,
+        &mut observer,
+        "ncui.app.emit",
+        json!({
+            "window": "00000000000000000000000000000001",
+            "event": "test",
+            "payload": {}
+        }),
     );
+    let result = response.expect("response");
+    assert!(result.error.is_some(), "observer should be denied app.emit");
 }
 
 #[test]
@@ -298,10 +375,15 @@ fn consent_mint_is_gated_by_inspect_runtime() {
     // An observer has this capability, so consent.mint should succeed.
     let mut rt = runtime();
     let mut observer = session(AgentRole::Observer);
-    let response = call(&mut rt, &mut observer, "ncui.consent.mint", json!({
-        "method": "fs.write_text",
-        "capability": "filesystem.write"
-    }));
+    let response = call(
+        &mut rt,
+        &mut observer,
+        "ncui.consent.mint",
+        json!({
+            "method": "fs.write_text",
+            "capability": "filesystem.write"
+        }),
+    );
     let result = response.expect("response");
     assert!(
         result.error.is_none(),

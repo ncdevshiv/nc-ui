@@ -400,8 +400,12 @@ fn a_page_hears_its_own_window_resized() {
     let scratch = Scratch::application(MANIFEST, EVENT_PAGE);
     let recorded: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
     let recorder = Arc::clone(&recorded);
-    let mut application =
-        Application::launch_with(scratch.path(), Limits::default(), None, None, move |runtime| {
+    let mut application = Application::launch_with(
+        scratch.path(),
+        Limits::default(),
+        None,
+        None,
+        move |runtime| {
             let _registration = runtime
                 .register_page_command(
                     "record",
@@ -423,8 +427,9 @@ fn a_page_hears_its_own_window_resized() {
                     .operation("test::launch")
                 })?;
             Ok(())
-        })
-        .expect("the application launches");
+        },
+    )
+    .expect("the application launches");
 
     let heard = |want: &str| {
         recorded
@@ -1422,11 +1427,14 @@ fn a_window_with_nothing_remembered_uses_the_manifest() {
     let state = InstanceState::new();
     let state_file = state.path.join("nothing-here.json");
 
-    let mut application =
-        Application::launch_with(scratch.path(), Limits::default(), Some(state_file), None, |_| {
-            Ok(())
-        })
-        .expect("the application launches");
+    let mut application = Application::launch_with(
+        scratch.path(),
+        Limits::default(),
+        Some(state_file),
+        None,
+        |_| Ok(()),
+    )
+    .expect("the application launches");
     let summary = application
         .runtime()
         .windows
@@ -1452,11 +1460,14 @@ fn a_remembered_geometry_no_window_could_have_is_ignored() {
     let state_file = state.path.join("window.json");
     write_geometry(&state_file, 10, 10, 5, 5);
 
-    let mut application =
-        Application::launch_with(scratch.path(), Limits::default(), Some(state_file), None, |_| {
-            Ok(())
-        })
-        .expect("the application launches");
+    let mut application = Application::launch_with(
+        scratch.path(),
+        Limits::default(),
+        Some(state_file),
+        None,
+        |_| Ok(()),
+    )
+    .expect("the application launches");
     let summary = application
         .runtime()
         .windows
@@ -1618,11 +1629,14 @@ fn a_remembered_place_on_a_display_that_is_gone_lands_on_one_that_exists() {
     let state_file = state.path.join("window.json");
     write_geometry(&state_file, 100_000, 100_000, 640, 480);
 
-    let mut application =
-        Application::launch_with(scratch.path(), Limits::default(), Some(state_file), None, |_| {
-            Ok(())
-        })
-        .expect("the application launches");
+    let mut application = Application::launch_with(
+        scratch.path(),
+        Limits::default(),
+        Some(state_file),
+        None,
+        |_| Ok(()),
+    )
+    .expect("the application launches");
     let summary = application
         .runtime()
         .windows
@@ -1836,11 +1850,14 @@ fn a_floor_added_to_a_manifest_does_not_refuse_a_window_the_user_shrank() {
     let state_file = state.path.join("window.json");
     write_geometry(&state_file, 40, 50, 250, 220);
 
-    let mut application =
-        Application::launch_with(scratch.path(), Limits::default(), Some(state_file), None, |_| {
-            Ok(())
-        })
-        .expect("the application launches rather than refusing");
+    let mut application = Application::launch_with(
+        scratch.path(),
+        Limits::default(),
+        Some(state_file),
+        None,
+        |_| Ok(()),
+    )
+    .expect("the application launches rather than refusing");
     let summary = application
         .runtime()
         .windows

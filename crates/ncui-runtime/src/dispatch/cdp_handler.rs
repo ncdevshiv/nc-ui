@@ -3,8 +3,8 @@
 use ncui_core::{ErrorKind, NcError, Result};
 use serde_json::{Value, json};
 
-use crate::Runtime;
 use super::json_error;
+use crate::Runtime;
 
 /// `ncui.cdp.send` -- hand a CDP command to a window's page relay.
 ///

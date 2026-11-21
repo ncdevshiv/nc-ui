@@ -191,7 +191,10 @@ impl DevTools {
         summary: impl Into<String>,
         data: Option<serde_json::Value>,
     ) {
-        let mut ring = self.events.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut ring = self
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if ring.len() >= self.event_capacity {
             ring.remove(0);
         }
@@ -210,7 +213,10 @@ impl DevTools {
     /// Returns up to `limit` events, newest first. If `filter_kind` is `Some`, only
     /// events whose `kind` field matches are returned.
     pub fn events(&self, filter_kind: Option<&str>, limit: usize) -> Vec<DevEvent> {
-        let ring = self.events.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ring = self
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         ring.iter()
             .rev()
             .filter(|e| filter_kind.is_none_or(|k| e.kind == k))
@@ -223,10 +229,18 @@ impl DevTools {
     ///
     /// Called by the dispatch pipeline when `profiling_active` is true.
     pub fn record_profile(&self, method: &str, elapsed: Duration) {
-        let mut map = self.profile.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let acc = map.entry(method.to_owned()).or_insert_with(ProfileAccumulator::new);
+        let mut map = self
+            .profile
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let acc = map
+            .entry(method.to_owned())
+            .or_insert_with(ProfileAccumulator::new);
         acc.record(elapsed.as_nanos() as u64);
-        let mut calls = self.profile_calls.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut calls = self
+            .profile_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *calls += 1;
     }
 
@@ -234,7 +248,10 @@ impl DevTools {
     ///
     /// Each entry has p50/p90/p95/p99/max in nanoseconds and the total call count.
     pub fn profile(&self) -> Vec<ProfileEntry> {
-        let map = self.profile.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let map = self
+            .profile
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         map.iter()
             .map(|(method, acc)| acc.to_entry(method))
             .collect()
@@ -242,24 +259,42 @@ impl DevTools {
 
     /// Returns the total number of profiling samples recorded.
     pub fn profile_call_count(&self) -> u64 {
-        *self.profile_calls.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        *self
+            .profile_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Clears all profiling data.
     ///
     /// This is the handler for `ncui.devtools.profile.reset`.
     pub fn reset_profile(&self) {
-        let mut map = self.profile.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut map = self
+            .profile
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         map.clear();
-        let mut calls = self.profile_calls.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut calls = self
+            .profile_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *calls = 0;
     }
 
     /// Returns a summary of the devtools subsystem's state.
     pub fn summary(&self) -> serde_json::Value {
-        let ring = self.events.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let map = self.profile.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let calls = self.profile_calls.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ring = self
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let map = self
+            .profile
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let calls = self
+            .profile_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         serde_json::json!({
             "event_count": ring.len(),
             "event_capacity": self.event_capacity,

@@ -168,12 +168,12 @@ impl Application {
             })?
         } else {
             AssetServer::start_with(&assets, routes).map_err(|error| {
-            NcError::new(ErrorKind::Validation {
-                field: "assets".to_owned(),
-                reason: format!("the application's assets cannot be served: {error}"),
-            })
-            .operation("application::launch")
-        })?
+                NcError::new(ErrorKind::Validation {
+                    field: "assets".to_owned(),
+                    reason: format!("the application's assets cannot be served: {error}"),
+                })
+                .operation("application::launch")
+            })?
         };
 
         // The entry must be a file that exists. A window opened at a 404 is not an

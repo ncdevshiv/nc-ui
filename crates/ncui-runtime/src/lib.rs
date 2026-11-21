@@ -69,8 +69,8 @@ pub mod window;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use ncui_core::{Capability, CapabilitySet, CorrelationId, ErrorKind, Limits, NcError, Result};
 use crate::devtools::DevTools;
+use ncui_core::{Capability, CapabilitySet, CorrelationId, ErrorKind, Limits, NcError, Result};
 use ncui_observability::logring::LogRing;
 use ncui_observability::metrics::MetricsRegistry;
 use ncui_scheduler::Scheduler;

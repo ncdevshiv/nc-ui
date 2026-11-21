@@ -122,8 +122,8 @@ fn new_app(directory: &str) -> Result<Value, String> {
     let root = Path::new(directory);
 
     if root.exists() {
-        let entries = std::fs::read_dir(root)
-            .map_err(|e| format!("cannot read {directory}: {e}"))?;
+        let entries =
+            std::fs::read_dir(root).map_err(|e| format!("cannot read {directory}: {e}"))?;
         if entries.count() > 0 {
             return Err(format!("{directory} already exists and is not empty"));
         }
@@ -141,9 +141,9 @@ fn new_app(directory: &str) -> Result<Value, String> {
     std::fs::create_dir_all(&public)
         .map_err(|e| format!("cannot create {directory}/public: {e}"))?;
 
-        let manifest = format!(
-            "{{\n  \"name\": \"{name}\",\n  \"version\": \"1.0.0\",\n  \"entry\": \"index.html\",\n  \"assets\": \"public\",\n  \"window\": {{\"title\": \"{name}\", \"width\": 900, \"height\": 640}},\n  \"capabilities\": [\"read.metrics\", \"window\"]\n}}\n",
-        );
+    let manifest = format!(
+        "{{\n  \"name\": \"{name}\",\n  \"version\": \"1.0.0\",\n  \"entry\": \"index.html\",\n  \"assets\": \"public\",\n  \"window\": {{\"title\": \"{name}\", \"width\": 900, \"height\": 640}},\n  \"capabilities\": [\"read.metrics\", \"window\"]\n}}\n",
+    );
     std::fs::write(root.join("ncui.app.json"), &manifest)
         .map_err(|e| format!("cannot write manifest: {e}"))?;
 
@@ -152,8 +152,7 @@ fn new_app(directory: &str) -> Result<Value, String> {
         .map_err(|e| format!("cannot write index.html: {e}"))?;
 
     let js = "import { invoke, on } from \"@ncui/client\";\n\nwindow.__ncui_state = window.__ncui_state || { count: 0 };\n\nconst metrics = await invoke(\"describe_metrics\");\nconsole.log(\"metrics:\", metrics);\n\non(\"resized\", ({ width, height }) => {\n  console.log(\"resized:\", width, height);\n});\n";
-    std::fs::write(public.join("app.js"), js)
-        .map_err(|e| format!("cannot write app.js: {e}"))?;
+    std::fs::write(public.join("app.js"), js).map_err(|e| format!("cannot write app.js: {e}"))?;
 
     Ok(serde_json::json!({
         "scaffolded": name,
@@ -170,7 +169,12 @@ fn new_app(directory: &str) -> Result<Value, String> {
 /// Without the `wry-host` feature there is no engine to open a window with, and the
 /// command says so rather than serving assets nobody will look at.
 #[cfg(feature = "wry-host")]
-fn run_app(directory: &str, watch: bool, url: Option<&str>, port: Option<u16>) -> Result<Value, String> {
+fn run_app(
+    directory: &str,
+    watch: bool,
+    url: Option<&str>,
+    port: Option<u16>,
+) -> Result<Value, String> {
     use std::time::Duration;
 
     use ncui_runtime::application::Application;
@@ -583,7 +587,12 @@ pub(crate) fn installed(root: Option<&str>) -> Result<(Value, bool), String> {
 /// The manifest is still read, so a user whose application is broken hears about the
 /// manifest rather than about the build. The refusal itself is the build's.
 #[cfg(not(feature = "wry-host"))]
-fn run_app(directory: &str, _watch: bool, _url: Option<&str>, _port: Option<u16>) -> Result<Value, String> {
+fn run_app(
+    directory: &str,
+    _watch: bool,
+    _url: Option<&str>,
+    _port: Option<u16>,
+) -> Result<Value, String> {
     use ncui_app::AppManifest;
 
     let directory_path = std::path::Path::new(directory);

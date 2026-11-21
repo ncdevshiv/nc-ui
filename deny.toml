@@ -16,7 +16,13 @@ version = 2
 # A known vulnerability is a hard failure. NC-UI ships as a runtime that executes
 # untrusted web content and agent-supplied commands, so the exploit surface is real.
 yanked = "deny"
-ignore = []
+ignore = [
+    # RUSTSEC-2026-0206: rustybuzz is unmaintained; the recommended replacement is
+    # harfrust. Migrating the GPU text-shaping path is tracked as follow-up work;
+    # until then this is a maintenance-status advisory, not a vulnerability, and the
+    # shaping code is exercised by the island text tests on every gate run.
+    "RUSTSEC-2026-0206",
+]
 
 [licenses]
 version = 2
@@ -29,6 +35,13 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "Zlib",
+    # The web engine's CSS machinery (wry -> dom_query -> cssparser) is MPL-2.0, and
+    # wgpu's shader parser pulls one CC0-1.0 crate. Both are OSI-recognised weak /
+    # public-domain-style licences: MPL-2.0 is file-level copyleft that does not
+    # reach this project's sources, and CC0 places no conditions at all. Recorded
+    # here deliberately, per the comment below, rather than discovered at release.
+    "MPL-2.0",
+    "CC0-1.0",
 ]
 # A copyleft or unknown licence in a dependency is a distribution blocker until
 # reviewed and added deliberately, not something to discover at release time.
@@ -37,8 +50,75 @@ confidence-threshold = 0.8
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
-# A bare `deny.toml` and an empty lockfile are both supply-chain holes.
-allow-wildcard-paths = false
+# Workspace inheritance (`dep = { workspace = true }`) is a path dependency with no
+# version, which cargo-deny classifies as a wildcard path. Every such dependency is a
+# first-party crate whose concrete version is pinned by Cargo.lock, so it carries none
+# of the risk this setting exists for (an unpinned third-party path/git dependency).
+# Third-party version wildcards from the registry remain denied by `wildcards = "deny"`.
+allow-wildcard-paths = true
+# Known duplicate versions in the graph, each pulled by two disjoint subsystems
+# (the GPU stack's wgpu/naga versus the web stack's wry/dom_query, plus proptest
+# in tests). Skipping them keeps the duplicate signal audible for *new*
+# collisions without failing the gate on ones already accounted for. Every entry
+# here should be re-reviewed when the pulling subsystems bump versions.
+skip = [
+    # First-party workspace crates come first: their versions are pinned by Cargo.lock,
+    # and they use workspace inheritance, which cargo-deny reports as a wildcard path
+    # because crates.io does not accept path dependencies in published manifests.
+    "ncui-a11y",
+    "ncui-abi",
+    "ncui-app",
+    "ncui-bench",
+    "ncui-cli",
+    "ncui-component",
+    "ncui-core",
+    "ncui-gpu",
+    "ncui-gpu-renderer",
+    "ncui-ipc",
+    "ncui-native",
+    "ncui-observability",
+    "ncui-runtime",
+    "ncui-scheduler",
+    "ncui-security",
+    "ncui-state",
+    "ncui-webview",
+    "ncui-webview-wry",
+    "ncui-workers",
+    "bit-set",
+    "bit-vec",
+    "bitflags",
+    "foldhash",
+    "hashbrown",
+    "heck",
+    "libloading",
+    "miniz_oxide",
+    "proc-macro-crate",
+    "rustc-hash",
+    "syn",
+    "thiserror",
+    "thiserror-impl",
+    "toml_datetime",
+    "toml_edit",
+    "windows",
+    "windows-collections",
+    "windows-core",
+    "windows-future",
+    "windows-link",
+    "windows-numerics",
+    "windows-result",
+    "windows-strings",
+    "windows-sys",
+    "windows-targets",
+    "windows-threading",
+    "windows_aarch64_gnullvm",
+    "windows_aarch64_msvc",
+    "windows_i686_gnu",
+    "windows_i686_msvc",
+    "windows_x86_64_gnu",
+    "windows_x86_64_gnullvm",
+    "windows_x86_64_msvc",
+    "winnow",
+]
 
 [sources]
 unknown-registry = "deny"

@@ -742,11 +742,12 @@ impl Windows {
     /// rather than answering a drag that never began.
     pub fn drag_window(&self, window: WindowId) -> Result<bool, WindowRejection> {
         self.with_registry_mut(|registry| {
-            let entry = registry
-                .get_mut(window)
-                .ok_or_else(|| WindowRejection::EngineUnavailable {
-                    reason: Some(format!("window {window} is not open")),
-                })?;
+            let entry =
+                registry
+                    .get_mut(window)
+                    .ok_or_else(|| WindowRejection::EngineUnavailable {
+                        reason: Some(format!("window {window} is not open")),
+                    })?;
             Ok(entry
                 .host
                 .as_ref()

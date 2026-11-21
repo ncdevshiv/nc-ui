@@ -731,10 +731,7 @@ pub(crate) fn json_error(error: &serde_json::Error) -> NcError {
 /// the total window count and the runtime's uptime. This is the data an agent needs
 /// to understand "what is on screen right now" without polling each window individually.
 pub(crate) fn invoke_devtools_tree(runtime: &Runtime) -> Result<Value> {
-    let windows: Vec<ncui_webview::WindowSummary> = runtime
-        .windows
-        .summaries()
-        .unwrap_or_default();
+    let windows: Vec<ncui_webview::WindowSummary> = runtime.windows.summaries().unwrap_or_default();
     let mut window_list: Vec<Value> = Vec::with_capacity(windows.len());
     for w in &windows {
         window_list.push(json!({
@@ -800,19 +797,17 @@ pub(crate) fn invoke_consent_mint(
     _session: &AgentSession,
     params: &Value,
 ) -> Result<Value> {
-    let method = params
-        .get("method")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let method = params.get("method").and_then(Value::as_str).unwrap_or("");
 
     let capability = params
         .get("capability")
         .and_then(Value::as_str)
         .unwrap_or("");
 
-    let capability_set = capability
-        .parse::<Capability>()
-        .map_or_else(|_| CapabilitySet::empty(), |c| CapabilitySet::empty().with(c));
+    let capability_set = capability.parse::<Capability>().map_or_else(
+        |_| CapabilitySet::empty(),
+        |c| CapabilitySet::empty().with(c),
+    );
 
     let correlation = CorrelationId::new();
     let token = runtime.mint_consent(correlation, method, capability_set)?;
@@ -844,16 +839,13 @@ pub(crate) fn invoke_consent_mint(
 /// rather than a silent `emitted: false`: the caller is told the delivery did
 /// not happen.
 pub(crate) fn invoke_app_emit(runtime: &mut Runtime, params: &Value) -> Result<Value> {
-    let event = params
-        .get("event")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            NcError::new(ErrorKind::Validation {
-                field: "event".to_owned(),
-                reason: "`event` must be a non-empty string of at most 256 bytes".to_owned(),
-            })
-            .operation("dispatch::app_emit")
-        })?;
+    let event = params.get("event").and_then(Value::as_str).ok_or_else(|| {
+        NcError::new(ErrorKind::Validation {
+            field: "event".to_owned(),
+            reason: "`event` must be a non-empty string of at most 256 bytes".to_owned(),
+        })
+        .operation("dispatch::app_emit")
+    })?;
     let payload = params.get("payload").cloned().unwrap_or(Value::Null);
     match params.get("window").and_then(Value::as_str) {
         None | Some("all") => {

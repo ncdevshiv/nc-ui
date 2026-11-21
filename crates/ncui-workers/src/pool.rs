@@ -501,11 +501,17 @@ impl WorkerPool {
     /// their task returns. Nothing is aborted: a task that finishes normally still runs to
     /// completion, it is simply no longer waited for.
     pub fn shutdown(&self) -> ShutdownReport {
+        // The flag and the notification are made atomic with respect to `take_task`'s
+        // predicate check by taking the queue lock: notifying without the lock lets a
+        // worker that has checked the flag but not yet entered `wait` miss the wake-up
+        // entirely, and a missed wake-up is a worker that outlives the shutdown deadline.
+        let _queue = self.shared.lock_queue();
         if !self.shared.shutdown.swap(true, Ordering::AcqRel) {
             self.set_all_state(WorkerState::Stopped);
             self.record_gauge(WORKERS_ACTIVE, 0.0);
         }
         self.shared.signal.notify_all();
+        drop(_queue);
 
         let handles = std::mem::take(&mut *self.threads.lock_recovering());
         let deadline =

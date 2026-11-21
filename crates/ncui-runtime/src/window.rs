@@ -1181,7 +1181,7 @@ pub fn hosted_surface(
 /// Runs the window engine's event loop on the main thread, with the application's
 /// work on a worker thread.
 ///
-/// macOS only: AppKit requires the event loop on the main thread and `tao` offers
+/// macOS only: `AppKit` requires the event loop on the main thread and `tao` offers
 /// no any-thread switch there, so the engine loop and the runtime pump exchange
 /// the threads they use on the other platforms (ADR-018). The process ends with
 /// the code the application's work finishes with.

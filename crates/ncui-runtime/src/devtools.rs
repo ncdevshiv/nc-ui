@@ -3,13 +3,13 @@
 //! The devtools surface answers three questions an agent or developer asks about a
 //! running NC-UI application:
 //!
-//! 1. **What is the runtime doing right now?** — [`tree`] returns a live snapshot of
+//! 1. **What is the runtime doing right now?** — [`DevTools::summary`] returns a live snapshot of
 //!    every open window, its lifecycle state, its capability grant, and the components
 //!    mounted in it.
-//! 2. **What just happened?** — [`events`] returns a bounded ring of recent runtime
+//! 2. **What just happened?** — [`DevTools::events`] returns a bounded ring of recent runtime
 //!    events (navigations, capability denials, window state changes, trace spans) with
 //!    correlation IDs, filterable by kind and severity.
-//! 3. **Where did time go?** — [`profile`] returns per-method timing histograms
+//! 3. **Where did time go?** — [`DevTools::profile`] returns per-method timing histograms
 //!    recorded while profiling was active, with p50/p90/p95/p99 and call counts.
 //!
 //! The devtools surface is read-only: it never modifies runtime state. Every method is

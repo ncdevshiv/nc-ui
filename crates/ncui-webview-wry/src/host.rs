@@ -405,7 +405,7 @@ struct EngineWindow {
 
 /// The engine's proxy, installed before the application's work begins.
 ///
-/// On macOS this does not start anything: AppKit requires the event loop on the
+/// On macOS this does not start anything: `AppKit` requires the event loop on the
 /// main thread and `tao` offers no any-thread switch there (ADR-018), so the loop
 /// is started by [`run_on_main_thread`] before the application's work begins and
 /// this only reads the proxy that was installed then.
@@ -461,7 +461,7 @@ fn engine() -> Option<&'static EventLoopProxy<HostEvent>> {
 
 /// Runs the engine's event loop on the main thread, and the application on a worker.
 ///
-/// macOS (AppKit) requires the event loop to be created and run on the main
+/// macOS (`AppKit`) requires the event loop to be created and run on the main
 /// thread, and `tao` offers no any-thread switch there — the host's usual
 /// worker-thread loop panics at startup (ADR-018). So on macOS the two roles the
 /// other platforms use are exchanged: the engine loop owns the main thread, and

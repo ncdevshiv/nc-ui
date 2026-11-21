@@ -101,3 +101,12 @@ Windows legs, which failed in ways a local Windows machine does not reproduce:
 Tested: `cargo test -p ncui-native --lib` on this Windows machine (the notification test raises
 a real toast through PowerShell); the Tauri pins are the versions the committed comparison
 report was measured with.
+
+- **The doc steps surfaced two rustdoc lint classes of their own.** `AppKit` in the
+macOS-only doc comments trips the missing-backticks lint (the engine proxy, the macOS host
+entry point, and the runtime's re-export), and `devtools.rs` linked `[tree]`, `[events]` and
+`[profile]` — names that resolve to nothing. The events and profile links now point at the
+`DevTools` methods that exist, and the snapshot link points at `DevTools::summary`.
+
+Tested: `cargo doc --workspace --no-deps --all-features` with `RUSTDOCFLAGS=-D warnings`
+exits 0 on Windows; the macOS-only doc comments were audited by grep.

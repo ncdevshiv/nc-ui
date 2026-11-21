@@ -505,6 +505,15 @@ impl Font {
         for run in bidi_runs(text) {
             let mut buffer = UnicodeBuffer::new();
             buffer.push_str(&text[run.start..run.end]);
+            // The run's direction is decided here, not left to the shaper's guess: the buffer
+            // has no surrounding context, so the guess reads the first strong character of the
+            // run — which is the run's own direction, but only because `bidi_runs` already split
+            // mixed text apart. Stating it makes the shaping independent of that inference.
+            if run.right_to_left {
+                buffer.set_direction(rustybuzz::Direction::RightToLeft);
+            } else {
+                buffer.set_direction(rustybuzz::Direction::LeftToRight);
+            }
             let shaped = rustybuzz::shape(&face, &[], buffer);
             let infos = shaped.glyph_infos();
             let positions = shaped.glyph_positions();

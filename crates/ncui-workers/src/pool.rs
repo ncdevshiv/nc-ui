@@ -505,13 +505,13 @@ impl WorkerPool {
         // predicate check by taking the queue lock: notifying without the lock lets a
         // worker that has checked the flag but not yet entered `wait` miss the wake-up
         // entirely, and a missed wake-up is a worker that outlives the shutdown deadline.
-        let _queue = self.shared.lock_queue();
+        let queue = self.shared.lock_queue();
         if !self.shared.shutdown.swap(true, Ordering::AcqRel) {
             self.set_all_state(WorkerState::Stopped);
             self.record_gauge(WORKERS_ACTIVE, 0.0);
         }
         self.shared.signal.notify_all();
-        drop(_queue);
+        drop(queue);
 
         let handles = std::mem::take(&mut *self.threads.lock_recovering());
         let deadline =

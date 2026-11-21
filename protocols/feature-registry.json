@@ -3896,59 +3896,6 @@
         "windows": "verified",
         "macos": "unverified"
       }
-    },
-    {
-      "id": "webview.child.embedded",
-      "summary": "Embedded child webview scaffold (ADR-017 Phase 3): the policy crate (requests, validation, registry, handles) exists; the wry engine binding builds the child with build_as_child and syncs geometry with set_bounds. Agent-facing dispatch methods are the next slice.",
-      "status": "partial",
-      "crates": [
-        "ncui-webview-child",
-        "ncui-webview-wry",
-        "ncui-runtime"
-      ],
-      "evidence": {
-        "unit_tests": {
-          "verified": true,
-          "evidence": "crates/ncui-webview-child/src/lib.rs - 9 tests: valid requests create and record children, out-of-area/empty/oversized rectangles and boundless URLs are refused before the engine is asked, set_bounds moves and is recorded, unknown children are refused, closing removes the child, engine failures carry their own code, the headless engine refuses by name"
-        },
-        "integration_tests": {
-          "verified": false,
-          "evidence": "not yet: the agent-facing dispatch methods and a live-window child creation are the next slice"
-        },
-        "failure_tests": {
-          "verified": true,
-          "evidence": "crates/ncui-webview-child/src/lib.rs - refusals carry their own codes (child_request_invalid, child_engine_failed, child_not_supported) and nothing is recorded when creation is refused"
-        },
-        "benchmarks": {
-          "verified": false,
-          "evidence": "not yet: geometry sync cost is a live-window measurement"
-        },
-        "tracing": {
-          "verified": false,
-          "evidence": "not yet: dispatch wiring is the next slice"
-        },
-        "metrics": {
-          "verified": false,
-          "evidence": "not yet: dispatch wiring is the next slice"
-        },
-        "documentation": {
-          "verified": true,
-          "evidence": "docs/adr/ADR-017-phase3-embedded-child-webviews.md - the design, the security model, and what the scaffold does not do yet"
-        },
-        "security_review": {
-          "verified": true,
-          "evidence": "crates/ncui-webview-child/src/lib.rs - creation requires a validated request; the child's navigation and grants remain the engine's seam decision, so a child cannot reach an origin its grant does not allow"
-        },
-        "api_review": {
-          "verified": true,
-          "evidence": "crates/ncui-webview-child/src/lib.rs - ChildWebviewRequest/ChildWebviewHandle/ChildWebviewRegistry with a ChildWebviewEngine seam; the headless engine is the default answer of a build without a display"
-        }
-      },
-      "platforms": {
-        "linux": "unverified",
-        "windows": "unverified",
-        "macos": "unverified"
-      }
     }
   ]
 }

@@ -36,6 +36,9 @@
 
 use std::path::Path;
 
+// The platform tools run on Windows and Linux. macOS keeps a scheme registration in the
+// bundle's `Info.plist`, which no process here writes, so nothing runs a tool there.
+#[cfg(any(windows, target_os = "linux"))]
 use crate::process::{ProcessError, run_command};
 
 /// How long a platform tool may take before it is stopped.
@@ -271,6 +274,7 @@ pub fn registered(scheme: &str) -> Result<Option<String>, ProtocolError> {
 }
 
 /// Maps a process failure onto the protocol error shape.
+#[cfg(any(windows, target_os = "linux"))]
 fn tool_error(tool: &'static str, error: &ProcessError) -> ProtocolError {
     match error {
         ProcessError::NotFound { .. } => ProtocolError::Unavailable { tool },
@@ -282,6 +286,7 @@ fn tool_error(tool: &'static str, error: &ProcessError) -> ProtocolError {
 }
 
 /// The first line of a tool's error output, or of its ordinary output when it said nothing else.
+#[cfg(any(windows, target_os = "linux"))]
 fn first_line(stderr: &str, stdout: &str) -> String {
     stderr
         .lines()

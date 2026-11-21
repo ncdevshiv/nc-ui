@@ -59,3 +59,45 @@ the gate. A platform is not "supported" until its gate has run on it, so
 having been added to the enum, the wire mapping and the scope predicate without the static
 diagnostics table (`CAPABILITY_NAMES`) being extended — `string_mapping_is_total_and_injective`
 failed at 22 names against 23 variants. Fixed by adding `"cdp"`; the invariant test now passes.
+
+- **The first CI run on Linux and macOS surfaced what a Windows-only gate cannot see.** Four
+defect classes, all real, none visible from this Windows machine:
+
+  - `ncui-webview-wry`'s macOS `run_on_main_thread` moved the loop's proxy into the
+  quit-joiner and then handed the same proxy to `run_engine` — a use-after-move (E0382) only
+  a macOS compile sees. The joiner now clones its own handle.
+  - `ncui-native`'s deep-link helpers (`run_command` import, `tool_error`, `first_line`) are
+  used only by the Windows/Linux tool paths, and the macOS notifier arm uses none of the
+  notifier's state; on macOS they were dead code, and `-D warnings` makes dead code a compile
+  error. The helpers are now compiled only where a tool runs, and the macOS arm carries the
+  reason it does not use `self`.
+  - `ncui-gpu-renderer`'s window-surface test imports tao's Windows-only event-loop extension
+  unconditionally, so it did not compile on Linux. It is now declared the Windows composition
+  probe it always was and compiled out elsewhere.
+  - The `rust` and `release` jobs never installed the Linux GTK/WebKit libraries the
+  workspace's default features link, so `glib-sys`'s build script failed before any gate could
+  run. Both jobs now install the same set the `adapters` job does.
+
+Tested: the gate itself is the test — these are the failures it reported, each fixed at the
+site that owns it; the Windows gates (fmt, clippy `-D warnings`, workspace suite) re-run green
+locally, and the Linux/macOS legs are exercised by CI on this push.
+
+- **Three more first-run CI findings, fixed at their owners.** The first run also reached the
+Windows legs, which failed in ways a local Windows machine does not reproduce:
+
+  - `notify::tests::a_real_notification_is_accepted_by_the_platform` failed on the runner with
+  `SQLITE_CONSTRAINT_UNIQUE`: the toast tag was `ncui-{pid}-{count}`, and Windows' notification
+  store persists per user across processes while process identifiers are reused — a tag a
+  previous job raised was still in the store. The tag now carries a wall-clock component
+  (`ncui-{nanos:x}-{count}`), which another run cannot collide with.
+  - The comparison harness's Tauri leg floated both sides (`"2"` in Cargo.toml, `^2.0.0` in
+  package.json), so npm and cargo resolved different minors and the Tauri CLI refused the build
+  ("version mismatched Tauri packages"). Both sides are now pinned to the same minor: the CLI
+  and API at `2.12.4`, the crates at `=2.12.5` / `=2.7.4`.
+  - The release job's reproducibility check reported different digests for two builds —
+  diagnosed and fixed below in this fragment (the check now rebuilds honestly in a cleaned
+  tree).
+
+Tested: `cargo test -p ncui-native --lib` on this Windows machine (the notification test raises
+a real toast through PowerShell); the Tauri pins are the versions the committed comparison
+report was measured with.

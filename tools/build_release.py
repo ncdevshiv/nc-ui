@@ -19,7 +19,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -126,28 +125,34 @@ def reproducible_check(binary: Path) -> bool:
 
     This is the claim that matters for a release, and it is the only honest way to check it:
     asserting "we build reproducibly" is not the same as rebuilding and diffing.
+
+    The rebuild runs in this tree after a full `cargo clean`, rather than in a second target
+    directory. The release profile keeps line tables for profiling (`debug = 1`), and a PDB
+    records the absolute paths of the objects it was built from — so a second target directory
+    changes the PDB's content, the GUID `/Brepro` derives from that content, and therefore the
+    digest, for a reason about *where* the build ran rather than *what* was built. The clean
+    forces every crate to be rebuilt and linked again, so an incremental no-op cannot pass for
+    a match.
     """
     print("checking the build is reproducible ...")
     first = sha256(binary)
-    with tempfile.TemporaryDirectory() as scratch:
-        # A different target directory rules out an incremental no-op being reported as a
-        # match, which would make this check pass for the wrong reason.
-        run(
-            [
-                "cargo",
-                "build",
-                "--release",
-                "-p",
-                "ncui-cli",
-                "--features",
-                "ncui-cli/wry-host",
-            ],
-            env={"SOURCE_DATE_EPOCH": "1704067200", "CARGO_TARGET_DIR": scratch},
-        )
-        rebuilt = Path(scratch) / "release" / binary.name
-        if not rebuilt.exists():
-            raise SystemExit("the rebuild produced no binary")
-        second = sha256(rebuilt)
+    epoch = {"SOURCE_DATE_EPOCH": "1704067200"}
+    run(["cargo", "clean"], env=epoch)
+    run(
+        [
+            "cargo",
+            "build",
+            "--release",
+            "-p",
+            "ncui-cli",
+            "--features",
+            "ncui-cli/wry-host",
+        ],
+        env=epoch,
+    )
+    if not binary.exists():
+        raise SystemExit("the rebuild produced no binary")
+    second = sha256(binary)
     print(f"  first  {first}")
     print(f"  second {second}")
     if first != second:

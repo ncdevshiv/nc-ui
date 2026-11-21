@@ -483,6 +483,8 @@ pub fn run_on_main_thread(app: impl FnOnce() -> i32 + Send + 'static) -> ! {
             let code = app();
             QUIT_CODE.store(code, Ordering::SeqCst);
         });
+    // The joiner needs its own handle: the loop's proxy is consumed by `run_engine`.
+    let quit_proxy = proxy.clone();
     if let Ok(worker) = worker {
         // Detached: it ends the loop when the application finishes, and the main
         // thread is inside the loop by then and cannot wait here.
@@ -490,7 +492,7 @@ pub fn run_on_main_thread(app: impl FnOnce() -> i32 + Send + 'static) -> ! {
             .name("ncui-application-quit".to_owned())
             .spawn(move || {
                 let _ = worker.join();
-                let _ = proxy.send_event(HostEvent::Quit);
+                let _ = quit_proxy.send_event(HostEvent::Quit);
             });
     }
     run_engine(event_loop, proxy)

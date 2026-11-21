@@ -227,6 +227,11 @@ impl Notifier {
 
     /// Raises the notification on macOS.
     #[cfg(target_os = "macos")]
+    #[allow(
+        clippy::unused_self,
+        reason = "`osascript` takes no identity, so this arm uses none of the notifier's \
+                  state; the shared signature keeps `show` platform-agnostic"
+    )]
     fn raise(&self, title: &str, body: &str) -> Result<(), NotificationError> {
         let script = format!(
             "display notification {} with title {}",
@@ -321,8 +326,10 @@ const TAG_PLACEHOLDER: &str = "{TAG}";
 /// Windows keeps an application's notifications in a store keyed by tag, and raising a second
 /// toast under a tag already in that store is a constraint failure rather than a replacement —
 /// which is what the first version of this module did, and what the second real-notification
-/// test caught. A tag that names the process and the count is distinct for every notification
-/// this process raises and cannot collide with another process's.
+/// test caught. The store outlives the process and process identifiers are reused, so a tag of
+/// process-and-count can collide with a toast a previous run left behind — and did, on a runner
+/// whose notification store persisted between jobs. A wall-clock component cannot: another run
+/// cannot have started in the same nanosecond.
 #[cfg(windows)]
 static TOAST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -330,7 +337,11 @@ static TOAST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[cfg(windows)]
 fn next_toast_tag() -> String {
     let sequence = TOAST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    format!("ncui-{}-{sequence}", std::process::id())
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos())
+        .unwrap_or_default();
+    format!("ncui-{nanos:x}-{sequence}")
 }
 
 /// What the Windows script prints once the platform has accepted the notification.

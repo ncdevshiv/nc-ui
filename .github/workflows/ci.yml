@@ -32,6 +32,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The workspace's default feature set pulls the WebView engine, whose Linux backend
+      # links the platform's GTK/WebKit libraries. They are installed rather than the engine
+      # skipped, so this gate compiles the code a user actually runs.
+      - name: Install the webview system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan-dev libwayland-dev libxkbcommon-dev \
+            libwebkit2gtk-4.1-dev
+
       - name: Formatting
         run: cargo fmt --all -- --check
 
@@ -332,6 +343,16 @@ jobs:
         run: rustup toolchain install 1.98.1 --profile minimal
 
       - uses: Swatinem/rust-cache@v2
+
+      # The release build links the WebView engine, whose Linux backend needs the platform's
+      # GTK/WebKit libraries: the artefact being signed is one that has to build here.
+      - name: Install the webview system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan-dev libwayland-dev libxkbcommon-dev \
+            libwebkit2gtk-4.1-dev
 
       - name: Install the SBOM generator
         run: cargo install cargo-cyclonedx

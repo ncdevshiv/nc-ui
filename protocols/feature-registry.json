@@ -1511,7 +1511,7 @@
         },
         "integration_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/tests/page_bridge.rs \u2014 11 tests driving a page's message through the seam, the capability check, the dispatch pipeline and the audit trail"
+          "evidence": "crates/ncui-runtime/tests/page_bridge.rs \u2014 13 tests driving a page's message through the seam, the capability check, the dispatch pipeline and the audit trail"
         },
         "failure_tests": {
           "verified": true,
@@ -3281,7 +3281,7 @@
         },
         "integration_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/tests/application.rs \u2014 34 tests over the whole application, three of them about the icon: an application whose manifest names an icon opens with it on a real window, an icon that cannot be read is refused by name, and an icon in a format the runtime cannot read is refused by name; crates/ncui-webview-wry/src/host.rs \u2014 9 unit tests, one of them a window with an icon coming up on the platform's own engine"
+          "evidence": "crates/ncui-runtime/tests/application.rs \u2014 34 tests over the whole application, three of them about the icon: an application whose manifest names an icon opens with it on a real window, an icon that cannot be read is refused by name, and an icon in a format the runtime cannot read is refused by name; crates/ncui-webview-wry/src/host.rs \u2014 8 unit tests, one of them a window with an icon coming up on the platform's own engine"
         },
         "failure_tests": {
           "verified": true,

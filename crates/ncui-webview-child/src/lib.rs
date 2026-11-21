@@ -493,17 +493,17 @@ pub fn headless_registry() -> ChildWebviewRegistry {
 mod tests {
     use super::*;
 
-    /// A fake engine that records what it was asked, so the policy is tested
-    /// without a display.
+    /// A recording engine: it answers the seam's calls and keeps what it was
+    /// asked, so the policy is tested without a display.
     #[derive(Debug, Default)]
-    struct FakeEngine {
+    struct RecordingEngine {
         created: Mutex<Vec<(WindowId, ChildWebviewRequest)>>,
         moved: Mutex<Vec<(u64, ChildWebviewRequest)>>,
         closed: Mutex<Vec<u64>>,
         fail_creates: Mutex<bool>,
     }
 
-    impl ChildWebviewEngine for FakeEngine {
+    impl ChildWebviewEngine for RecordingEngine {
         fn create_child(
             &self,
             parent: WindowId,
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn a_valid_request_creates_a_child_and_records_it() {
-        let registry = ChildWebviewRegistry::new(Arc::new(FakeEngine::default()));
+        let registry = ChildWebviewRegistry::new(Arc::new(RecordingEngine::default()));
         let parent = parent_id();
         let handle = registry
             .create(parent, &request_at(10, 20, 400, 300))
@@ -588,7 +588,7 @@ mod tests {
 
     #[test]
     fn a_request_outside_the_client_area_is_refused_before_the_engine_is_asked() {
-        let registry = ChildWebviewRegistry::new(Arc::new(FakeEngine::default()));
+        let registry = ChildWebviewRegistry::new(Arc::new(RecordingEngine::default()));
         let error = registry
             .create(parent_id(), &request_at(-1, 0, 400, 300))
             .expect_err("negative origin refused");
@@ -598,7 +598,7 @@ mod tests {
 
     #[test]
     fn an_empty_or_oversized_extent_is_refused() {
-        let registry = ChildWebviewRegistry::new(Arc::new(FakeEngine::default()));
+        let registry = ChildWebviewRegistry::new(Arc::new(RecordingEngine::default()));
         for request in [
             request_at(0, 0, 0, 300),
             request_at(0, 0, 400, 0),
@@ -613,7 +613,7 @@ mod tests {
 
     #[test]
     fn a_boundless_url_is_refused() {
-        let registry = ChildWebviewRegistry::new(Arc::new(FakeEngine::default()));
+        let registry = ChildWebviewRegistry::new(Arc::new(RecordingEngine::default()));
         let mut request = request_at(0, 0, 400, 300);
         request.url = " ".repeat(MAX_CHILD_URL_BYTES + 1);
         let error = registry
@@ -624,7 +624,7 @@ mod tests {
 
     #[test]
     fn set_bounds_moves_a_live_child_and_is_recorded() {
-        let registry = ChildWebviewRegistry::new(Arc::new(FakeEngine::default()));
+        let registry = ChildWebviewRegistry::new(Arc::new(RecordingEngine::default()));
         let handle = registry
             .create(parent_id(), &request_at(0, 0, 400, 300))
             .expect("created");
@@ -638,7 +638,7 @@ mod tests {
 
     #[test]
     fn moving_or_closing_an_unknown_child_is_a_refusal() {
-        let registry = ChildWebviewRegistry::new(Arc::new(FakeEngine::default()));
+        let registry = ChildWebviewRegistry::new(Arc::new(RecordingEngine::default()));
         let unknown = ChildWebviewId::from_raw(999);
         let error = registry
             .set_bounds(unknown, &request_at(0, 0, 400, 300))
@@ -649,7 +649,7 @@ mod tests {
 
     #[test]
     fn closing_a_child_removes_it_from_the_registry() {
-        let registry = ChildWebviewRegistry::new(Arc::new(FakeEngine::default()));
+        let registry = ChildWebviewRegistry::new(Arc::new(RecordingEngine::default()));
         let handle = registry
             .create(parent_id(), &request_at(0, 0, 400, 300))
             .expect("created");
@@ -659,7 +659,7 @@ mod tests {
 
     #[test]
     fn an_engine_failure_is_reported_under_its_own_code() {
-        let engine = FakeEngine::default();
+        let engine = RecordingEngine::default();
         *engine
             .fail_creates
             .lock()

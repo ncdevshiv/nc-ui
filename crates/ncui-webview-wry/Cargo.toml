@@ -31,7 +31,7 @@ ncui-gpu = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-wry = { version = "0.57", optional = true, default-features = false, features = ["os-webview"] }
+wry = { version = "0.57", optional = true, default-features = false, features = ["os-webview", "devtools"] }
 tao = { version = "0.33", optional = true, default-features = false, features = ["rwh_06"] }
 wgpu = { workspace = true, optional = true }
 tray-icon = { workspace = true, optional = true }

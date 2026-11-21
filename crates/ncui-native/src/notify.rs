@@ -334,6 +334,12 @@ const TAG_PLACEHOLDER: &str = "{TAG}";
 static TOAST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// The tag the next toast is raised under.
+///
+/// A random component joins the clock: the toast tag is unique per *user account* per
+/// identity, and the runner's PowerShell identity is shared by every job on the machine —
+/// so a second job that starts inside the same nanosecond as this one's toast would
+/// collide on the clock alone. A random 64-bit component makes that collision one the
+/// platform's constraint check will essentially never see.
 #[cfg(windows)]
 fn next_toast_tag() -> String {
     let sequence = TOAST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -341,7 +347,31 @@ fn next_toast_tag() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_nanos())
         .unwrap_or_default();
-    format!("ncui-{nanos:x}-{sequence}")
+    format!("ncui-{nanos:x}-{sequence:x}-{:x}", random_u64())
+}
+
+/// A random 64-bit value from the platform's own generator, or the clock again when it
+/// cannot be reached.
+#[cfg(windows)]
+fn random_u64() -> u64 {
+    match ncui_security::SecretToken::from_os_entropy(8) {
+        Ok(secret) => {
+            let bytes = secret.expose_secret();
+            let mut value = [0u8; 8];
+            value.copy_from_slice(&bytes[..8]);
+            u64::from_le_bytes(value)
+        }
+        Err(_) => nanos(),
+    }
+}
+
+/// The wall clock in nanoseconds, for the fallback component.
+#[cfg(windows)]
+fn nanos() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos() as u64)
+        .unwrap_or_default()
 }
 
 /// What the Windows script prints once the platform has accepted the notification.

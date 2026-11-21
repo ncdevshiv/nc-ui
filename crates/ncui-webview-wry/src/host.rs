@@ -2014,11 +2014,29 @@ mod bridge_contract {
 // thread by design, because the runtime's own pump thread must not be the one blocking in
 // `run`. Until the host runs its loop on the main thread, these tests cannot pass on macOS,
 // and `docs/known-gaps.md` carries that as the macOS blocker rather than leaving a panic in
-// the suite. Everywhere else they run: Windows and Linux both accept the worker thread.
+// the suite. The tests that open a window also skip on a machine with no display server
+// (`require_display`, below): a headless Linux runner cannot create a GTK window, and the
+// display is a fact about the machine rather than a defect in the host.
 #[cfg(all(test, feature = "wry-engine", not(target_os = "macos")))]
 mod tests {
     use super::*;
     use ncui_webview::{CapabilityGrant, NavigationPolicy, Origin, Scheme};
+
+    /// Whether this machine can open a real window; `false` skips a test that opens one.
+    ///
+    /// Windows ships a window manager on every consumer build, so it is always yes. On
+    /// Linux the display server answers: no `DISPLAY` and no `WAYLAND_DISPLAY` means GTK
+    /// cannot initialise, which is what the runner's log said.
+    fn require_display() -> bool {
+        if cfg!(target_os = "linux")
+            && std::env::var("DISPLAY").is_err()
+            && std::env::var("WAYLAND_DISPLAY").is_err()
+        {
+            eprintln!("skipping: this machine has no display server to open a window on");
+            return false;
+        }
+        true
+    }
 
     fn seam() -> Arc<HostSeam> {
         let policy = NavigationPolicy::new(&[Origin::new(Scheme::Https, "app.example.com", None)]);
@@ -2031,6 +2049,9 @@ mod tests {
 
     #[test]
     fn a_host_comes_up_and_reports_itself_alive() {
+        if !require_display() {
+            return;
+        }
         let host = WindowHost::new();
         assert!(
             host.is_alive(),
@@ -2078,6 +2099,9 @@ mod tests {
 
     #[test]
     fn a_message_the_page_posts_reaches_the_host() {
+        if !require_display() {
+            return;
+        }
         let host = WindowHost::new();
         assert!(
             host.is_alive(),
@@ -2124,6 +2148,9 @@ mod tests {
 
     #[test]
     fn a_window_with_an_icon_comes_up() {
+        if !require_display() {
+            return;
+        }
         // The icon is handed to the platform's own window-creation call — on Windows that sends
         // WM_SETICON to the new window — so a window that comes up has been given one.
         let request = ncui_webview::WindowRequest::new("https://app.example.com").with_icon(
@@ -2146,6 +2173,9 @@ mod tests {
 
     #[test]
     fn a_second_window_opens_in_the_same_process() {
+        if !require_display() {
+            return;
+        }
         // The defect this test exists for: a window per event loop worked exactly once and
         // took the process down on the second. The engine owns one loop for the process,
         // so the second window is a message rather than a second loop.

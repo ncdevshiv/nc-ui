@@ -182,6 +182,10 @@ enum HostEvent {
     },
     /// Stop the engine's event loop, ending the process with the code the
     /// application finished with.
+    ///
+    /// macOS only: there the engine's loop owns the main thread (ADR-018), so it
+    /// is the loop that ends the process with the application's exit code.
+    #[cfg(all(feature = "wry-engine", target_os = "macos"))]
     Quit,
     /// Show the application's tray icon, or remove it, reporting whether the platform agreed.
     #[cfg(feature = "tray-icon")]
@@ -544,6 +548,7 @@ fn run_engine(
                     let _ = entry.window.drag_window();
                 }
             }
+            #[cfg(all(feature = "wry-engine", target_os = "macos"))]
             Event::UserEvent(HostEvent::Quit) => {
                 *control_flow = ControlFlow::ExitWithCode(QUIT_CODE.load(Ordering::SeqCst));
             }

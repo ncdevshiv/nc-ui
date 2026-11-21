@@ -54,3 +54,8 @@ Windows machine — cross-compiling the check for the macOS target stops in
 does not exist here, so even target compilation was **not** verified, and no macOS machine ran
 the gate. A platform is not "supported" until its gate has run on it, so
 `cross_platform.verification.macos` stays `not_implemented` until a macOS run says otherwise.
+
+- **The capability name table includes `cdp`.** The workspace gate caught `Capability::Cdp`
+having been added to the enum, the wire mapping and the scope predicate without the static
+diagnostics table (`CAPABILITY_NAMES`) being extended — `string_mapping_is_total_and_injective`
+failed at 22 names against 23 variants. Fixed by adding `"cdp"`; the invariant test now passes.

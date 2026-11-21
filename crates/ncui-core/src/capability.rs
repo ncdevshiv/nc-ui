@@ -303,6 +303,7 @@ static CAPABILITY_NAMES: &[&str] = &[
     "inspect.gpu",
     "run.tests",
     "run.benchmarks",
+    "cdp",
 ];
 
 impl fmt::Display for Capability {

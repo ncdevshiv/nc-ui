@@ -499,7 +499,10 @@ static CDP_USER_DATA_DIR: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
 fn webview_data_root() -> std::path::PathBuf {
     let name = std::env::current_exe()
         .ok()
-        .and_then(|path| path.file_stem().map(|stem| stem.to_string_lossy().into_owned()))
+        .and_then(|path| {
+            path.file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+        })
         .unwrap_or_else(|| "ncui".to_owned());
     dirs_local().join(name).join("webview")
 }
@@ -518,8 +521,7 @@ fn dirs_local() -> std::path::PathBuf {
     std::env::var_os("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|home| std::path::PathBuf::from(home).join(".local/share"))
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".local/share"))
         })
         .unwrap_or_else(std::env::temp_dir)
 }
@@ -1146,8 +1148,10 @@ fn build_window(
             let _ = ipc_tx.send(request.body().to_owned());
         })
         .with_navigation_handler(navigation_handler)
-        .with_initialization_script(format!("{BRIDGE_SCRIPT}
-{DRAG_REGION_SCRIPT}"));
+        .with_initialization_script(format!(
+            "{BRIDGE_SCRIPT}
+{DRAG_REGION_SCRIPT}"
+        ));
 
     // Remote debugging (ADR-017 Phase 2): an ephemeral port keeps two instances of the
     // same application from colliding, and the chosen port is published by the runtime in
@@ -1565,11 +1569,20 @@ impl WindowHost {
     /// with no directory set, or an engine that never exposed the port, refuses by name
     /// rather than inventing an answer.
     pub fn cdp_send(&self, command: &serde_json::Value) -> Result<serde_json::Value, CdpError> {
-        let dir = self
+        // The window's own directory wins; the process-wide one recorded when the window
+        // was built is the fallback, and it is the one a normally-constructed host has.
+        let owned = self
             .cdp_user_data_dir
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+            .clone();
+        let dir = owned
+            .or_else(|| {
+                CDP_USER_DATA_DIR
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            })
             .ok_or_else(|| CdpError::PortUnavailable {
                 reason: "no user-data directory was set for this window's engine".to_owned(),
             })?;

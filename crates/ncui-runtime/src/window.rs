@@ -1398,7 +1398,7 @@ pub fn hosted_surface(
         .with_registry(hosted_registry(allowed_origins, actions, page_grant))
         .with_factory(factory);
     if let Some(proxy) = ncui_webview_wry::engine_proxy() {
-        windows = windows.with_child_engine(std::sync::Arc::new(
+        windows = windows.with_child_engine(Arc::new(
             ncui_webview_wry::WryChildWebviewEngine::new(proxy),
         ));
     }

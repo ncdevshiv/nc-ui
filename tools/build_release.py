@@ -121,6 +121,70 @@ def build_release_binary() -> Path:
     return binary
 
 
+def pe_facts(data: bytes) -> dict:
+    """Reads the PE facts that explain most Windows digest mismatches.
+
+    The header timestamp and the CodeView record's PDB GUID are what the linker writes
+    last; with `/Brepro` both must be derived from content, so a difference in either
+    names the broken guarantee directly.
+    """
+    facts: dict = {"time_date_stamp": None, "codeview": []}
+    if data[:2] == b"MZ" and len(data) > 0x40:
+        e_lfanew = int.from_bytes(data[0x3C:0x40], "little")
+        if data[e_lfanew:e_lfanew + 4] == b"PE\0\0":
+            facts["time_date_stamp"] = int.from_bytes(
+                data[e_lfanew + 8:e_lfanew + 12], "little"
+            )
+    tail = data[-65536:] if len(data) > 65536 else data
+    at = tail.find(b"RSDS")
+    if at >= 0 and at + 24 <= len(tail):
+        guid = tail[at + 4:at + 20]
+        age = int.from_bytes(tail[at + 20:at + 24], "little")
+        facts["codeview"] = [f"{guid.hex()} age={age}"]
+    return facts
+
+
+def diff_report(a: bytes, b: bytes) -> list:
+    """Describes where two byte strings differ, head first."""
+    n = min(len(a), len(b))
+    diffs = [i for i in range(n) if a[i] != b[i]]
+    lines = [
+        f"  sizes: first={len(a)} second={len(b)}",
+        f"  differing bytes: {len(diffs)}"
+        + ("" if len(a) == len(b) else " (sizes differ)"),
+    ]
+    for i in diffs[:16]:
+        lines.append(f"  offset {i}: first={a[i]:02x} second={b[i]:02x}")
+    if len(diffs) > 16:
+        lines.append(f"  ... and {len(diffs) - 16} more differing bytes")
+    return lines
+
+
+def diagnose_mismatch(binary: Path, first_dir: Path) -> None:
+    """Preserves both builds under `artifacts/repro/` and reports where they differ.
+
+    A digest that mismatches on one machine while passing on another is a fact about the
+    build environment, not about the source. Keeping the paired artefacts turns the next
+    investigation from a guess into a diff.
+    """
+    kept = ARTIFACTS / "repro"
+    second_dir = kept / "second"
+    second_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(binary, second_dir / binary.name)
+    pdb = binary.with_suffix(".pdb")
+    if pdb.exists():
+        shutil.copy2(pdb, second_dir / pdb.name)
+    a = (first_dir / binary.name).read_bytes()
+    b = (second_dir / binary.name).read_bytes()
+    lines = ["the two builds of the same source differ:"]
+    lines += diff_report(a, b)
+    lines.append(f"  first  PE: {pe_facts(a)}")
+    lines.append(f"  second PE: {pe_facts(b)}")
+    report = "\n".join(lines) + "\n"
+    (kept / "diagnosis.txt").write_text(report, encoding="utf-8")
+    print(report, end="")
+
+
 def reproducible_check(binary: Path) -> bool:
     """Builds a second time and compares digests.
 
@@ -141,6 +205,15 @@ def reproducible_check(binary: Path) -> bool:
     """
     print("checking the build is reproducible ...")
     first = sha256(binary)
+    # The first build is set aside so a mismatch can be diffed afterwards: the rebuild
+    # overwrites the binary in place, and a digest alone says that the builds differ
+    # without saying where.
+    first_dir = ARTIFACTS / "repro" / "first"
+    first_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(binary, first_dir / binary.name)
+    first_pdb = binary.with_suffix(".pdb")
+    if first_pdb.exists():
+        shutil.copy2(first_pdb, first_dir / first_pdb.name)
     epoch = {"SOURCE_DATE_EPOCH": "1704067200", "CARGO_INCREMENTAL": "0"}
     run(["cargo", "clean"], env=epoch)
     run(
@@ -162,7 +235,9 @@ def reproducible_check(binary: Path) -> bool:
     print(f"  second {second}")
     if first != second:
         print("  NOT reproducible: identical source produced different binaries")
+        diagnose_mismatch(binary, first_dir)
         return False
+    shutil.rmtree(ARTIFACTS / "repro", ignore_errors=True)
     print("  reproducible: identical source produced an identical binary")
     return True
 

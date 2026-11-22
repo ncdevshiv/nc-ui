@@ -1,7 +1,7 @@
 # The gate answers only questions the machine can ask it
 
-Three CI repairs, each one a case where a check demanded an answer that the machine it ran
-on could not give, and a fourth where the check compared the wrong thing.
+Four CI repairs, each one a case where a check demanded an answer the machine it ran on
+could not give, or compared the wrong thing.
 
 - **The Arabic-join test asserts where the font can answer and skips where it cannot.** The
   test shapes `ب` alone and inside `ببب` and requires the joined word to leave the isolated
@@ -13,18 +13,26 @@ on could not give, and a fourth where the check compared the wrong thing.
   joining in GSUB (Windows's Segoe UI, Linux's DejaVu Sans) and the shaper is required to
   apply it; a font that does not cover Arabic still skips through the `.notdef` guard.
 
-- **The page-bridge e2e skips a displayless Linux.** The test drives a real `wry` window,
-  whose Linux backend needs GTK, and the headless CI runner has no display: the engine's
-  event loop panicked at startup. Like the runtime's real-window tests, the test now returns
-  early on Linux when neither `DISPLAY` nor `WAYLAND_DISPLAY` is set, and runs for real
-  everywhere a display exists.
+- **The page-bridge e2e runs only where the engine can own its loop.** The test drives a
+  real `wry` window. On Linux that needs GTK, and the headless CI runners have no display —
+  the engine's event loop panicked at startup. On macOS the engine's loop owns the main
+  thread (ADR-018) and a test harness cannot hand its own main thread over, so the host
+  factory refused to spawn. Both are facts about the machine, not about the bridge: the
+  test now returns early on a displayless Linux and on macOS, the same terms the runtime's
+  real-window tests already used, and drives the page for real everywhere else.
 
-- **The reproducibility check no longer compares build histories.** The check rebuilds after
-  a `cargo clean` and compares digests, but left incremental compilation enabled — and on CI
-  the first build starts from a cache the workflow restores, so the two builds differed in
-  their cached incremental state rather than in source, and the Windows digest mismatched
-  (`NOT reproducible: identical source produced different binaries`). Both builds now run
-  with `CARGO_INCREMENTAL=0`, so the comparison is source against source.
+- **The reproducibility check builds with incremental compilation off.** The check rebuilds
+  after a `cargo clean` and compares digests; with incremental compilation enabled, a build
+  that starts from a warm cache can digest differently from a clean rebuild of the same
+  source, which would compare build histories rather than source. Both builds now run with
+  `CARGO_INCREMENTAL=0`.
+
+- **A reproducibility mismatch keeps its evidence.** When the two builds still differ, the
+  check now sets the first build aside instead of letting the rebuild overwrite it, and
+  writes both binaries with a PE-level comparison — sizes, header timestamp, CodeView PDB
+  GUID, differing byte offsets — under `artifacts/repro/`, which the release job now
+  uploads even on failure. A mismatch on one machine while another passes is a fact about
+  the build environment; the pair turns the next investigation from a guess into a diff.
 
 Tested: `arabic_letters_take_their_joined_forms` passes with the strict assertion live on
 Windows (`cargo test -p ncui-gpu-renderer --features text-shaping`); the page-bridge e2e

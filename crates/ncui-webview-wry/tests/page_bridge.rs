@@ -114,11 +114,17 @@ fn next_message(host: &dyn WebViewBackend, budget: Duration) -> Option<PageMessa
 #[test]
 fn a_real_page_calls_the_bridge_and_receives_its_own_answers() {
     // The engine runs a real GTK event loop on Linux, which needs a display; the headless
-    // CI runners have none. Everywhere a display exists the page is driven for real.
+    // CI runners have none. On macOS the engine's loop owns the main thread (ADR-018), and
+    // a test harness cannot hand its own main thread to the engine — the same reason the
+    // runtime's real-window tests skip that platform. Everywhere the engine can own its
+    // loop, the page is driven for real.
     if std::env::consts::OS == "linux"
         && std::env::var("DISPLAY").is_err()
         && std::env::var("WAYLAND_DISPLAY").is_err()
     {
+        return;
+    }
+    if std::env::consts::OS == "macos" {
         return;
     }
     let seam = running_seam();

@@ -365,7 +365,11 @@ jobs:
           NCUI_SIGNING_KEY: ${{ secrets.NCUI_SIGNING_KEY }}
         run: python tools/build_release.py
 
+      # Uploaded even when the reproducibility check fails: the job then deposits the two
+      # builds it compared under `artifacts/repro/`, and the pair is the evidence a diff
+      # needs.
       - name: Upload the SBOM
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sbom-${{ matrix.os }}

@@ -213,14 +213,14 @@ pub enum HostEvent {
         /// Where the acceptance is delivered.
         reply: Sender<Result<(), ChildWebviewError>>,
     },
-    /// Run one CDP command against a window's DevTools endpoint.
+    /// Run one CDP command against a window's `DevTools` endpoint.
     CdpRequest {
         /// The window whose endpoint is targeted.
         window: String,
         /// The CDP command (id/method/params).
         command: serde_json::Value,
         /// Where the endpoint's answer, or the failure, is delivered.
-        reply: Sender<std::result::Result<serde_json::Value, String>>,
+        reply: Sender<Result<serde_json::Value, String>>,
     },
     /// Scale one window's page by a zoom factor.
     Zoom {

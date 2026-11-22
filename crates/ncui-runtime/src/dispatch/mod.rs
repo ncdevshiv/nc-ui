@@ -1786,8 +1786,8 @@ mod tests {
 
     /// A test factory whose hosts always come up alive.
     #[derive(Debug, Default)]
-    /// A child-webview engine stub for the dispatch tests: creates children
-    /// successfully so the advertised child methods reach their handlers.
+    /// A child-webview engine for the dispatch tests: it accepts every child
+    /// request so the advertised child methods reach their handlers.
     struct AlwaysReadyChildren;
 
     impl ncui_webview::ChildWebviewCapable for AlwaysReadyChildren {

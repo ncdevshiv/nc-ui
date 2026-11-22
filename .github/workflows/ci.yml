@@ -11,7 +11,13 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+  # No `RUSTFLAGS` here. An environment variable *replaces* the rustflags from
+  # `.cargo/config.toml` rather than merging with them, so a workflow-wide `RUSTFLAGS: -D
+  # warnings` silently dropped the `/Brepro` linker argument on Windows and the
+  # `--build-id=none` argument elsewhere — and the release builds were stamped with the
+  # wall clock again. The gates that want warnings denied pass `-D warnings` themselves
+  # (clippy steps, and documentation through `RUSTDOCFLAGS`), which keeps one source of
+  # truth for the linker flags: the config file the reproducible-build check depends on.
 
 jobs:
   # ---------------------------------------------------------------------------

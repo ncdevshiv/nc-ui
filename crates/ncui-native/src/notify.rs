@@ -41,6 +41,7 @@
 use std::path::Path;
 // Used by the Windows arm only: a toast is given a unique tag per notification, and no other
 // platform here needs one.
+use std::sync::Mutex;
 #[cfg(windows)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -188,6 +189,11 @@ impl Notifier {
     /// Raises the notification on this platform.
     #[cfg(windows)]
     fn raise(&self, title: &str, body: &str) -> Result<(), NotificationError> {
+        // One raise at a time: the store the platform keeps for the identity is one
+        // database, and two raises in flight reach it together.
+        let _raise_lock = TOAST_RAISE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // The script is a constant of this program except for the identity, which is checked to
         // be an identity before it is interpolated: the *payload* arrives on standard input, so
         // no part of what a page wrote is ever parsed as PowerShell.
@@ -198,31 +204,56 @@ impl Notifier {
             tool: "powershell",
             reason: error.to_string(),
         })?;
-        let script = WINDOWS_SCRIPT
-            .replace(APP_ID_PLACEHOLDER, app_id)
-            .replace(TAG_PLACEHOLDER, &next_toast_tag());
-        let outcome = run_command(
-            Path::new("powershell"),
-            "powershell",
-            &[
-                "-NoProfile".to_owned(),
-                "-NonInteractive".to_owned(),
-                "-Command".to_owned(),
-                script,
-            ],
-            Some(&format!("{title}\n{body}")),
-            NOTIFICATION_TIMEOUT,
-            MAX_BODY_BYTES,
-            None,
-        )
-        .map_err(|error| tool_error("powershell", &error))?;
-        if outcome.status != 0 || !outcome.stdout.contains(SHOWN_MARKER) {
-            return Err(NotificationError::Failed {
-                tool: "powershell",
-                reason: first_line(&outcome.stderr, &outcome.stdout),
-            });
+        // A tag from this process can never repeat — each carries the process's own
+        // sequence — yet the platform has been observed to answer a provably-unique tag
+        // with the uniqueness constraint anyway when notifications follow one another
+        // quickly. The tag is regenerated for every attempt, because the question is
+        // sound and only the key was refused; any other failure is returned as the
+        // failure it is.
+        for attempt in 0..3u64 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(250 * attempt));
+            }
+            let script = WINDOWS_SCRIPT
+                .replace(APP_ID_PLACEHOLDER, app_id)
+                .replace(TAG_PLACEHOLDER, &next_toast_tag());
+            let outcome = run_command(
+                Path::new("powershell"),
+                "powershell",
+                &[
+                    "-NoProfile".to_owned(),
+                    "-NonInteractive".to_owned(),
+                    "-Command".to_owned(),
+                    script,
+                ],
+                Some(&format!("{title}\n{body}")),
+                NOTIFICATION_TIMEOUT,
+                MAX_BODY_BYTES,
+                None,
+            );
+            let reason = match outcome {
+                Ok(outcome) if outcome.status != 0 || !outcome.stdout.contains(SHOWN_MARKER) => {
+                    first_line(&outcome.stderr, &outcome.stdout)
+                }
+                Ok(_) => return Ok(()),
+                Err(error) => match tool_error("powershell", &error) {
+                    NotificationError::Failed { reason, .. } => reason,
+                    other => return Err(other),
+                },
+            };
+            if !reason.contains(UNIQUE_CONSTRAINT) {
+                return Err(NotificationError::Failed {
+                    tool: "powershell",
+                    reason,
+                });
+            }
         }
-        Ok(())
+        Err(NotificationError::Failed {
+            tool: "powershell",
+            reason: "the platform refused three distinct tags with the uniqueness \
+                     constraint"
+                .to_owned(),
+        })
     }
 
     /// Raises the notification on macOS.
@@ -332,6 +363,18 @@ const TAG_PLACEHOLDER: &str = "{TAG}";
 /// cannot have started in the same nanosecond.
 #[cfg(windows)]
 static TOAST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Serializes toast raises.
+///
+/// The platform keeps one notification store per identity, and two notifications raised at
+/// the same moment reach the same database; one raise at a time keeps the capability's
+/// callers from racing each other into it.
+#[cfg(windows)]
+static TOAST_RAISE: Mutex<()> = Mutex::new(());
+
+/// The HRESULT the platform's store answers with when it believes a tag is already taken.
+#[cfg(windows)]
+const UNIQUE_CONSTRAINT: &str = "0x87AF0813";
 
 /// The tag the next toast is raised under.
 ///

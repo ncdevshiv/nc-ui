@@ -1,6 +1,6 @@
 # The gate answers only questions the machine can ask it
 
-Four CI repairs, each one a case where a check demanded an answer the machine it ran on
+Five CI repairs, each one a case where a check demanded an answer the machine it ran on
 could not give, or compared the wrong thing.
 
 - **The Arabic-join test asserts where the font can answer and skips where it cannot.** The
@@ -21,18 +21,34 @@ could not give, or compared the wrong thing.
   test now returns early on a displayless Linux and on macOS, the same terms the runtime's
   real-window tests already used, and drives the page for real everywhere else.
 
-- **The reproducibility check builds with incremental compilation off.** The check rebuilds
-  after a `cargo clean` and compares digests; with incremental compilation enabled, a build
-  that starts from a warm cache can digest differently from a clean rebuild of the same
-  source, which would compare build histories rather than source. Both builds now run with
-  `CARGO_INCREMENTAL=0`.
+- **The reproducibility check builds with incremental compilation off, and the workflow no
+  longer overrides the linker flags.** The check rebuilds after a `cargo clean` and
+  compares digests; with incremental compilation enabled, a build that starts from a warm
+  cache can digest differently from a clean rebuild of the same source. Both builds now run
+  with `CARGO_INCREMENTAL=0`. That was still not enough, because the workflow set
+  `RUSTFLAGS: -D warnings` for every job — and an environment variable *replaces* the
+  rustflags from `.cargo/config.toml` rather than merging with them, so the `/Brepro`
+  linker argument never reached the linker on CI. The preserved pair of builds proved it:
+  twenty differing bytes, and a PE header timestamp in each that read as the wall clock of
+  its own build. The environment variable is gone; the clippy and documentation steps that
+  want warnings denied pass `-D warnings` themselves, and the linker flags live only in the
+  config file.
 
-- **A reproducibility mismatch keeps its evidence.** When the two builds still differ, the
-  check now sets the first build aside instead of letting the rebuild overwrite it, and
-  writes both binaries with a PE-level comparison — sizes, header timestamp, CodeView PDB
-  GUID, differing byte offsets — under `artifacts/repro/`, which the release job now
-  uploads even on failure. A mismatch on one machine while another passes is a fact about
-  the build environment; the pair turns the next investigation from a guess into a diff.
+- **A reproducibility mismatch keeps its evidence.** When the two builds differ, the check
+  sets the first build aside instead of letting the rebuild overwrite it, and writes both
+  binaries with a PE-level comparison — sizes, header timestamp, CodeView PDB GUID,
+  differing byte offsets — under `artifacts/repro/`, which the release job now uploads even
+  on failure. It was this pair that named the wall-clock timestamp, and with it the
+  `RUSTFLAGS` override above.
+
+- **A toast raise is serialized, and a refused tag is retried with a fresh one.** The
+  platform keeps one notification store per identity, and the store has been observed to
+  answer a provably-unique tag with the uniqueness constraint (`0x87AF0813`) when
+  notifications follow one another quickly — a tag from this process carries the process's
+  own sequence, so two tags from one process cannot be equal, and the refusal is the
+  platform's transient, not a reuse. Raises now take a process-wide lock, and a uniqueness
+  refusal is retried with a regenerated tag; any other failure is returned as the failure
+  it is.
 
 Tested: `arabic_letters_take_their_joined_forms` passes with the strict assertion live on
 Windows (`cargo test -p ncui-gpu-renderer --features text-shaping`); the page-bridge e2e

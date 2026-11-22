@@ -46,3 +46,21 @@ pub use host::{HostEvent, WindowHost, WryHostFactory, engine_proxy};
 /// macOS only — see [`host::run_on_main_thread`] (ADR-018).
 #[cfg(all(feature = "wry-engine", target_os = "macos"))]
 pub use host::run_on_main_thread;
+
+#[cfg(not(feature = "wry-engine"))]
+#[allow(
+    missing_docs,
+    reason = "the engine types below do not exist without the engine; the crate docs \
+              above link them, and the links must resolve in every configuration"
+)]
+pub mod placeholder_types {
+    /// The window host. Only present in a build with the `wry-engine` feature.
+    #[allow(missing_docs)]
+    pub struct WindowHost;
+    /// The adapter from NC-UI's host port to `wry`.
+    #[allow(missing_docs)]
+    pub struct WryHostFactory;
+}
+
+#[cfg(not(feature = "wry-engine"))]
+pub use placeholder_types::{WindowHost, WryHostFactory};

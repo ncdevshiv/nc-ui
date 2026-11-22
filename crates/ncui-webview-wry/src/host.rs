@@ -213,6 +213,15 @@ pub enum HostEvent {
         /// Where the acceptance is delivered.
         reply: Sender<Result<(), ChildWebviewError>>,
     },
+    /// Run one CDP command against a window's DevTools endpoint.
+    CdpRequest {
+        /// The window whose endpoint is targeted.
+        window: String,
+        /// The CDP command (id/method/params).
+        command: serde_json::Value,
+        /// Where the endpoint's answer, or the failure, is delivered.
+        reply: Sender<std::result::Result<serde_json::Value, String>>,
+    },
     /// Scale one window's page by a zoom factor.
     Zoom {
         /// The window whose page is scaled.
@@ -547,6 +556,17 @@ fn engine() -> Option<&'static EventLoopProxy<HostEvent>> {
 #[cfg(feature = "wry-engine")]
 static CDP_USER_DATA_DIR: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
 
+/// The `DevTools` endpoint the engine published, resolved from the recorded
+/// user-data directory.
+pub(crate) fn cdp_endpoint() -> crate::cdp::DevToolsEndpoint {
+    let dir = CDP_USER_DATA_DIR
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .unwrap_or_else(webview_data_root);
+    crate::cdp::read_devtools_endpoint(&dir).expect("the engine published its DevTools port")
+}
+
 /// Where this application's `WebView2` data lives: under the local data root, in a directory
 /// named for the running executable, so two applications do not share one browser state.
 ///
@@ -673,6 +693,17 @@ fn run_engine(
                 if let Some(entry) = windows.get(&window) {
                     let _ = entry.window.drag_window();
                 }
+            }
+            Event::UserEvent(HostEvent::CdpRequest {
+                window: _,
+                command,
+                reply,
+            }) => {
+                // The transport targets this process's engine endpoint; the
+                // window id is carried for auditability.
+                let answer = crate::cdp::send_command(&cdp_endpoint(), &command)
+                    .map_err(|error| error.to_string());
+                let _ = reply.send(answer);
             }
             Event::UserEvent(HostEvent::CreateChild {
                 parent,

@@ -9,8 +9,11 @@
 # from a substitution cannot verify a release at all. `tools/build_release.py` asserts the
 # property by building twice and comparing digests, so a regression here fails rather than
 # being assumed away.
-[build]
-rustflags = ["-C", "link-args=/Brepro"]
+#
+# The flags live under their target triples and nowhere else. A `[build]` rustflags entry
+# reaches every target that has no matching section — and `/Brepro` is an MSVC linker
+# argument: clang on macOS reads it as a file name and refuses to build. Each toolchain
+# gets the argument its own linker understands.
 
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "link-args=/Brepro"]

@@ -38,8 +38,10 @@ could not give, or compared the wrong thing.
   sets the first build aside instead of letting the rebuild overwrite it, and writes both
   binaries with a PE-level comparison — sizes, header timestamp, CodeView PDB GUID,
   differing byte offsets — under `artifacts/repro/`, which the release job now uploads even
-  on failure. It was this pair that named the wall-clock timestamp, and with it the
-  `RUSTFLAGS` override above.
+  uploads even on failure. It was this pair that named the wall-clock timestamp, and with
+  it the `RUSTFLAGS` override above. The flags also moved under their target triples: a
+  `[build]` rustflags entry reaches every target that has no matching section, and clang on
+  macOS read `/Brepro` as a file name and refused to build.
 
 - **A toast raise is serialized, and a refused tag is retried with a fresh one.** The
   platform keeps one notification store per identity, and the store has been observed to

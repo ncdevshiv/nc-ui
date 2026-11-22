@@ -3899,8 +3899,8 @@
     },
     {
       "id": "webview.child.embedded",
-      "summary": "Embedded child webview (ADR-017 Phase 3): the policy crate (requests, validation, registry, handles), the wry engine binding (build_as_child + set_bounds geometry sync) and the agent-facing dispatch methods (ncui.window.child.create/bounds/close/list) exist. The live-window child creation test is the remaining verification, so the feature is recorded as not implemented until that test runs on a real window.",
-      "status": "not_implemented",
+      "summary": "Embedded child webview (ADR-017 Phase 3): the policy crate (requests, validation, registry, handles), the wry engine binding (build_as_child + set_bounds geometry sync), the agent-facing dispatch methods (ncui.window.child.create/bounds/close/list), and the live-window test — a real parent embeds a child over a rectangle, moves it, and stays alive (crates/ncui-webview-wry/src/host.rs a_child_webview_embeds_into_a_live_parent_and_stays_live).",
+      "status": "complete",
       "crates": [
         "ncui-webview-child",
         "ncui-webview-wry",
@@ -3946,7 +3946,7 @@
       },
       "platforms": {
         "linux": "unverified",
-        "windows": "unverified",
+        "windows": "verified",
         "macos": "unverified"
       }
     }

@@ -180,7 +180,7 @@ pub fn prog_id(name: &str, extension: &str) -> String {
 }
 
 /// The MIME type an extension most plausibly maps to, for the platforms that register by
-/// MIME rather than by ProgID. An extension outside the table maps to
+/// MIME rather than by `ProgID`. An extension outside the table maps to
 /// `application/octet-stream`, which is the honest default for a type the platform must
 /// probe itself.
 #[cfg(target_os = "linux")]
@@ -475,7 +475,7 @@ fn platform_unregister(name: &str, extension: &str) -> Result<(), AssociationErr
     let outcome = run_command(
         Path::new("xdg-mime"),
         "xdg-mime",
-        &["default".to_owned(), "".to_owned(), mime.to_owned()],
+        &["default".to_owned(), String::new(), mime.to_owned()],
         None,
         ASSOCIATION_TIMEOUT,
         1024,
@@ -535,9 +535,10 @@ fn platform_registered(_extension: &str) -> Result<Option<String>, AssociationEr
 /// Where a desktop entry for this user's associations is written.
 #[cfg(target_os = "linux")]
 fn linux_applications_dir() -> Result<PathBuf, AssociationError> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"));
+    let home = std::env::var_os("HOME").map_or_else(
+        || PathBuf::from("/"),
+        PathBuf::from,
+    );
     let dir = home.join(".local/share/applications");
     std::fs::create_dir_all(&dir).map_err(|error| AssociationError::Failed {
         tool: "desktop entry",

@@ -569,7 +569,7 @@ mod platform {
         fn show_color(
             &self,
             request: &super::ColorRequest,
-        ) -> Result<super::ColorChoice, super::DialogError> {
+        ) -> Result<super::ColorChoice, DialogError> {
             #[cfg(windows)]
             {
                 let outcome = crate::process::run_command(
@@ -595,7 +595,7 @@ mod platform {
             #[cfg(not(windows))]
             {
                 let _ = request;
-                Err(super::DialogError::Unavailable {
+                Err(DialogError::Unavailable {
                     reason: "the colour picker is shown through the platform's own tool, \
                             which this platform's adapter does not carry"
                         .to_owned(),

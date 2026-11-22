@@ -558,6 +558,10 @@ static CDP_USER_DATA_DIR: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
 
 /// The `DevTools` endpoint the engine published, resolved from the recorded
 /// user-data directory.
+///
+/// Engine-gated: the static and the data-root helper below exist only when the
+/// engine does, and the only caller sits inside the engine's own loop.
+#[cfg(feature = "wry-engine")]
 pub(crate) fn cdp_endpoint() -> crate::cdp::DevToolsEndpoint {
     let dir = CDP_USER_DATA_DIR
         .lock()

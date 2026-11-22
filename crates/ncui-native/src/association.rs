@@ -535,10 +535,7 @@ fn platform_registered(_extension: &str) -> Result<Option<String>, AssociationEr
 /// Where a desktop entry for this user's associations is written.
 #[cfg(target_os = "linux")]
 fn linux_applications_dir() -> Result<PathBuf, AssociationError> {
-    let home = std::env::var_os("HOME").map_or_else(
-        || PathBuf::from("/"),
-        PathBuf::from,
-    );
+    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
     let dir = home.join(".local/share/applications");
     std::fs::create_dir_all(&dir).map_err(|error| AssociationError::Failed {
         tool: "desktop entry",

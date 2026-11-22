@@ -52,17 +52,21 @@
     )
 )]
 
+pub mod crash;
 pub mod exporter;
 pub mod logring;
 pub mod metrics;
+pub mod otlp;
 pub mod trace;
 pub mod tracing_setup;
 
+pub use crash::{CrashReport, PanicLocation};
 pub use exporter::{ExportEvent, JsonLinesExporter};
 pub use logring::{LogLevel, LogQuery, LogRecord, LogRing, RecordError};
 pub use metrics::{
     EVICTION_COUNTER_NAME, HistogramStats, Labels, MetricKind, MetricsRegistry, SeriesSnapshot,
 };
+pub use otlp::{OTLP_CONTENT_TYPE, encode_logs, encode_metrics};
 pub use trace::{TraceContext, TraceScope};
 pub use tracing_setup::{LogFormat, LogMode, TracingConfig};
 

@@ -15,7 +15,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-use ncui_cli::{Command, commands, format_from, parse, usage};
+use ncui_cli::{Command, commands, crash, format_from, parse, usage};
 
 /// The exit code for a usage error or an unwritable output stream.
 const EXIT_FAILURE: u8 = 2;
@@ -40,6 +40,11 @@ fn main() -> ExitCode {
 ///
 /// Returns the exit code the process ends with.
 fn run_application() -> u8 {
+    // A crash is reported before anything else runs, so a panic anywhere in startup or
+    // teardown leaves the same on-disk record a panic mid-command does (ADR-001).
+    let process_start = std::time::Instant::now();
+    crash::install(process_start);
+
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // An installer is this program with a bundle appended, and it installs what it carries. Run

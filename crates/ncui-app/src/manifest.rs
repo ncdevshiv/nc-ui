@@ -99,6 +99,15 @@ pub struct AppManifest {
     /// unvalidated is a value that can carry something else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheme: Option<String>,
+    /// The file extensions this application associates with itself, e.g. `["notes", "md"]`.
+    ///
+    /// A file of one of these types opens with this application — double-clicked, or opened
+    /// through the platform's "open with" — exactly as a link of the manifest's scheme does.
+    /// Each is a lowercase extension without its dot; the platform registration happens when
+    /// the application is installed, and the extensions the operating system loads and runs
+    /// code with (`exe`, `dll`, …) are refused there.
+    #[serde(default)]
+    pub associations: Vec<String>,
     /// The identity the application is registered under, when it names one.
     ///
     /// It is what a notification is delivered under on Windows and what a bundle registers with
@@ -173,12 +182,34 @@ pub struct SidecarConfig {
     ///
     /// Absent uses the `process` runner's own default. A sidecar is a program the runtime
     /// starts on a page's behalf, so it is timed like one: a backend that never answers must
-    /// not hang the page that called it.
+    /// not hang the page that called it. For a `stream` sidecar this is the bound on one
+    /// call's answer, not on the program's lifetime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// Whether the program runs once per call or stays running across calls.
+    ///
+    /// Absent is `oneshot`: the program starts, answers one JSON document on standard
+    /// output, and exits — the shape for a stateless tool. `stream` starts the program
+    /// once, on the first call, and keeps it running: each call writes one newline-
+    /// delimited JSON line to its standard input and reads the answer line that names the
+    /// call's `id`, so a backend with start-up cost — a model, a connection, a warm index —
+    /// pays it once. The program is stopped when the runtime stops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<SidecarMode>,
     /// One line describing what the command does, shown by `describe`.
     #[serde(default)]
     pub summary: String,
+}
+
+/// Whether a sidecar runs once per call or stays running across calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SidecarMode {
+    /// Start the program per call; one JSON document in, one out (the default).
+    #[default]
+    Oneshot,
+    /// Start the program once and answer one NDJSON line per call.
+    Stream,
 }
 
 /// One command an application declares the page answers in JavaScript.
@@ -395,6 +426,31 @@ impl AppManifest {
         Ok(manifest)
     }
 
+    /// Checks the file extensions the application claims.
+    ///
+    /// An association reaches the platform's extension registry, so an extension that
+    /// cannot be one is refused here rather than at registration time.
+    fn check_associations(&self) -> Result<(), ManifestError> {
+        for association in &self.associations {
+            let trimmed = association.trim().trim_start_matches('.');
+            if trimmed.is_empty()
+                || trimmed.len() > 32
+                || !trimmed
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-')
+            {
+                return Err(ManifestError::Invalid {
+                    field: "associations".to_owned(),
+                    reason: format!(
+                        "must be a file extension — lowercase letters, digits and hyphens, \
+                         at most 32 bytes — got `{association}`"
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Checks every field the runtime will act on.
     ///
     /// # Errors
@@ -440,6 +496,7 @@ impl AppManifest {
                 ),
             });
         }
+        self.check_associations()?;
         self.check_tray()?;
         self.check_shortcuts()?;
         self.check_sidecars()?;

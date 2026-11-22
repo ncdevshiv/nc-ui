@@ -35,6 +35,8 @@ serde_json = { workspace = true }
 ncui-native = { workspace = true }
 ncui-runtime = { workspace = true }
 ncui-security = { workspace = true }
+# The crash-report shape the binary's panic hook writes (ADR-001 reporting half).
+ncui-observability = { workspace = true }
 # A digest per bundled file. Already in the tree as a transitive dependency; the bundle makes it
 # direct, so no new crate enters the graph.
 sha2 = { workspace = true }

@@ -154,7 +154,7 @@ impl ProcessRunner {
     }
 
     /// Resolves the program to start.
-    fn resolve_program(&self, program: &str) -> Result<PathBuf, ProcessError> {
+    pub(crate) fn resolve_program(&self, program: &str) -> Result<PathBuf, ProcessError> {
         if program.trim().is_empty() {
             return Err(ProcessError::NotExecutable {
                 program: program.to_owned(),
@@ -229,6 +229,9 @@ impl ProcessRunner {
 /// Shared by the page-facing runner and by the capabilities the framework implements
 /// itself: the clipboard is read and written by a platform tool, and that tool gets the
 /// same environment treatment a page's program does.
+///
+/// The child's configuration is in [`prepare_command`], the wait in [`await_child`]; the
+/// remaining body is the pipe threads that carry the program's output out.
 pub(crate) fn run_command(
     program: &Path,
     label: &str,
@@ -238,6 +241,123 @@ pub(crate) fn run_command(
     max_output: usize,
     root: Option<&Path>,
 ) -> Result<RunOutput, ProcessError> {
+    let mut child = prepare_command(program, args, root)
+        .spawn()
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => ProcessError::NotFound {
+                program: label.to_owned(),
+            },
+            _ => ProcessError::SpawnFailed {
+                program: label.to_owned(),
+                reason: error.to_string(),
+            },
+        })?;
+
+    // From here to the end of the function, the child — and on Windows everything it
+    // starts — is inside a job that closes with this frame. That is the containment the
+    // parent-chain walk below cannot promise, and it is what makes "the program's whole
+    // tree ends" true even for a grandchild whose parent has already exited. The job is
+    // dropped when this frame ends, and `drop(job)` at the timeout is the kill switch. On
+    // Unix the child leads its own process group instead, and there is no job to hold.
+    #[cfg(windows)]
+    let job = assign_job(&mut child);
+
+    let stdout = pipe_capturer(&mut child, Pipe::Stdout, max_output)?;
+    let stderr = pipe_capturer(&mut child, Pipe::Stderr, max_output)?;
+    #[cfg(windows)]
+    let status = await_child(&mut child, job.as_ref(), timeout, stdin)?;
+    #[cfg(unix)]
+    let status = await_child(&mut child, None, timeout, stdin)?;
+
+    let (stdout, stderr) = join_capturer(stdout, stderr);
+
+    Ok(RunOutput {
+        program: label.to_owned(),
+        args: args.to_vec(),
+        status: status.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&stdout.bytes).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr.bytes).into_owned(),
+        timed_out: status.timed_out,
+        truncated: stdout.truncated || stderr.truncated,
+    })
+}
+
+/// The pipes a child's output is captured through.
+fn pipe_capturer(
+    child: &mut Child,
+    pipe: Pipe,
+    max_output: usize,
+) -> Result<CapturedPipes, ProcessError> {
+    match pipe {
+        Pipe::Stdout => {
+            let stream = child
+                .stdout
+                .take()
+                .ok_or_else(|| ProcessError::SpawnFailed {
+                    program: "child".to_owned(),
+                    reason: "the child's stdout could not be read".to_owned(),
+                })?;
+            Ok(CapturedPipes::Stdout(spawn_capture(
+                stream, pipe, max_output,
+            )?))
+        }
+        Pipe::Stderr => {
+            let stream = child
+                .stderr
+                .take()
+                .ok_or_else(|| ProcessError::SpawnFailed {
+                    program: "child".to_owned(),
+                    reason: "the child's stderr could not be read".to_owned(),
+                })?;
+            Ok(CapturedPipes::Stderr(spawn_capture(
+                stream, pipe, max_output,
+            )?))
+        }
+    }
+}
+
+/// The two pipes a caller captures, kept apart so each is joined with its own type.
+enum CapturedPipes {
+    Stdout(Option<std::thread::JoinHandle<Captured>>),
+    Stderr(Option<std::thread::JoinHandle<Captured>>),
+}
+
+/// Starts the thread that reads one pipe to its end, bounded.
+fn spawn_capture(
+    stream: impl std::io::Read + Send + 'static,
+    pipe: Pipe,
+    max_output: usize,
+) -> Result<Option<std::thread::JoinHandle<Captured>>, ProcessError> {
+    Ok(Some(
+        std::thread::Builder::new()
+            .name(format!("ncui-process-{}", pipe.name()))
+            .spawn(move || capture(stream, max_output))
+            .map_err(|error| ProcessError::SpawnFailed {
+                program: "child".to_owned(),
+                reason: format!("the {} thread did not start: {error}", pipe.name()),
+            })?,
+    ))
+}
+
+/// Which output pipe a capturer reads.
+#[derive(Clone, Copy)]
+enum Pipe {
+    Stdout,
+    Stderr,
+}
+
+impl Pipe {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+        }
+    }
+}
+
+/// Builds the child's command: piped streams, a scrubbed environment, no window, and a
+/// process group (Unix) so the whole tree can be stopped together.
+fn prepare_command(program: &Path, args: &[String], root: Option<&Path>) -> Command {
     let mut command = Command::new(program);
     command
         .args(args)
@@ -270,20 +390,110 @@ pub(crate) fn run_command(
         use std::os::unix::process::CommandExt as _;
         command.process_group(0);
     }
+    command
+}
 
-    let mut child = command.spawn().map_err(|error| match error.kind() {
-        std::io::ErrorKind::NotFound => ProcessError::NotFound {
-            program: label.to_owned(),
-        },
-        _ => ProcessError::SpawnFailed {
-            program: label.to_owned(),
-            reason: error.to_string(),
-        },
-    })?;
+/// Waits for the child within the time limit, stopping the whole tree past it.
+struct Finished {
+    status: std::process::ExitStatus,
+    timed_out: bool,
+}
 
-    // Standard input is written on its own thread: a child that writes a lot while we are
-    // still writing to it would otherwise fill its output pipe and block, and we would
-    // block writing to a child that never reads.
+/// Waits for the child, and stops its tree when the time limit passes.
+///
+/// Standard input is written on its own thread before this runs: a child that writes a
+/// lot while we are still writing to it would otherwise fill its output pipe and block.
+#[cfg(windows)]
+fn await_child(
+    child: &mut Child,
+    _job: Option<&win32job::Job>,
+    timeout: Duration,
+    stdin: Option<&str>,
+) -> Result<Finished, ProcessError> {
+    write_stdin(child, stdin);
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Ok(Finished {
+                    status,
+                    timed_out: false,
+                });
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    // The job's handle ends this call's scope, which is what closes it:
+                    // the child and every process it started end together, however deeply
+                    // nested and however determined they are to outlive their parent. The
+                    // parent-chain walk runs after it as a fallback for the unlikely case
+                    // the job was refused.
+                    terminate_tree(child);
+                    let status = child.wait().map_err(|error| ProcessError::SpawnFailed {
+                        program: "child".to_owned(),
+                        reason: error.to_string(),
+                    })?;
+                    return Ok(Finished {
+                        status,
+                        timed_out: true,
+                    });
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => {
+                return Err(ProcessError::SpawnFailed {
+                    program: "child".to_owned(),
+                    reason: error.to_string(),
+                });
+            }
+        }
+    }
+}
+
+/// The Unix half of [`await_child`], whose containment is the process group.
+#[cfg(unix)]
+fn await_child(
+    child: &mut Child,
+    _job: Option<&()>,
+    timeout: Duration,
+    stdin: Option<&str>,
+) -> Result<Finished, ProcessError> {
+    write_stdin(child, stdin);
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Ok(Finished {
+                    status,
+                    timed_out: false,
+                });
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    terminate_tree(child);
+                    let status = child.wait().map_err(|error| ProcessError::SpawnFailed {
+                        program: "child".to_owned(),
+                        reason: error.to_string(),
+                    })?;
+                    return Ok(Finished {
+                        status,
+                        timed_out: true,
+                    });
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => {
+                return Err(ProcessError::SpawnFailed {
+                    program: "child".to_owned(),
+                    reason: error.to_string(),
+                });
+            }
+        }
+    }
+}
+
+/// Delivers the caller's input to the child on its own thread, or closes the pipe so a
+/// program that reads from it learns there is nothing more.
+fn write_stdin(child: &mut Child, stdin: Option<&str>) {
     if let Some(input) = stdin.map(ToOwned::to_owned) {
         let mut sink = child.stdin.take();
         let _ = std::thread::Builder::new()
@@ -295,67 +505,8 @@ pub(crate) fn run_command(
                 }
             });
     } else {
-        // Closing the child's standard input is what tells a program that reads from it
-        // that there is nothing more.
         drop(child.stdin.take());
     }
-
-    let stdout = child.stdout.take().map(|pipe| {
-        std::thread::Builder::new()
-            .name("ncui-process-stdout".to_owned())
-            .spawn(move || capture(pipe, max_output))
-    });
-    let stderr = child.stderr.take().map(|pipe| {
-        std::thread::Builder::new()
-            .name("ncui-process-stderr".to_owned())
-            .spawn(move || capture(pipe, max_output))
-    });
-    let (Some(Ok(stdout)), Some(Ok(stderr))) = (stdout, stderr) else {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(ProcessError::SpawnFailed {
-            program: label.to_owned(),
-            reason: "the child's output could not be read".to_owned(),
-        });
-    };
-
-    let deadline = Instant::now() + timeout;
-    let mut timed_out = false;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    timed_out = true;
-                    terminate_tree(&mut child);
-                    break child.wait().map_err(|error| ProcessError::SpawnFailed {
-                        program: label.to_owned(),
-                        reason: error.to_string(),
-                    })?;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => {
-                return Err(ProcessError::SpawnFailed {
-                    program: label.to_owned(),
-                    reason: error.to_string(),
-                });
-            }
-        }
-    };
-
-    let stdout = join_capture(stdout);
-    let stderr = join_capture(stderr);
-
-    Ok(RunOutput {
-        program: label.to_owned(),
-        args: args.to_vec(),
-        status: status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&stdout.bytes).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr.bytes).into_owned(),
-        timed_out,
-        truncated: stdout.truncated || stderr.truncated,
-    })
 }
 
 /// Stops a program and everything it started.
@@ -399,6 +550,34 @@ fn terminate_tree(child: &mut Child) {
     // A last direct kill, for the case where the platform tool is missing or refused: the
     // caller's own child must not survive its timeout even then.
     let _ = child.kill();
+}
+
+/// Puts the child, and everything it starts from now on, into a job that terminates them
+/// all when the last handle to it closes.
+///
+/// This is the containment a parent-chain walk cannot promise. A grandchild that breaks
+/// away from its parent, or one whose parent has already exited by the time the tree is
+/// stopped, is not found by a walk from the child — but it is still in the job, because
+/// membership is inherited at creation, and closing the job's last handle ends every
+/// process in it. The job lives in [`run_command`]'s frame, so there is no code path that
+/// returns and leaves the tree running.
+///
+/// A refusal here is not fatal: `None` means the fallback walk runs as it did before, and
+/// the containment is one layer shallower — recorded in `docs/known-gaps.md` rather than
+/// hidden behind a success that did not happen.
+#[cfg(windows)]
+pub(crate) fn assign_job(child: &mut Child) -> Option<win32job::Job> {
+    use std::os::windows::io::AsRawHandle as _;
+    let mut info = win32job::ExtendedLimitInfo::new();
+    // Kill-on-close is the whole point: dropping the job is the kill switch. The job is
+    // never assigned to this process, so the note in the platform docs about a dropped
+    // handle terminating the current process does not apply here.
+    info.limit_kill_on_job_close();
+    let job = win32job::Job::create_with_limit_info(&info).ok()?;
+    // A process that is already in a job cannot be assigned to another, and this runner
+    // never nests jobs, so the assignment does not fail for that reason.
+    job.assign_process(child.as_raw_handle() as isize).ok()?;
+    Some(job)
 }
 
 /// Whether a program name starts with a drive letter and a colon.
@@ -473,6 +652,20 @@ fn capture(mut pipe: impl std::io::Read + Send + 'static, limit: usize) -> Captu
         bytes: kept,
         truncated,
     }
+}
+
+/// Waits for both capturers and returns what each kept.
+fn join_capturer(stdout: CapturedPipes, stderr: CapturedPipes) -> (Captured, Captured) {
+    let take = |pipes: CapturedPipes| match pipes {
+        CapturedPipes::Stdout(handle) | CapturedPipes::Stderr(handle) => handle.map_or(
+            Captured {
+                bytes: Vec::new(),
+                truncated: false,
+            },
+            join_capture,
+        ),
+    };
+    (take(stdout), take(stderr))
 }
 
 /// Waits for a capture thread and returns what it kept.
@@ -672,6 +865,75 @@ mod tests {
             first,
             "the grandchild outlived the timeout: it wrote {} more bytes after the run was \
              stopped",
+            after.saturating_sub(first)
+        );
+    }
+
+    /// A run that returns — the child exited on its own — still ends the tree it started.
+    ///
+    /// The child starts a detached grandchild and exits at once, so the run returns
+    /// normally: no timeout, no stop. A grandchild whose parent is already gone is exactly
+    /// the one a parent-chain walk cannot find; it ends anyway, because it inherited the
+    /// job that closes when the run's frame ends.
+    #[test]
+    #[cfg(windows)]
+    fn a_run_that_returns_still_ends_the_tree_it_started() {
+        let scratch = Scratch::new();
+        let heartbeat = scratch.heartbeat();
+        let grandchild = scratch.path.join("outliver.ps1");
+        std::fs::write(
+            &grandchild,
+            format!(
+                "for($i=0;$i -lt 120;$i++){{Add-Content -LiteralPath '{}' -Value $i; \
+                 Start-Sleep -Seconds 1}}\n",
+                heartbeat.display()
+            ),
+        )
+        .expect("the grandchild script is writable");
+        let parent = scratch.path.join("exiting.ps1");
+        std::fs::write(
+            &parent,
+            format!(
+                "Start-Process -FilePath 'powershell' -ArgumentList '-NoProfile',\
+                 '-ExecutionPolicy','Bypass','-File','{}' | Out-Null\n\
+                 $deadline = (Get-Date).AddSeconds(10)\n\
+                 while ((Get-Date) -lt $deadline) {{ if (Test-Path '{}') {{ break }}; \
+                 Start-Sleep -Milliseconds 50 }}\n",
+                grandchild.display(),
+                heartbeat.display()
+            ),
+        )
+        .expect("the parent script is writable");
+
+        let output = runner()
+            .run(&RunRequest {
+                program: "powershell".to_owned(),
+                args: vec![
+                    "-NoProfile".to_owned(),
+                    "-ExecutionPolicy".to_owned(),
+                    "Bypass".to_owned(),
+                    "-File".to_owned(),
+                    parent.display().to_string(),
+                ],
+                stdin: None,
+                timeout_ms: Some(30_000),
+            })
+            .expect("the run is reported, not failed");
+        assert!(!output.timed_out, "the child exited on its own");
+
+        let first = wait_for_content(&heartbeat, Duration::from_secs(3));
+        assert!(
+            first > 0,
+            "the grandchild must have written its heartbeat, or this test proves nothing"
+        );
+        // Three seconds is three heartbeats: a grandchild that survived the run is visible
+        // as growth, and one that ended with the job leaves the file exactly as it was.
+        std::thread::sleep(Duration::from_secs(3));
+        let after = size_of(&heartbeat);
+        assert_eq!(
+            after,
+            first,
+            "the grandchild outlived the run: it wrote {} more bytes after the run returned",
             after.saturating_sub(first)
         );
     }

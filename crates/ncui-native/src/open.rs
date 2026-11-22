@@ -392,18 +392,43 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn the_platform_is_asked_and_its_refusal_is_reported() {
-        // The tool really runs: a target no handler is registered for is refused by the platform,
-        // and the refusal reaches the caller with the exit status that says so.
+        // The tool really runs: a target the platform cannot act on is refused by the
+        // platform, and the refusal reaches the caller with the exit status that says so.
         //
-        // What this deliberately does *not* assert is that a handler runs. Windows resolves a
-        // scheme through an association cache the shell refreshes on its own schedule, so a scheme
-        // registered during this session is not reliably live in it — a test that asserted the
-        // handler ran would be asserting the shell's refresh timing rather than this module.
-        // `crate::protocol`'s own test asserts what the platform *holds* for a scheme, which is
-        // the part that is deterministic.
-        let error = open_with_default("ncui-not-a-registered-scheme://x")
-            .expect_err("a scheme nothing handles is refused");
+        // The target is an existing file with no extension, which `start` refuses at the
+        // command level — it is not executable — without consulting the shell's association
+        // machinery. A scheme would make this test assert the machine's handler table, whose
+        // answer differs between contexts on the same machine; a file that cannot be run
+        // asserts only the platform's refusal and this module's reporting of it. What this
+        // deliberately does *not* assert is that a handler runs — `crate::protocol`'s own
+        // test asserts what the platform *holds* for a scheme, which is the deterministic
+        // part.
+        //
+        // Under parallel test load the shell sometimes resolves the refusal through its
+        // asynchronous "how do you want to open this" machinery and reports success to
+        // `cmd` before any refusal has happened. That is the shell's scheduling, not this
+        // module's contract, so the platform is asked a few times: one refusal, reported
+        // with the exit status that says so, is what this module promises and what this
+        // test holds it to.
+        let scratch =
+            std::env::temp_dir().join(format!("ncui-open-refused-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).expect("the scratch is creatable");
+        let target = scratch.join("not-executable");
+        std::fs::write(&target, b"").expect("the target is writable");
+        let mut refused = None;
+        for _ in 0..5 {
+            match open_with_default(target.display().to_string().as_str()) {
+                Ok(()) => std::thread::sleep(std::time::Duration::from_millis(200)),
+                Err(error) => {
+                    refused = Some(error);
+                    break;
+                }
+            }
+        }
+        let error = refused.expect("a target the platform cannot act on is refused");
         assert_eq!(error.code(), "open_failed");
         assert!(error.to_string().contains("exit 1"), "{error}");
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 }

@@ -105,6 +105,8 @@ behind it, which is why `protocol_conformance.rs` checks this table against the 
 | `remember` | `ncui.window.create` | The name a window's place is remembered under |
 | `fullscreen`, `maximized`, `minimized`, `visible`, `focus` | `ncui.window.state` | The one change to make to a window's presentation: fill the display, maximise, minimise, show or hide, or take focus |
 | `script` | `ncui.window.post` | The script to evaluate in the page |
+| `landscape`, `print_background`, `scale`, `paper_width`, `paper_height` | `ncui.window.print_to_pdf` | The print options the engine accepts: orientation, page backgrounds, a scale between 0.1 and 2.0, and paper size in inches between 1 and 100 |
+| `format`, `quality` | `ncui.window.screenshot` | The image format (`png` or `jpeg`) and, for JPEG, a quality between 0 and 100 |
 
 ### Error codes
 
@@ -155,6 +157,8 @@ is the one actually enforced.
 | `ncui.window.state` | `window` | no | How a window is presented, and how to change it: fullscreen, maximised, minimised, shown or hidden, or focused. The answer also reports the platform's frame — decorated, resizable, always on top — as the platform has it. A page is told when its window is resized or moved, through `resized` and `moved` events |
 | `ncui.window.theme` | `window` | no | Whether the platform is drawing its interface light or dark, and a `theme` event when it changes |
 | `ncui.window.zoom` | `window` | no | Scale a window's page by a factor between 0.25 and 5.0, where 1.0 is the platform default |
+| `ncui.window.print.pdf` | `window` | no | Render a window's page to PDF through the engine's own DevTools protocol; the answer carries the PDF as base64 |
+| `ncui.window.screenshot` | `window` | no | Capture a window's page as a PNG or JPEG through the engine's own DevTools protocol; the answer carries the image as base64 |
 | `ncui.window.child.create` | `window` | no | Embed a child webview into a window's frame: a starting URL and a rectangle (logical pixels, relative to the window's client area) |
 | `ncui.window.child.bounds` | `window` | no | Move a live child webview to a new rectangle |
 | `ncui.window.child.close` | `window` | no | Close a live child webview |

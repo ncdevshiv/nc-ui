@@ -86,9 +86,13 @@ pub fn run(command: &Command, format: Format) -> Outcome {
             *installer,
         ),
         Command::Install { bundle, root } => install(bundle, root.as_deref()),
-        Command::Update { bundle, from, root } => {
-            update(bundle.as_deref(), from.as_deref(), root.as_deref())
-        }
+        Command::Update {
+            bundle,
+            from,
+            root,
+            check,
+        } => update(bundle.as_deref(), from.as_deref(), root.as_deref(), *check),
+        Command::ImportChrome { profile } => import_chrome(profile.as_deref()),
         Command::Uninstall { name, root } => uninstall(name, root.as_deref()),
         Command::Installed { root } => installed(root.as_deref()),
         Command::Launch { name, root, link } => launch(name, root.as_deref(), link.as_deref()),
@@ -429,7 +433,19 @@ pub(crate) fn update(
     bundle: Option<&str>,
     from: Option<&str>,
     root: Option<&str>,
+    check_only: bool,
 ) -> Result<(Value, bool), String> {
+    if check_only {
+        if bundle.is_some() {
+            return Err(
+                "a check names a release URL with `--from`, not a bundle directory".to_owned(),
+            );
+        }
+        let Some(from) = from else {
+            return Err("a check needs the release document's URL: `--from <url>`".to_owned());
+        };
+        return check_for_update(from, root);
+    }
     match (bundle, from) {
         (Some(_), Some(_)) => Err(
             "name either the directory of the bundle to update from or a URL, not both".to_owned(),
@@ -441,6 +457,76 @@ pub(crate) fn update(
         (Some(bundle), None) => update_from_directory(bundle, root),
         (None, Some(from)) => update_from_url(from, root),
     }
+}
+
+/// Reports whether a newer release exists, downloading nothing but the document.
+///
+/// The document names the application; the installed copy supplies the version to compare
+/// against. This is the one-shot form of `ncui_cli::updater::watch`, which is what an
+/// application that wants the answer on a schedule runs instead.
+fn check_for_update(from: &str, root: Option<&str>) -> Result<(Value, bool), String> {
+    let root = root.map_or_else(ncui_native::default_root, PathBuf::from);
+    let installer = ncui_native::Installer::new(&root)
+        .map_err(|error| format!("the applications directory is unusable: {error}"))?;
+    let scratch = crate::installer::private_directory().map_err(|error| error.to_string())?;
+    let document =
+        crate::updater::fetch_document(from, scratch.path()).map_err(|error| error.to_string())?;
+    let installed = installer
+        .installed()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|installed| installed.name == document.name)
+        .ok_or_else(|| {
+            format!(
+                "`{}` is not installed here, and a check compares against what is",
+                document.name
+            )
+        })?;
+    let answer = crate::updater::compare_against_document(&installed.version, document);
+    let comparison = match answer.comparison {
+        crate::updater::VersionComparison::Newer => "newer",
+        crate::updater::VersionComparison::Same => "same",
+        crate::updater::VersionComparison::Older => "older",
+        crate::updater::VersionComparison::NotComparable => "not_comparable",
+    };
+    let payload = serde_json::json!({
+        "name": answer.application,
+        "current_version": answer.current,
+        "available_version": answer.release.version,
+        "update_available": answer.update_available,
+        "comparison": comparison,
+        "bundle_url": answer.release.url,
+        "release": from,
+    });
+    Ok((payload, false))
+}
+
+/// Imports the bookmarks Chrome holds for this user, as machine-readable JSON.
+///
+/// This is a migration aid, not a runtime feature: the person running it is the authority
+/// whose browser is being read, and the answer is the flattened bookmark list an
+/// application's first run can offer to bring in. The read is bounded and read-only.
+fn import_chrome(profile: Option<&str>) -> Result<(Value, bool), String> {
+    let directory = match profile {
+        Some(named) => {
+            let path = PathBuf::from(named);
+            if path.is_dir() {
+                path
+            } else {
+                return Err(format!("{} is not a directory", path.display()));
+            }
+        }
+        None => ncui_native::chrome_profile_dir()
+            .ok_or_else(|| "no Chrome profile directory is present on this machine".to_owned())?,
+    };
+    let bookmarks =
+        ncui_native::import_chrome_bookmarks(&directory).map_err(|error| error.to_string())?;
+    let payload = serde_json::json!({
+        "profile": directory.display().to_string(),
+        "count": bookmarks.len(),
+        "bookmarks": bookmarks,
+    });
+    Ok((payload, false))
 }
 
 /// Replaces an installed application with a bundle that is on disk.

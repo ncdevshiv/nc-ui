@@ -593,7 +593,7 @@ C3 asked for two things: a command answered by *any* executable, and a command h
 in the page's own JS. Both are delivered and gated.
 
 The any-language sidecar is real. An application declares it in `ncui.app.json`
-(`sidecars: [{command, program, args, requires, timeout_ms, summary}]`), the runtime writes the
+(`sidecars: [{command, program, args, requires, timeout_ms, mode, summary}]`), the runtime writes the
 call payload to the program's stdin and reads one JSON answer from its stdout, and the command
 is gated twice — the application must hold `process.spawn` for any sidecar to register, and each
 sidecar's `requires` must sit inside the page grant and gates the call at the seam. It runs
@@ -604,6 +604,16 @@ forced, because an interpreter resolves its script argument against the child's 
 host's. A non-zero exit or a non-JSON answer reaches the page as an error. It is tested against
 a real interpreter end to end (`crates/ncui-runtime/src/native.rs`, five sidecar tests) and the
 manifest declaration is tested from real JSON (`crates/ncui-app/src/manifest.rs`).
+
+A sidecar that pays a start-up cost on every call — a model, a connection, a warm index — can
+declare `mode: "stream"` instead: the program is started once, on the first call, and kept
+running, and each call writes one newline-delimited JSON line to its stdin and reads the answer
+line that names the call's `id`. The wire is the NDJSON dialect log pipelines speak, an answer
+that reports an error reaches the page as that error, and every call is timed against the
+sidecar's own limit. The program's containment is the one-shot runner's — the same scrubbed
+environment, the same job (or process group) that ends its whole tree when the runtime stops —
+and its state across calls is the point: a counting sidecar answers 1, 2, 3 to three identical
+calls, which is how the mode is tested.
 
 The JS half is delivered by the webview-callback round trip, with no new dependency. An
 application declares a page command (`page_commands: [{command, requires, summary}]` in
@@ -823,7 +833,14 @@ answer.
 | Opening a file or link with the platform's handler | Implemented, through the platform's tool | A scheme registered during a session may not be live in it: Windows resolves associations through a cache the shell refreshes on its own schedule |
 | Remembering a window's place and size | Implemented for the application's own window, and for a window a page opens under a name: `create_window` takes `remember: "notes"`, the place is applied when the window is created and written down when it closes | A window a page does not name is not remembered |
 | A page's own preferences | Implemented: bounded key-value storage per application | No migrations — a page that changes the shape of what it stores reads its own older shapes |
-| File, save and folder dialogs | Implemented behind the `dialogs` feature, except the one step a test cannot drive | The vocabulary (`open.file`, `open.files`, `save.file`, `pick.folder`), the option and filter rules, the validation of the path that comes back and the command registration under `Capability::Dialog` are plain Rust in `ncui-native::dialog` and are tested headlessly in both feature states — a page holding the capability gets `dialog.pick_file`/`dialog.save_file`, whose request rules are enforced whether or not the build can show a picker, and which reports `dialog_unavailable` by name on a build without the feature rather than claiming success. The `rfd` adapter behind the feature shows the platform's own picker. **What is not automated:** the single real modal open — a person clicking the picker and choosing a file — is the one step a test cannot drive, because a test has no person. This project's standard is that a capability is evidenced by running it, and everything *around* the modal is so evidenced; the modal itself needs a one-time human verification the feature registry does not model. It is recorded here rather than claimed. A **colour** dialog is still absent — `rfd` does not provide one, and adding it is a separate decision |
+| File, save and folder dialogs | Implemented behind the `dialogs` feature, except the one step a test cannot drive | The vocabulary (`open.file`, `open.files`, `save.file`, `pick.folder`), the option and filter rules, the validation of the path that comes back and the command registration under `Capability::Dialog` are plain Rust in `ncui-native::dialog` and are tested headlessly in both feature states — a page holding the capability gets `dialog.pick_file`/`dialog.save_file`, whose request rules are enforced whether or not the build can show a picker, and which reports `dialog_unavailable` by name on a build without the feature rather than claiming success. The `rfd` adapter behind the feature shows the platform's own picker. **What is not automated:** the single real modal open — a person clicking the picker and choosing a file — is the one step a test cannot drive, because a test has no person. This project's standard is that a capability is evidenced by running it, and everything *around* the modal is so evidenced; the modal itself needs a one-time human verification the feature registry does not model. It is recorded here rather than claimed. A **colour** dialog is implemented the way the clipboard is: `rfd` has no colour picker, so the
+picker is the platform's own `ColorDialog`, reached through the tool every Windows machine ships
+(PowerShell, ADR-015's platform-tool shape). The request (`dialog.pick_color`, requiring the
+`dialog` capability) carries an optional title and an optional `#rrggbb` seed, both validated
+headlessly in `ncui-native::dialog`; the answer is the chosen `#rrggbb`, a cancellation, or a
+named failure. The modal itself — a person clicking a colour — is the same one-time human
+verification the file dialogs record, and the picker is Windows-only until another platform's
+tool is added. |
 | Tray icon | Implemented: the manifest declares an image and a tooltip, the host creates it on its engine thread, and a click brings the application's window forward and tells its page | — (the platform's own call, through `tray-icon`) |
 | Native menus | Absent | Not a dependency question. `muda` is already in the tree through `tray-icon`, and on Linux (`init_for_gtk_window`) and macOS (`init_for_nsapp`) it attaches safely — but on **Windows** its entry point is `pub unsafe fn init_for_hwnd(hwnd: isize)`, and `unsafe_code = "forbid"` is a workspace-wide ban this project has refused to lift for any reason. A Windows menu bar therefore needs either a windowing crate that offers a safe seam, or a deliberate change to the safety rule |
 | Developer tools (the platform's web inspector) | Partial: open and close work; the open state is reported as unknown on Windows | `ncui.window.devtools.open` and `ncui.window.devtools.close` call wry's `open_devtools`/`close_devtools`; `ncui.window.devtools.state` answers `open`, `closed`, or `unknown` — and on **Windows** it answers `unknown`, because wry's Windows backend opens the inspector and then reports `is_devtools_open() == false` unconditionally. The runtime says what the platform told it rather than claiming a state it cannot know. The three calls require the `window` capability |
@@ -872,24 +889,41 @@ the tool is: a Linux session with neither a Wayland nor an X11 clipboard tool ge
 `unavailable`, which is reported rather than hidden. A direct binding (`arboard` or FFI) is
 the fix, and it is a dependency decision under ADR-012, not a change of design.
 
-**A timed-out program's tree is stopped, but a program that deliberately detaches is not.**
-`process.run` stops the program it started *and everything that program started*. On Windows the
-runner asks `taskkill /T /F` to walk the parent chain; on Unix the child is started in its own
-process group and one signal reaches the whole group. A test drives both paths: a grandchild
-appends to a file once a second, the parent's run is stopped by its time limit, and the file must
-stop growing. Disabling the tree kill makes that test fail with the grandchild's extra bytes,
-which is how the fix was checked rather than assumed.
+**A timed-out program's tree is stopped, and on Windows the tree is a job, not a walk.**
+`process.run` stops the program it started *and everything that program started*. On Unix
+the child is started in its own process group and one signal reaches the whole group. On
+Windows the child is put into a job object with kill-on-close (ADR-019, through the
+`win32job` safe wrapper), so closing the job — at a timeout, or when the run returns —
+terminates the child and everything it started, however deeply nested and however
+successfully its descendants hide from a parent-chain walk. A test drives both paths: a
+grandchild appends to a file once a second, the parent's run is stopped by its time limit,
+and the file must stop growing; a second test lets the child exit while the grandchild
+keeps ticking, and the grandchild must still end when the run returns. Disabling the tree
+kill makes the first test fail with the grandchild's extra bytes, which is how the fix was
+checked rather than assumed.
 
-What remains is the case the platform tools cannot reach: a program that deliberately breaks
-away — Windows `start` in a new process group, Unix `setsid`, a daemon that re-parents itself —
-is no longer a descendant by the time the limit is reached, and neither `taskkill /T` nor a
-process-group signal will find it. Closing that needs a job object (Windows) or a cgroup (Linux),
-which `std` does not expose and this workspace cannot reach without FFI or a new dependency. The
-Unix path is compile-checked here and exercised by CI on Linux; the Windows path is the one
-measured on this machine.
+The residual is narrower now, and it is the platform's shape rather than a walk's: a
+process created with breakaway is refused a start under this job rather than escaping it,
+and a grandchild created in the window between the child's process creation and its job
+assignment is not in the job (the fallback walk still reaches the ordinary cases). A
+backend that genuinely needs to outlive its caller must not be run through this runner.
+Closing the last gap on Linux would mean a cgroup, which `std` does not expose and this
+workspace cannot reach without FFI or a new dependency. The Unix path is compile-checked
+here and exercised by CI on Linux; the Windows path is the one measured on this machine.
 
 ## macOS has no host here
 
 `cross_platform.verification` was one entry covering two platforms. Linux ran; macOS did not.
 It is now two entries, because a single entry would have let the completed half hide the
 unrun one — which is what the registry's `unverified` platform states exist to prevent.
+
+## Mobile has no host, and no claim is made that it does
+
+The capability table above is desktop: Windows, Linux, macOS. There is no iOS or Android
+host, no touch input pipeline, and no mobile packaging, and — unlike macOS, where the host
+is written and waiting on a machine to run it — no mobile code exists to verify. The `wry`
+engine compiles for those targets, but an engine that can be compiled is not a platform
+story: a platform is supported when its gate has run on it, and there is nothing here for a
+phone to run. Adding mobile means a host per platform (UIKit/Android view integration), a
+touch and lifecycle contract in the input model, and store packaging — a project of its own,
+recorded here so the absence is a decision rather than an oversight.

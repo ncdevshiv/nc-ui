@@ -61,6 +61,7 @@ fn to_text(payload: &Value, command: &Command) -> String {
         Command::Install { .. } => install_text(payload),
         Command::Uninstall { .. } => uninstall_text(payload),
         Command::Installed { .. } => installed_text(payload),
+        Command::ImportChrome { .. } => import_text(payload),
         Command::New { .. } => new_text(payload),
         Command::Help => crate::usage::text(),
     }
@@ -84,6 +85,27 @@ fn install_text(payload: &Value) -> String {
         .map_or(&[][..], Vec::as_slice)
     {
         let _ = writeln!(out, "       registered {registration}");
+    }
+    out
+}
+
+/// The text form of a Chrome bookmark import.
+fn import_text(payload: &Value) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "from     {}", field(payload, "profile"));
+    let _ = writeln!(out, "imported {} bookmarks", field(payload, "count"));
+    for bookmark in payload
+        .get("bookmarks")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice)
+    {
+        let _ = writeln!(
+            out,
+            "  [{}] {} — {}",
+            field(bookmark, "folder"),
+            field(bookmark, "title"),
+            field(bookmark, "url")
+        );
     }
     out
 }

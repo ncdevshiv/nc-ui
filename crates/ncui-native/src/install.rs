@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::association;
 use crate::identity;
 use crate::protocol;
 
@@ -154,6 +155,9 @@ pub struct BundleManifest {
     /// The URL scheme the bundle registers, when it names one.
     #[serde(default)]
     pub scheme: Option<String>,
+    /// The file extensions the bundle associates with this application, normalised.
+    #[serde(default)]
+    pub associations: Vec<String>,
     /// Every file the bundle says it holds, with the size and digest it should have.
     ///
     /// Required rather than optional: a bundle that does not say what its files are is a bundle
@@ -190,6 +194,9 @@ pub struct Installed {
     /// The scheme registered, if any.
     #[serde(default)]
     pub scheme: Option<String>,
+    /// The file extensions associated, as this install normalised them.
+    #[serde(default)]
+    pub associations: Vec<String>,
     /// What this install did, in the order it did it, for the record a person reads.
     #[serde(default)]
     pub registrations: Vec<String>,
@@ -309,6 +316,7 @@ impl Installer {
         let Registrations {
             identity: identity_registered,
             scheme: scheme_registered,
+            associations: associations_registered,
             done: registrations,
         } = register(&manifest, &program, &directory)?;
 
@@ -319,6 +327,7 @@ impl Installer {
             program: program.display().to_string(),
             identity: identity_registered,
             scheme: scheme_registered,
+            associations: associations_registered,
             registrations,
         };
         write_record(&directory, &installed)?;
@@ -403,6 +412,7 @@ impl Installer {
         let Registrations {
             identity: identity_registered,
             scheme: scheme_registered,
+            associations: associations_registered,
             done: mut registrations,
         } = register(&manifest, &program, &directory)?;
 
@@ -413,6 +423,12 @@ impl Installer {
         {
             let _ = protocol::unregister(scheme);
             registrations.push(format!("scheme {scheme} (released)"));
+        }
+        for extension in &previous.associations {
+            if !associations_registered.contains(extension) {
+                let _ = association::unregister(&manifest.name, std::slice::from_ref(extension));
+                registrations.push(format!("association .{extension} (released)"));
+            }
         }
         if let Some(identity) = previous.identity.as_deref()
             && identity_registered.as_deref() != Some(identity)
@@ -429,6 +445,7 @@ impl Installer {
             program: program.display().to_string(),
             identity: identity_registered,
             scheme: scheme_registered,
+            associations: associations_registered,
             registrations,
         };
         write_record(&directory, &installed)?;
@@ -471,6 +488,14 @@ impl Installer {
                 what: "application identity",
                 reason: error.to_string(),
             })?;
+        }
+        for extension in &installed.associations {
+            association::unregister(&installed.name, std::slice::from_ref(extension)).map_err(
+                |error| InstallError::Registration {
+                    what: "file association",
+                    reason: error.to_string(),
+                },
+            )?;
         }
         std::fs::remove_dir_all(&directory).map_err(|error| InstallError::Io {
             path: directory.display().to_string(),
@@ -607,6 +632,8 @@ struct Registrations {
     identity: Option<String>,
     /// The URL scheme that was registered, when the bundle names one.
     scheme: Option<String>,
+    /// The extensions that were associated, normalised.
+    associations: Vec<String>,
     /// What the pass did, in the order it did it, for the record a person reads.
     done: Vec<String>,
 }
@@ -653,9 +680,25 @@ fn register(
         scheme_registered = Some(value.to_owned());
         done.push(format!("scheme {value}"));
     }
+    let mut associations_registered = Vec::new();
+    if !manifest.associations.is_empty() {
+        // A file of an associated type is opened with the same shape a link is: the program
+        // runs and the platform appends the file's path.
+        let arguments = vec!["run".to_owned(), directory.display().to_string()];
+        associations_registered =
+            association::register(&manifest.name, program, &arguments, &manifest.associations)
+                .map_err(|error| InstallError::Registration {
+                    what: "file association",
+                    reason: error.to_string(),
+                })?;
+        for extension in &associations_registered {
+            done.push(format!("association .{extension}"));
+        }
+    }
     Ok(Registrations {
         identity: identity_registered,
         scheme: scheme_registered,
+        associations: associations_registered,
         done,
     })
 }

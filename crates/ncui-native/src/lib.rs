@@ -50,19 +50,27 @@
     )
 )]
 
+pub mod association;
 pub mod clipboard;
 pub mod dialog;
+pub mod editor;
 pub mod fs;
 #[cfg(feature = "global-hotkeys")]
 pub mod hotkey;
 pub mod identity;
+pub mod import;
 pub mod install;
 pub mod notify;
 pub mod open;
 pub mod process;
 pub mod protocol;
+pub mod sidecar;
 pub mod single_instance;
 
+pub use association::{
+    ASSOCIATION_TIMEOUT, AssociationError, RESERVED_EXTENSIONS, check_extension,
+    normalize_extension, prog_id,
+};
 pub use clipboard::{
     CLIPBOARD_TIMEOUT, Clipboard, ClipboardError, ClipboardText, ClipboardWritten,
     MAX_CLIPBOARD_BYTES,
@@ -70,10 +78,11 @@ pub use clipboard::{
 #[cfg(feature = "dialogs")]
 pub use dialog::RfdDialogs;
 pub use dialog::{
-    DialogBackend, DialogError, DialogKind, DialogOptions, DialogOutcome, FileFilter,
-    MAX_DIALOG_TITLE_BYTES, MAX_EXTENSION_BYTES, MAX_PATH_BYTES, validate_chosen_path,
-    validate_options,
+    ColorChoice, ColorRequest, DialogBackend, DialogError, DialogKind, DialogOptions,
+    DialogOutcome, FileFilter, MAX_DIALOG_TITLE_BYTES, MAX_EXTENSION_BYTES, MAX_PATH_BYTES,
+    is_hex_color, validate_chosen_path, validate_color_request, validate_options,
 };
+pub use editor::{DiscoveredEditor, EDITORS, Editor, discover, parse_search_path};
 pub use fs::{
     DirectoryListing, Entry, FileContent, FileSystem, FileWritten, FsError, MAX_DIRECTORY_ENTRIES,
     MAX_READ_BYTES, MAX_WRITE_BYTES, Stat,
@@ -82,6 +91,10 @@ pub use identity::{
     IDENTITY_TIMEOUT, IdentityError, MAX_IDENTITY_BYTES, check as check_identity,
     register as register_identity, registered as identity_registered,
     unregister as unregister_identity,
+};
+pub use import::{
+    CHROME_PROFILE_ENV, ImportError, ImportedBookmark, MAX_BOOKMARKS, chrome_profile_dir,
+    import_chrome_bookmarks,
 };
 pub use install::{
     BUNDLE_MANIFEST_NAME, BundleManifest, INSTALL_RECORD_NAME, InstallError, Installed, Installer,
@@ -100,6 +113,7 @@ pub use protocol::{
     PROTOCOL_TIMEOUT, ProtocolError, RESERVED_SCHEMES, command_line, register as register_protocol,
     registered as protocol_registered, unregister as unregister_protocol,
 };
+pub use sidecar::{MAX_LINE_BYTES, MAX_PENDING_CALLS, SidecarError, StreamingSidecar};
 pub use single_instance::{
     Acquired, HANDOFF_TIMEOUT, InstanceError, InstanceGuard, MAX_HANDOFF_BYTES, hand_over,
 };

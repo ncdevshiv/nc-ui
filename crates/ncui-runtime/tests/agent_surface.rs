@@ -92,7 +92,9 @@ impl ncui_webview::WebViewBackend for AlwaysAlive {
         Some(false)
     }
     fn cdp_send(&self, _command: &Value) -> Result<Value, String> {
-        Ok(serde_json::json!({ "result": {} }))
+        // A capture answer carries the payload the method promises, so the window methods
+        // that ride this transport see an honest engine answer.
+        Ok(serde_json::json!({ "result": { "data": "QUJD" } }))
     }
     fn drag_window(&self) -> bool {
         true
@@ -226,6 +228,7 @@ fn params_for(name: &str, created_window: Option<WindowId>) -> Value {
             json!({ "window": named, "url": "https://example.com" })
         }
         "ncui.window.zoom" => json!({ "window": named, "factor": 1.25 }),
+        "ncui.window.print.pdf" | "ncui.window.screenshot" => json!({ "window": named }),
         "ncui.window.post" => json!({ "window": named, "script": "1;" }),
         "ncui.app.emit" => json!({ "window": named, "event": "test" }),
         "ncui.window.state" => json!({ "window": named, "maximized": true }),

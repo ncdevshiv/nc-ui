@@ -18,7 +18,7 @@ use ncui_runtime::Runtime;
 use ncui_runtime::agent::AgentSession;
 use ncui_runtime::dispatch::dispatch;
 use ncui_runtime::rpc::{Request, Response};
-use ncui_runtime::window::ChildWebviewCapable;
+use ncui_webview::ChildWebviewCapable;
 use ncui_security::authz::AgentRole;
 use ncui_webview::HostFactory;
 use ncui_webview_child::{ChildWebviewEntry, ChildWebviewId, ChildWebviewRequest};

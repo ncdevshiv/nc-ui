@@ -283,6 +283,39 @@ pub trait WebViewBackend: core::fmt::Debug + Send {
     }
 }
 
+/// A backend whose engine can embed and drive child webviews (ADR-017 Phase 3).
+///
+/// Implemented by the wry host; the runtime reaches it by downcasting a window's
+/// backend, so the runtime stays decoupled from the engine crate.
+pub trait ChildWebviewCapable: core::fmt::Debug + Send + Sync + core::any::Any {
+    /// Builds one child webview inside the parent's frame.
+    fn create_child(
+        &self,
+        parent: ncui_core::WindowId,
+        request: &ncui_webview_child::ChildWebviewRequest,
+    ) -> Result<ncui_webview_child::ChildWebviewId, String>;
+
+    /// Moves a live child webview to a new rectangle.
+    fn set_child_bounds(
+        &self,
+        parent: ncui_core::WindowId,
+        child: ncui_webview_child::ChildWebviewId,
+        request: &ncui_webview_child::ChildWebviewRequest,
+    ) -> Result<(), String>;
+
+    /// Closes a live child webview.
+    fn close_child(
+        &self,
+        parent: ncui_core::WindowId,
+        child: ncui_webview_child::ChildWebviewId,
+    ) -> Result<(), String>;
+
+    /// Lists every live child this engine holds.
+    fn list_children(&self) -> Vec<ncui_webview_child::ChildWebviewEntry> {
+        Vec::new()
+    }
+}
+
 /// Lifts an owned backend into a boxed one, so the registry can hold heterogeneous engines.
 ///
 /// `?Sized` is what makes `Box<dyn WebViewBackend>` itself a backend: without it a registry

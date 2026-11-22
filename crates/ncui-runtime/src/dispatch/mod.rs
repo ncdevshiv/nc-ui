@@ -1790,7 +1790,7 @@ mod tests {
     /// successfully so the advertised child methods reach their handlers.
     struct AlwaysReadyChildren;
 
-    impl crate::window::ChildWebviewCapable for AlwaysReadyChildren {
+    impl ncui_webview::ChildWebviewCapable for AlwaysReadyChildren {
         fn create_child(
             &self,
             _parent: WindowId,

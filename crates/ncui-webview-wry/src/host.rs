@@ -163,8 +163,13 @@ const MONITORS_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 #[cfg(feature = "wry-engine")]
 #[derive(Debug)]
-pub(crate) enum HostEvent {
+pub enum HostEvent {
     /// Build a window and its webview.
+    #[allow(
+        clippy::type_privacy_lints,
+        reason = "the event is the engine's internal command bus; the binding's public \
+                  constructor names the type because it hands out the proxy that carries it"
+    )]
     Create(Box<CreateRequest>),
     /// Run a script in one window's page.
     Eval {
@@ -480,6 +485,16 @@ struct EngineChild {
 #[cfg(all(feature = "wry-engine", target_os = "macos"))]
 fn engine() -> Option<&'static EventLoopProxy<HostEvent>> {
     ENGINE.get().and_then(Option::as_ref)
+}
+
+/// The engine's proxy, for bindings that drive the loop from outside this crate.
+///
+/// `None` when the loop could not be started. The proxy is clone-and-send, so a
+/// binding can hold it and post events from its own thread.
+#[cfg(feature = "wry-engine")]
+#[must_use]
+pub fn engine_proxy() -> Option<EventLoopProxy<HostEvent>> {
+    engine().cloned()
 }
 
 /// The engine's proxy, starting the loop on first use.
@@ -2430,6 +2445,45 @@ mod tests {
             host.last_error()
         );
         drop(host);
+    }
+
+    #[test]
+    fn a_child_webview_embeds_into_a_live_parent_and_stays_live() {
+        if !require_display() {
+            return;
+        }
+        let host = WindowHost::new();
+        assert!(
+            host.is_alive(),
+            "the parent window did not come up: {:?}",
+            host.last_error()
+        );
+
+        // The backend-level child op: embeds a real child HWND inside the
+        // parent's frame (WebView2 composition on Windows).
+        let child_id = host
+            .create_child_webview(&ncui_webview_child::ChildWebviewRequest {
+                url: "https://app.example.com".to_owned(),
+                x: 10,
+                y: 10,
+                width: 320,
+                height: 240,
+            })
+            .expect("the child webview was embedded");
+
+        // The child is a live surface: moving it must succeed.
+        host.set_child_webview_bounds(
+            child_id,
+            &ncui_webview_child::ChildWebviewRequest {
+                url: "https://app.example.com".to_owned(),
+                x: 20,
+                y: 20,
+                width: 320,
+                height: 240,
+            },
+        )
+        .expect("the child webview was moved");
+        assert!(host.is_alive(), "the parent must stay alive");
     }
 
     #[test]

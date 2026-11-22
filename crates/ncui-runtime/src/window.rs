@@ -19,8 +19,8 @@ use std::time::SystemTime;
 use ncui_core::{Capability, CapabilitySet, CorrelationId, WindowId};
 use ncui_security::audit::{AuditEvent, AuditOutcome};
 use ncui_webview::{
-    ActionTable, HostFactory, HostSeam, MountedComponent, PageMessage, SeamError, WindowRegistry,
-    WindowRejection, WindowRequest, WindowSummary,
+    ActionTable, ChildWebviewCapable, HostFactory, HostSeam, MountedComponent, PageMessage,
+    SeamError, WindowRegistry, WindowRejection, WindowRequest, WindowSummary,
 };
 
 use crate::Runtime;
@@ -896,16 +896,18 @@ impl Windows {
     }
 
     /// Lists every live child webview this runtime's engine holds.
+    ///
+    /// A runtime whose engine cannot list children reports none, which matches the
+    /// engine's own default.
     #[must_use]
     pub fn list_child_webviews(&self) -> Vec<ncui_webview_child::ChildWebviewEntry> {
         let guard = self
             .child_engine
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(engine) = guard.as_ref() else {
-            return Vec::new();
-        };
-        engine.list_children()
+        guard
+            .as_ref()
+            .map_or_else(Vec::new, |engine| engine.list_children())
     }
 
     /// Sends one CDP command to a window's own `DevTools` endpoint (ADR-017 Phase 2).
@@ -951,37 +953,6 @@ impl Windows {
             Ok(delivered)
         })
     }
-}
-
-/// A backend whose engine can embed and drive child webviews (ADR-017 Phase 3).
-///
-/// Implemented by the wry host; the runtime reaches it by downcasting a window's
-/// backend, so the runtime stays decoupled from the engine crate.
-pub trait ChildWebviewCapable: Send + Sync + core::any::Any {
-    /// Builds one child webview inside the parent's frame.
-    fn create_child(
-        &self,
-        parent: WindowId,
-        request: &ncui_webview_child::ChildWebviewRequest,
-    ) -> Result<ncui_webview_child::ChildWebviewId, String>;
-
-    /// Moves a live child webview to a new rectangle.
-    fn set_child_bounds(
-        &self,
-        parent: WindowId,
-        child: ncui_webview_child::ChildWebviewId,
-        request: &ncui_webview_child::ChildWebviewRequest,
-    ) -> Result<(), String>;
-
-    /// Closes a live child webview.
-    fn close_child(
-        &self,
-        parent: WindowId,
-        child: ncui_webview_child::ChildWebviewId,
-    ) -> Result<(), String>;
-
-    /// Lists every live child webview this engine holds.
-    fn list_children(&self) -> Vec<ncui_webview_child::ChildWebviewEntry>;
 }
 
 impl Runtime {
@@ -1421,9 +1392,16 @@ pub fn hosted_surface(
     // remembered window place has to be answerable before the first window exists, and only the
     // engine knows which displays this process can put a window on.
     let monitors = factory.monitors();
+    // The child-webview binding drives the same loop the windows use, so it is created
+    // here, where the engine has just been started and the proxy is live.
     let mut windows = Windows::new()
         .with_registry(hosted_registry(allowed_origins, actions, page_grant))
         .with_factory(factory);
+    if let Some(proxy) = ncui_webview_wry::engine_proxy() {
+        windows = windows.with_child_engine(std::sync::Arc::new(
+            ncui_webview_wry::WryChildWebviewEngine::new(proxy),
+        ));
+    }
     windows.monitors = monitors;
     windows
 }

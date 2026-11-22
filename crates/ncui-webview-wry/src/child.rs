@@ -11,7 +11,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 pub use ncui_webview_child::ChildWebviewError;
-use ncui_webview_child::{ChildWebviewEngine, ChildWebviewRequest};
+use ncui_webview_child::{ChildWebviewEngine, ChildWebviewId, ChildWebviewRequest};
 
 use crate::host::HostEvent;
 
@@ -114,5 +114,37 @@ pub fn child_bounds(request: &ChildWebviewRequest) -> wry::Rect {
         position: wry::dpi::LogicalPosition::new(f64::from(request.x), f64::from(request.y)).into(),
         size: wry::dpi::LogicalSize::new(f64::from(request.width), f64::from(request.height))
             .into(),
+    }
+}
+
+/// The capability trait the runtime downcasts to, implemented over the wry binding.
+impl ncui_webview::ChildWebviewCapable for WryChildWebviewEngine {
+    fn create_child(
+        &self,
+        parent: ncui_core::WindowId,
+        request: &ChildWebviewRequest,
+    ) -> Result<ChildWebviewId, String> {
+        ChildWebviewEngine::create_child(self, parent, request)
+            .map(ChildWebviewId::from_raw)
+            .map_err(|error| error.to_string())
+    }
+
+    fn set_child_bounds(
+        &self,
+        parent: ncui_core::WindowId,
+        child: ChildWebviewId,
+        request: &ChildWebviewRequest,
+    ) -> Result<(), String> {
+        ChildWebviewEngine::set_child_bounds(self, parent, child.raw(), request)
+            .map_err(|error| error.to_string())
+    }
+
+    fn close_child(
+        &self,
+        parent: ncui_core::WindowId,
+        child: ChildWebviewId,
+    ) -> Result<(), String> {
+        ChildWebviewEngine::close_child(self, parent, child.raw())
+            .map_err(|error| error.to_string())
     }
 }

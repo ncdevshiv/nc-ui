@@ -27,14 +27,14 @@ const CHILD_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// through the same event loop the parent windows use, so they are created and
 /// moved on the thread that owns the platform.
 #[derive(Debug)]
-pub(crate) struct WryChildWebviewEngine {
+pub struct WryChildWebviewEngine {
     proxy: tao::event_loop::EventLoopProxy<HostEvent>,
 }
 
 impl WryChildWebviewEngine {
     /// Creates the binding over an engine proxy.
     #[must_use]
-    pub(crate) fn new(proxy: tao::event_loop::EventLoopProxy<HostEvent>) -> Self {
+    pub fn new(proxy: tao::event_loop::EventLoopProxy<HostEvent>) -> Self {
         Self { proxy }
     }
 }

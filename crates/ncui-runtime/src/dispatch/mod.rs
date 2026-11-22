@@ -1118,7 +1118,8 @@ mod tests {
                             None,
                         )]),
                     ))
-                    .with_factory(Box::new(AlwaysReady));
+                    .with_factory(Box::new(AlwaysReady))
+                    .with_child_engine(std::sync::Arc::new(AlwaysReadyChildren));
             }
             let mut session = session(*role);
             let mut created_window: Option<WindowId> = None;
@@ -1190,6 +1191,27 @@ mod tests {
                             Some(id) => json!({ "window": id.to_string(), "maximized": true }),
                             None => json!({ "window": "00000000000000000000000000000001" }),
                         },
+                        "ncui.window.child.create" => match created_window {
+                            Some(id) => json!({
+                                "window": id.to_string(),
+                                "url": "https://example.com",
+                                "x": 0, "y": 0, "width": 320, "height": 240,
+                            }),
+                            None => json!({ "window": "00000000000000000000000000000001" }),
+                        },
+                        "ncui.window.child.bounds" => match created_window {
+                            Some(id) => json!({
+                                "window": id.to_string(),
+                                "child": "child-1",
+                                "x": 0, "y": 0, "width": 320, "height": 240,
+                            }),
+                            None => json!({ "window": "00000000000000000000000000000001" }),
+                        },
+                        "ncui.window.child.close" => match created_window {
+                            Some(id) => json!({ "window": id.to_string(), "child": "child-1" }),
+                            None => json!({ "window": "00000000000000000000000000000001" }),
+                        },
+                        "ncui.window.child.list" => json!({}),
                         "ncui.window.shape" => match created_window {
                             Some(id) => json!({ "window": id.to_string(), "title": "renamed" }),
                             None => json!({ "window": "00000000000000000000000000000001" }),
@@ -1462,7 +1484,8 @@ mod tests {
                     None,
                 )]),
             ))
-            .with_factory(Box::new(AlwaysReady));
+            .with_factory(Box::new(AlwaysReady))
+            .with_child_engine(std::sync::Arc::new(AlwaysReadyChildren));
         let mut session = session(AgentRole::Administrator);
         let registry = json!({ "schema_version": 1, "features": [] });
         // `ncui.window.create` is listed before `ncui.window.close`, so its id can be reused.
@@ -1573,6 +1596,27 @@ mod tests {
                             .to_string(),
                         "maximized": true,
                     }),
+                    "ncui.window.child.create" => json!({
+                        "window": created_window
+                            .expect("create is listed before child.create")
+                            .to_string(),
+                        "url": "https://example.com",
+                        "x": 0, "y": 0, "width": 320, "height": 240,
+                    }),
+                    "ncui.window.child.bounds" => json!({
+                        "window": created_window
+                            .expect("create is listed before child.bounds")
+                            .to_string(),
+                        "child": "child-1",
+                        "x": 0, "y": 0, "width": 320, "height": 240,
+                    }),
+                    "ncui.window.child.close" => json!({
+                        "window": created_window
+                            .expect("create is listed before child.close")
+                            .to_string(),
+                        "child": "child-1",
+                    }),
+                    "ncui.window.child.list" => json!({}),
                     "ncui.window.zoom" => json!({
                         "window": created_window
                             .expect("create is listed before zoom")
@@ -1742,6 +1786,41 @@ mod tests {
 
     /// A test factory whose hosts always come up alive.
     #[derive(Debug, Default)]
+    /// A child-webview engine stub for the dispatch tests: creates children
+    /// successfully so the advertised child methods reach their handlers.
+    struct AlwaysReadyChildren;
+
+    impl crate::window::ChildWebviewCapable for AlwaysReadyChildren {
+        fn create_child(
+            &self,
+            _parent: WindowId,
+            _request: &ncui_webview_child::ChildWebviewRequest,
+        ) -> Result<ncui_webview_child::ChildWebviewId, String> {
+            Ok(ncui_webview_child::ChildWebviewId::from_raw(1))
+        }
+
+        fn set_child_bounds(
+            &self,
+            _parent: WindowId,
+            _child: ncui_webview_child::ChildWebviewId,
+            _request: &ncui_webview_child::ChildWebviewRequest,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn close_child(
+            &self,
+            _parent: WindowId,
+            _child: ncui_webview_child::ChildWebviewId,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn list_children(&self) -> Vec<ncui_webview_child::ChildWebviewEntry> {
+            Vec::new()
+        }
+    }
+
     struct AlwaysReady;
 
     impl ncui_webview::HostFactory for AlwaysReady {

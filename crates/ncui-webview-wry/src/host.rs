@@ -38,7 +38,6 @@ use std::time::Duration;
 
 #[cfg(feature = "wry-engine")]
 use crate::child::{ChildWebviewError, child_bounds};
-#[cfg(feature = "wry-engine")]
 use ncui_core::WindowId;
 use ncui_webview::{HostSeam, PageMessage, WebViewBackend};
 
@@ -1866,6 +1865,7 @@ impl WebViewBackend for WindowHost {
         }
     }
 
+    #[cfg(feature = "wry-engine")]
     fn create_child_webview(
         &self,
         request: &ncui_webview_child::ChildWebviewRequest,
@@ -1887,6 +1887,15 @@ impl WebViewBackend for WindowHost {
             .map_err(|error| error.to_string())
     }
 
+    #[cfg(not(feature = "wry-engine"))]
+    fn create_child_webview(
+        &self,
+        _request: &ncui_webview_child::ChildWebviewRequest,
+    ) -> Result<u64, String> {
+        Err("this build has no window engine".to_owned())
+    }
+
+    #[cfg(feature = "wry-engine")]
     fn set_child_webview_bounds(
         &self,
         child: u64,
@@ -1909,6 +1918,16 @@ impl WebViewBackend for WindowHost {
             .map_err(|error| error.to_string())
     }
 
+    #[cfg(not(feature = "wry-engine"))]
+    fn set_child_webview_bounds(
+        &self,
+        _child: u64,
+        _request: &ncui_webview_child::ChildWebviewRequest,
+    ) -> Result<(), String> {
+        Err("this build has no window engine".to_owned())
+    }
+
+    #[cfg(feature = "wry-engine")]
     fn close_child_webview(&self, child: u64) -> Result<(), String> {
         let (Some(engine), Some(_)) = (&self.engine, self.window) else {
             return Err("this window's engine is not running".to_owned());
@@ -1921,6 +1940,11 @@ impl WebViewBackend for WindowHost {
             .recv_timeout(ENGINE_REQUEST_TIMEOUT)
             .map_err(|error| error.to_string())?
             .map_err(|error| error.to_string())
+    }
+
+    #[cfg(not(feature = "wry-engine"))]
+    fn close_child_webview(&self, _child: u64) -> Result<(), String> {
+        Err("this build has no window engine".to_owned())
     }
 
     fn last_error(&self) -> Option<String> {

@@ -55,6 +55,7 @@ pub const LAYERS: &[(&str, u8)] = &[
     ("ncui-scheduler", 1),
     ("ncui-workers", 2),
     ("ncui-webview", 2),
+    ("ncui-webview-child", 1),
     ("ncui-app", 2),
     ("ncui-native", 2),
     ("ncui-component", 2),
@@ -62,8 +63,7 @@ pub const LAYERS: &[(&str, u8)] = &[
     // Layer 3 holds the platform adapters: a crate that implements a layer-2 port against a
     // real platform library. They sit between the port and the runtime, which is what lets
     // the runtime depend on a real host without depending on the policy that describes one.
-    ("ncui-webview-wry", 3),
-    ("ncui-gpu-renderer", 3),
+    ("ncui-webview-wry", 3),    ("ncui-gpu-renderer", 3),
     ("ncui-runtime", 4),
     ("ncui-cli", 5),
     ("ncui-bench", 5),

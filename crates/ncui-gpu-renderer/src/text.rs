@@ -1052,20 +1052,22 @@ mod tests {
         };
         let isolated_id = isolated.glyphs[0].glyph_id;
         assert_eq!(isolated.glyphs.len(), 1, "one letter alone is one glyph");
-        // Each beh in the word is joined to a neighbour, so none keeps the isolated form. A
-        // machine that cannot answer the question skips it: no font, an uncovered script (the
-        // sample is `.notdef`), or a font that maps the joined sample to the isolated glyph —
-        // macOS Helvetica does for this pair, because its Arabic forms live in an AAT `morx`
-        // table and `rustybuzz` does not implement that state machine.
-        let joined_keeps_isolated = isolated_id == 0
-            || joined
-                .glyphs
-                .iter()
-                .any(|glyph| glyph.glyph_id == isolated_id);
-        assert!(
-            !joined_keeps_isolated,
-            "a joined beh must not keep the isolated form {isolated_id}"
-        );
+        // Each beh in the word is joined to a neighbour, so none keeps the isolated form —
+        // where the machine can answer the question. A font that does not cover Arabic
+        // shapes the sample as `.notdef`, and macOS's system font carries the joining forms
+        // in an AAT `morx` table that `rustybuzz` does not implement, so there the shaper
+        // answers with the nominal glyphs and there is no join to check. The assertion runs
+        // where the system font expresses joining in GSUB (Windows's Segoe UI, Linux's
+        // DejaVu Sans) and the shaper is required to apply it.
+        if isolated_id != 0 && !cfg!(target_os = "macos") {
+            assert!(
+                joined
+                    .glyphs
+                    .iter()
+                    .all(|glyph| glyph.glyph_id != isolated_id),
+                "a joined beh must not keep the isolated form {isolated_id}"
+            );
+        }
     }
 
     #[test]

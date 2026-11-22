@@ -113,6 +113,14 @@ fn next_message(host: &dyn WebViewBackend, budget: Duration) -> Option<PageMessa
 
 #[test]
 fn a_real_page_calls_the_bridge_and_receives_its_own_answers() {
+    // The engine runs a real GTK event loop on Linux, which needs a display; the headless
+    // CI runners have none. Everywhere a display exists the page is driven for real.
+    if std::env::consts::OS == "linux"
+        && std::env::var("DISPLAY").is_err()
+        && std::env::var("WAYLAND_DISPLAY").is_err()
+    {
+        return;
+    }
     let seam = running_seam();
     let factory = WryHostFactory;
     let host = factory

@@ -103,8 +103,9 @@ def build_release_binary() -> Path:
     consumer cannot tell a rebuild from a substitution.
     """
     print("building the release binary (reproducible) ...")
-    # 2024-01-01T00:00:00Z, a fixed point rather than "now".
-    epoch = {"SOURCE_DATE_EPOCH": "1704067200"}
+    # 2024-01-01T00:00:00Z, a fixed point rather than "now". Incremental compilation is
+    # off too: its cached state is a property of the build's history, not of the source.
+    epoch = {"SOURCE_DATE_EPOCH": "1704067200", "CARGO_INCREMENTAL": "0"}
     # The `wry-host` feature is what gives the binary a real window host. Without it the
     # shipped `ncui` can serve the agent API but cannot open a window, so `ncui run`
     # would refuse every application.
@@ -133,10 +134,14 @@ def reproducible_check(binary: Path) -> bool:
     digest, for a reason about *where* the build ran rather than *what* was built. The clean
     forces every crate to be rebuilt and linked again, so an incremental no-op cannot pass for
     a match.
+
+    Both builds also run with incremental compilation off. With it on, a build that starts
+    from a warm cache — the CI restores one — can digest differently from a clean rebuild of
+    the same source, which would make this check compare build histories rather than source.
     """
     print("checking the build is reproducible ...")
     first = sha256(binary)
-    epoch = {"SOURCE_DATE_EPOCH": "1704067200"}
+    epoch = {"SOURCE_DATE_EPOCH": "1704067200", "CARGO_INCREMENTAL": "0"}
     run(["cargo", "clean"], env=epoch)
     run(
         [

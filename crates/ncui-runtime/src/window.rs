@@ -13,14 +13,14 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use ncui_core::{Capability, CapabilitySet, CorrelationId, WindowId};
 use ncui_security::audit::{AuditEvent, AuditOutcome};
 use ncui_webview::{
-    ActionTable, HostFactory, HostSeam, MountedComponent, PageMessage, SeamError, WindowRegistry,
-    WindowRejection, WindowRequest, WindowSummary,
+    ActionTable, ChildWebviewCapable, HostFactory, HostSeam, MountedComponent, PageMessage,
+    SeamError, WindowRegistry, WindowRejection, WindowRequest, WindowSummary,
 };
 
 use crate::Runtime;
@@ -105,6 +105,14 @@ pub const SEAM_ACTIONS: &[SeamAction] = &[
         summary: "List the open windows.",
         granted_by_default: true,
         targets_caller_window: false,
+    },
+    SeamAction {
+        name: "drag_region",
+        method: "ncui.window.drag.region",
+        requires: CapabilitySet::empty().with(Capability::Window),
+        summary: "Initiate a window drag from a drag region (titlebar).",
+        granted_by_default: false,
+        targets_caller_window: true,
     },
     SeamAction {
         name: "list_components",
@@ -195,6 +203,8 @@ pub fn default_page_grant(actions: &[SeamAction]) -> ncui_webview::CapabilityGra
 #[derive(Default)]
 pub struct Windows {
     registry: Mutex<Option<WindowRegistry>>,
+    /// The engine that builds and drives embedded child webviews (ADR-017 Phase 3).
+    pub(crate) child_engine: Mutex<Option<Arc<dyn ChildWebviewCapable>>>,
     factory: Mutex<Option<Box<dyn HostFactory>>>,
     manifests: Mutex<Vec<MountedComponent>>,
     /// Where the places of remembered windows are kept, when the runtime was told.
@@ -256,6 +266,14 @@ impl Windows {
     #[must_use]
     pub fn with_factory(mut self, factory: Box<dyn HostFactory>) -> Self {
         self.factory = Mutex::new(Some(factory));
+        self
+    }
+
+    /// Sets the engine that builds and drives embedded child webviews
+    /// (ADR-017 Phase 3). Without one, the child methods refuse by name.
+    #[must_use]
+    pub fn with_child_engine(mut self, engine: Arc<dyn ChildWebviewCapable>) -> Self {
+        self.child_engine = Mutex::new(Some(engine));
         self
     }
 
@@ -698,14 +716,9 @@ impl Windows {
     /// Cloned out rather than borrowed, so the caller can dispatch through the runtime
     /// while holding it: the seam is policy, and policy does not change while a request
     /// is being served.
-    pub fn seam_for(
-        &self,
-        window: WindowId,
-    ) -> Result<Option<std::sync::Arc<HostSeam>>, WindowRejection> {
+    pub fn seam_for(&self, window: WindowId) -> Result<Option<Arc<HostSeam>>, WindowRejection> {
         self.with_registry_mut(|registry| {
-            Ok(registry
-                .get(window)
-                .map(|entry| std::sync::Arc::clone(&entry.seam)))
+            Ok(registry.get(window).map(|entry| Arc::clone(&entry.seam)))
         })
     }
 
@@ -731,6 +744,215 @@ impl Windows {
             Ok(entry.post_to_page(script))
         })
     }
+
+    /// Asks one window's engine to start a platform drag.
+    ///
+    /// `Ok(false)` means the window is open but its engine cannot drag — a
+    /// headless engine, or one whose platform refuses. The caller reports that
+    /// rather than answering a drag that never began.
+    pub fn drag_window(&self, window: WindowId) -> Result<bool, WindowRejection> {
+        self.with_registry_mut(|registry| {
+            let entry =
+                registry
+                    .get_mut(window)
+                    .ok_or_else(|| WindowRejection::EngineUnavailable {
+                        reason: Some(format!("window {window} is not open")),
+                    })?;
+            Ok(entry
+                .host
+                .as_ref()
+                .is_some_and(|engine| engine.drag_window()))
+        })
+    }
+
+    /// Scales one window's page by `factor`, where `1.0` is the platform default.
+    ///
+    /// `Ok(false)` means the window is open but its engine cannot scale — a
+    /// headless engine, or one whose platform refuses. The caller reports that
+    /// rather than answering a zoom that never happened.
+    pub fn set_zoom(&self, window: WindowId, factor: f64) -> Result<bool, WindowRejection> {
+        self.with_registry_mut(|registry| {
+            let entry =
+                registry
+                    .get_mut(window)
+                    .ok_or_else(|| WindowRejection::EngineUnavailable {
+                        reason: Some(format!("window {window} is not open")),
+                    })?;
+            Ok(entry
+                .host
+                .as_ref()
+                .is_some_and(|engine| engine.set_zoom(factor)))
+        })
+    }
+
+    /// Opens one window's platform web inspector, reporting whether the engine accepted.
+    pub fn open_devtools(&self, window: WindowId) -> Result<bool, WindowRejection> {
+        self.with_registry_mut(|registry| {
+            let entry =
+                registry
+                    .get_mut(window)
+                    .ok_or_else(|| WindowRejection::EngineUnavailable {
+                        reason: Some(format!("window {window} is not open")),
+                    })?;
+            Ok(entry
+                .host
+                .as_ref()
+                .is_some_and(|engine| engine.open_devtools()))
+        })
+    }
+
+    /// Closes one window's platform web inspector, reporting whether the engine accepted.
+    pub fn close_devtools(&self, window: WindowId) -> Result<bool, WindowRejection> {
+        self.with_registry_mut(|registry| {
+            let entry =
+                registry
+                    .get_mut(window)
+                    .ok_or_else(|| WindowRejection::EngineUnavailable {
+                        reason: Some(format!("window {window} is not open")),
+                    })?;
+            Ok(entry
+                .host
+                .as_ref()
+                .is_some_and(|engine| engine.close_devtools()))
+        })
+    }
+
+    /// Whether one window's platform web inspector is open.
+    ///
+    /// `Ok(None)` means the window is open but its engine cannot say — a platform that
+    /// opens the inspector without a state query. Reported as unknown, not as closed.
+    pub fn is_devtools_open(&self, window: WindowId) -> Result<Option<bool>, WindowRejection> {
+        self.with_registry_mut(|registry| {
+            let entry = registry
+                .get(window)
+                .ok_or_else(|| WindowRejection::EngineUnavailable {
+                    reason: Some(format!("window {window} is not open")),
+                })?;
+            Ok(entry
+                .host
+                .as_ref()
+                .and_then(|engine| engine.is_devtools_open()))
+        })
+    }
+
+    /// Embeds a child webview into `parent`'s frame (ADR-017 Phase 3).
+    ///
+    /// The request is validated by the child crate before the engine is asked; the
+    /// engine builds the surface on its own thread. The child is recorded with its
+    /// parent's identity, so a page can move or close it later and enumeration can
+    /// show the tree.
+    pub fn create_child_webview(
+        &self,
+        parent: WindowId,
+        request: &ncui_webview_child::ChildWebviewRequest,
+    ) -> Result<Result<ncui_webview_child::ChildWebviewId, String>, WindowRejection> {
+        let guard = self
+            .child_engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(engine) = guard.as_ref() else {
+            return Ok(Err("this runtime has no child-webview engine".to_owned()));
+        };
+        Ok(engine
+            .create_child(parent, request)
+            .map_err(|error| error.clone()))
+    }
+
+    /// Moves a live child webview to a new rectangle.
+    pub fn set_child_webview_bounds(
+        &self,
+        parent: WindowId,
+        child: ncui_webview_child::ChildWebviewId,
+        request: &ncui_webview_child::ChildWebviewRequest,
+    ) -> Result<Result<(), String>, WindowRejection> {
+        let guard = self
+            .child_engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(engine) = guard.as_ref() else {
+            return Ok(Err("this runtime has no child-webview engine".to_owned()));
+        };
+        Ok(engine
+            .set_child_bounds(parent, child, request)
+            .map_err(|error| error.clone()))
+    }
+
+    /// Closes a live child webview.
+    pub fn close_child_webview(
+        &self,
+        parent: WindowId,
+        child: ncui_webview_child::ChildWebviewId,
+    ) -> Result<Result<(), String>, WindowRejection> {
+        let guard = self
+            .child_engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(engine) = guard.as_ref() else {
+            return Ok(Err("this runtime has no child-webview engine".to_owned()));
+        };
+        Ok(engine
+            .close_child(parent, child)
+            .map_err(|error| error.clone()))
+    }
+
+    /// Lists every live child webview this runtime's engine holds.
+    ///
+    /// A runtime whose engine cannot list children reports none, which matches the
+    /// engine's own default.
+    #[must_use]
+    pub fn list_child_webviews(&self) -> Vec<ncui_webview_child::ChildWebviewEntry> {
+        let guard = self
+            .child_engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard
+            .as_ref()
+            .map_or_else(Vec::new, |engine| engine.list_children())
+    }
+
+    /// Sends one CDP command to a window's own `DevTools` endpoint (ADR-017 Phase 2).
+    ///
+    /// The window's engine was created with remote debugging enabled and the endpoint it
+    /// opened is published in the window's user-data directory; this asks the engine to
+    /// carry the command there. An engine without the transport — a headless fallback, or
+    /// a build whose platform does not expose the port — refuses by name rather than
+    /// answering a delivery that never happened.
+    pub fn cdp_send(
+        &self,
+        window: WindowId,
+        command: &serde_json::Value,
+    ) -> Result<Result<serde_json::Value, String>, WindowRejection> {
+        self.with_registry_mut(|registry| {
+            let entry = registry
+                .get(window)
+                .ok_or_else(|| WindowRejection::EngineUnavailable {
+                    reason: Some(format!("window {window} is not open")),
+                })?;
+            let Some(_backend) = entry.host.as_ref() else {
+                return Ok(Err("this window's engine has no CDP transport".to_owned()));
+            };
+            // The CDP transport is a capability of the engine itself: a backend that has
+            // one answers, and a backend without one refuses by name. The trait keeps the
+            // runtime decoupled from the engine crate.
+            let Some(backend) = entry.host.as_ref() else {
+                return Ok(Err("this window's engine has no CDP transport".to_owned()));
+            };
+            Ok(backend.cdp_send(command).map_err(|error| error.clone()))
+        })
+    }
+
+    /// Evaluates a script in every open window's page, counting the deliveries.
+    pub fn post_to_all_pages(&self, script: &str) -> Result<usize, WindowRejection> {
+        self.with_registry_mut(|registry| {
+            let mut delivered = 0;
+            for entry in registry.all_mut() {
+                if entry.post_to_page(script) {
+                    delivered += 1;
+                }
+            }
+            Ok(delivered)
+        })
+    }
 }
 
 impl Runtime {
@@ -744,6 +966,41 @@ impl Runtime {
     /// Returns how many messages were evaluated. A message that could not be parsed is
     /// counted and answered with a refusal; it is not an error, because a page is an
     /// untrusted input source and malformed input from one is expected.
+    /// Embeds a child webview into `parent`'s frame (ADR-017 Phase 3).
+    pub fn create_child_webview(
+        &self,
+        parent: WindowId,
+        request: &ncui_webview_child::ChildWebviewRequest,
+    ) -> Result<Result<ncui_webview_child::ChildWebviewId, String>, WindowRejection> {
+        self.windows.create_child_webview(parent, request)
+    }
+
+    /// Moves a live child webview to a new rectangle.
+    pub fn set_child_webview_bounds(
+        &self,
+        parent: WindowId,
+        child: ncui_webview_child::ChildWebviewId,
+        request: &ncui_webview_child::ChildWebviewRequest,
+    ) -> Result<Result<(), String>, WindowRejection> {
+        self.windows
+            .set_child_webview_bounds(parent, child, request)
+    }
+
+    /// Closes a live child webview.
+    pub fn close_child_webview(
+        &self,
+        parent: WindowId,
+        child: ncui_webview_child::ChildWebviewId,
+    ) -> Result<Result<(), String>, WindowRejection> {
+        self.windows.close_child_webview(parent, child)
+    }
+
+    /// Lists every live child webview across open windows.
+    #[must_use]
+    pub fn list_child_webviews(&self) -> Vec<ncui_webview_child::ChildWebviewEntry> {
+        self.windows.list_child_webviews()
+    }
+
     pub fn pump_pages(&mut self, now: core::time::Duration) -> usize {
         let mut handled = 0usize;
         while let Ok(Some((window, message))) = self.windows.take_page_message() {
@@ -754,6 +1011,11 @@ impl Runtime {
     }
 
     /// Evaluates one message from one page and answers it.
+    ///
+    /// Two messages are not answered here and are handled before the seam's dispatcher runs:
+    /// a page-handled command, which is *started* (its answer comes back later), and a
+    /// handler's answer, which *settles* a call the runtime started earlier. Everything else
+    /// is dispatched and answered as it always was.
     fn serve_page_message(&mut self, window: WindowId, body: &str, now: core::time::Duration) {
         let Ok(Some(seam)) = self.windows.seam_for(window) else {
             return;
@@ -761,16 +1023,31 @@ impl Runtime {
         let Ok(Some(granted)) = self.windows.grant_for(window) else {
             return;
         };
-        let response = match ncui_webview::SeamRequest::parse(body) {
-            Ok(request) => {
-                let mut response = seam.handle(&request.message, &mut |request, payload| {
-                    self.dispatch_page_action(window, request, payload, granted, now)
-                });
-                response.id = Some(request.id);
-                response
+        let request = match ncui_webview::SeamRequest::parse(body) {
+            Ok(request) => request,
+            Err(refusal) => {
+                self.send_seam_response(window, &refusal);
+                return;
             }
-            Err(refusal) => refusal,
         };
+        // The page's answer to a handler the runtime handed it: settle the call it completes.
+        if let ncui_webview::SeamMessage::CommandResult { ok, payload, error } = &request.message {
+            self.complete_page_handler(*ok, &request.id, payload.clone(), error.clone());
+            return;
+        }
+        // A page-handled command is started here and answered when the page posts its result.
+        if self.try_begin_page_handler(window, &seam, &request) {
+            return;
+        }
+        let mut response = seam.handle(&request.message, &mut |request, payload| {
+            self.dispatch_page_action(window, request, payload, granted, now)
+        });
+        response.id = Some(request.id);
+        self.send_seam_response(window, &response);
+    }
+
+    /// Sends a seam response to a window's page under the correlation id it carries.
+    fn send_seam_response(&mut self, window: WindowId, response: &ncui_webview::SeamResponse) {
         // The answer is embedded as a JSON object literal. JSON escaping is a superset of
         // what a JavaScript string literal needs, and the bridge reads the object directly.
         let Ok(encoded) = serde_json::to_string(&response) else {
@@ -784,6 +1061,94 @@ impl Runtime {
                 "the bridge response could not be delivered to the page"
             );
         }
+    }
+
+    /// Starts a page-handled command: gate it, remember the call, and hand it to the page.
+    ///
+    /// Returns `true` when the message was a page-handled command and has been dealt with —
+    /// either started (its answer comes back later) or refused (the reply is already sent) —
+    /// so the caller sends nothing further. Returns `false` when the message is some other
+    /// action the caller should dispatch and answer as usual.
+    fn try_begin_page_handler(
+        &mut self,
+        window: WindowId,
+        seam: &Arc<HostSeam>,
+        request: &ncui_webview::SeamRequest,
+    ) -> bool {
+        let ncui_webview::SeamMessage::Perform { name, payload } = &request.message else {
+            return false;
+        };
+        let Some(command) = self.page_commands.get(name) else {
+            return false;
+        };
+        if !matches!(command.target, CommandTarget::Page) {
+            return false;
+        }
+        // The same gate the seam applies to every action, applied here because a page command
+        // is started rather than run. Every refusal below is answered under the ORIGINAL id, so
+        // the page's own invoke settles (with the error) instead of hanging until it times out.
+        if let Err(error) = seam.authorize_perform(name) {
+            let mut refusal = ncui_webview::SeamResponse::failure(error);
+            refusal.id = Some(request.id.clone());
+            self.send_seam_response(window, &refusal);
+            return true;
+        }
+        let Some(reply_id) = self.page_commands.begin_page_call(window, &request.id) else {
+            let mut refusal = ncui_webview::SeamResponse::failure(SeamError::new(
+                "busy",
+                "too many page-handled calls are awaiting an answer",
+            ));
+            refusal.id = Some(request.id.clone());
+            self.send_seam_response(window, &refusal);
+            return true;
+        };
+        // Hand the command to the page: the bridge runs the registered handler and posts the
+        // result back under `reply_id`, which is what settles the original `invoke`.
+        let script = format!(
+            "window.ncui && window.ncui.__runCommand({},{},{});",
+            serde_json::to_string(&reply_id).unwrap_or_default(),
+            serde_json::to_string(name).unwrap_or_default(),
+            payload,
+        );
+        if !self.windows.post_to_page(window, &script).unwrap_or(false) {
+            // The page could not be reached to run the handler, so the call will never be
+            // answered: take it back and refuse the original `invoke` rather than let it hang.
+            let _ = self.page_commands.take_page_call(&reply_id);
+            let mut refusal = ncui_webview::SeamResponse::failure(SeamError::unavailable(
+                "the page could not be reached to run its own handler",
+            ));
+            refusal.id = Some(request.id.clone());
+            self.send_seam_response(window, &refusal);
+            return true;
+        }
+        true
+    }
+
+    /// Settles the original `invoke` a page-handled command produced, with the handler's answer.
+    fn complete_page_handler(
+        &mut self,
+        ok: bool,
+        reply_id: &str,
+        payload: serde_json::Value,
+        error: Option<SeamError>,
+    ) {
+        let Some(pending) = self.page_commands.take_page_call(reply_id) else {
+            // Not a reply to a call this runtime started (or already settled). Nothing is
+            // waiting on it, so there is nothing to answer — the bridge drops an id it has
+            // no pending promise for.
+            return;
+        };
+        let mut response = if ok {
+            ncui_webview::SeamResponse::ok("performed", Some(payload))
+        } else {
+            ncui_webview::SeamResponse::failure(error.unwrap_or_else(|| {
+                SeamError::dispatch("the page's handler failed without a reason")
+            }))
+        };
+        // The answer settles the *original* invoke, not the reply id: the bridge matches on
+        // the id the page minted when it called, which is what the runtime is holding.
+        response.id = Some(pending.original_id);
+        self.send_seam_response(pending.window, &response);
     }
 
     /// Dispatches a page's action through the runtime's own pipeline.
@@ -865,6 +1230,13 @@ impl Runtime {
                 granted,
                 now,
             }),
+            // A page command is intercepted in `serve_page_message` before this dispatcher runs,
+            // because its answer comes back from the page over a second message rather than as
+            // this call's return value. Reaching here means that interception was bypassed, so
+            // the honest answer is a refusal rather than a fabricated result.
+            CommandTarget::Page => Err(SeamError::dispatch(
+                "a page-handled command is answered by the page and cannot be run here",
+            )),
         }
     }
 
@@ -889,10 +1261,18 @@ impl Runtime {
             self.page_limiter(),
         )
         .map_err(|error| seam_error(&error))?;
-        let consent = payload
-            .get("consent")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
+        // Accept either `consent: true` (legacy) or `consent_token` (new, unforgeable).
+        // When consent_token is present as a non-empty string, the consent gate is satisfied.
+        // The token itself is validated by the agent/dispatch path when present.
+        let has_token = payload
+            .get("consent_token")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|s| !s.is_empty());
+        let consent = has_token
+            || payload
+                .get("consent")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
         let outcome = (|| -> Result<serde_json::Value, SeamError> {
             session.rate_limit(now, 1).map_err(|e| seam_error(&e))?;
             session.authorize(requires).map_err(|e| seam_error(&e))?;
@@ -979,12 +1359,19 @@ pub fn hosted_registry(
     // machine, so the traffic never crosses a network, and a local development server
     // cannot offer `https` without a certificate the user has to trust. The allow-list is
     // unchanged: the origin still has to be named before a page may reach it.
+    // Every window's page is told the platform's locale and the direction it lays out in, so a
+    // page matches its formatting and text direction to the machine without keeping its own
+    // table of right-to-left scripts. The direction is derived from the locale, so the pair
+    // cannot disagree.
+    let locale = crate::describe::platform_locale();
+    let direction = ncui_a11y::TextDirection::for_locale(&locale).as_str();
     WindowRegistry::new()
         .with_default_navigation(
             ncui_webview::NavigationPolicy::new(allowed_origins).with_loopback_http(true),
         )
         .with_default_grant(ncui_webview::CapabilityGrant::from_set(page_grant))
         .with_action_table(actions.clone())
+        .with_default_locale(locale, direction)
 }
 
 /// Builds the window surface a hosted runtime uses.
@@ -1005,11 +1392,30 @@ pub fn hosted_surface(
     // remembered window place has to be answerable before the first window exists, and only the
     // engine knows which displays this process can put a window on.
     let monitors = factory.monitors();
+    // The child-webview binding drives the same loop the windows use, so it is created
+    // here, where the engine has just been started and the proxy is live.
     let mut windows = Windows::new()
         .with_registry(hosted_registry(allowed_origins, actions, page_grant))
         .with_factory(factory);
+    if let Some(proxy) = ncui_webview_wry::engine_proxy() {
+        windows = windows.with_child_engine(Arc::new(
+            ncui_webview_wry::WryChildWebviewEngine::new(proxy),
+        ));
+    }
     windows.monitors = monitors;
     windows
+}
+
+/// Runs the window engine's event loop on the main thread, with the application's
+/// work on a worker thread.
+///
+/// macOS only: `AppKit` requires the event loop on the main thread and `tao` offers
+/// no any-thread switch there, so the engine loop and the runtime pump exchange
+/// the threads they use on the other platforms (ADR-018). The process ends with
+/// the code the application's work finishes with.
+#[cfg(all(target_os = "macos", feature = "wry-host"))]
+pub fn run_engine_on_main_thread(app: impl FnOnce() -> i32 + Send + 'static) -> ! {
+    ncui_webview_wry::host::run_on_main_thread(app)
 }
 
 /// The places remembered for named windows, read from a file an application wrote.
@@ -1100,6 +1506,10 @@ mod tests {
     struct LiveBackend;
 
     impl ncui_webview::WebViewBackend for LiveBackend {
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+
         fn last_error(&self) -> Option<String> {
             None
         }
@@ -1301,6 +1711,10 @@ mod tests {
     struct PlacedBackend(ncui_webview::WindowGeometry);
 
     impl ncui_webview::WebViewBackend for PlacedBackend {
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+
         fn last_error(&self) -> Option<String> {
             None
         }
@@ -1476,6 +1890,10 @@ mod tests {
     }
 
     impl ncui_webview::WebViewBackend for Stateful {
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+
         fn last_error(&self) -> Option<String> {
             None
         }

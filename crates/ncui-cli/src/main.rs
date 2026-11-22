@@ -21,6 +21,25 @@ use ncui_cli::{Command, commands, format_from, parse, usage};
 const EXIT_FAILURE: u8 = 2;
 
 fn main() -> ExitCode {
+    #[cfg(all(target_os = "macos", feature = "wry-host"))]
+    {
+        // ADR-018: AppKit requires the event loop to be created and run on the main
+        // thread, and `tao` offers no any-thread switch there. The engine's loop owns
+        // this thread; the application runs on a worker and reaches the loop through
+        // its proxy. The process ends with the code the application finishes with,
+        // which is why this call never returns.
+        ncui_runtime::window::run_engine_on_main_thread(|| i32::from(run_application()))
+    }
+    #[cfg(not(all(target_os = "macos", feature = "wry-host")))]
+    {
+        ExitCode::from(run_application())
+    }
+}
+
+/// Parses the command line, runs it, and writes the rendered outcome.
+///
+/// Returns the exit code the process ends with.
+fn run_application() -> u8 {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // An installer is this program with a bundle appended, and it installs what it carries. Run
@@ -41,7 +60,7 @@ fn main() -> ExitCode {
             Err(message) => {
                 let _ = write_line(&format!("ncui: {message}\n"));
                 let _ = write_line(&usage::text());
-                return ExitCode::from(EXIT_FAILURE);
+                return EXIT_FAILURE;
             }
         };
         let format = format_from(&line);
@@ -52,7 +71,7 @@ fn main() -> ExitCode {
         // it: an installer that left its own unpacked copy behind would leave a second copy of the
         // application in a directory the user never chose.
         return match write_line(&rendered) {
-            Ok(()) => ExitCode::from(code),
+            Ok(()) => code,
             Err(error) => report_failure(&format!("ncui: cannot write output: {error}")),
         };
     }
@@ -62,13 +81,13 @@ fn main() -> ExitCode {
         Err(message) => {
             let _ = write_line(&format!("ncui: {message}\n"));
             let _ = write_line(&usage::text());
-            return ExitCode::from(EXIT_FAILURE);
+            return EXIT_FAILURE;
         }
     };
 
     if command == Command::Help {
         return match write_line(&usage::text()) {
-            Ok(()) => ExitCode::SUCCESS,
+            Ok(()) => 0,
             Err(error) => report_failure(&format!("ncui: cannot write usage: {error}")),
         };
     }
@@ -78,7 +97,7 @@ fn main() -> ExitCode {
     let code = u8::try_from(outcome.exit_code()).unwrap_or(EXIT_FAILURE);
 
     match write_line(&rendered) {
-        Ok(()) => ExitCode::from(code),
+        Ok(()) => code,
         Err(error) => report_failure(&format!("ncui: cannot write output: {error}")),
     }
 }
@@ -87,13 +106,13 @@ fn main() -> ExitCode {
 ///
 /// Stderr is used because stdout is by definition unusable at this point. It goes through
 /// an explicit write rather than `eprint!`, which the workspace denies in library code.
-fn report_failure(message: &str) -> ExitCode {
+fn report_failure(message: &str) -> u8 {
     let stderr = std::io::stderr();
     let mut out = stderr.lock();
     let _ = out.write_all(message.as_bytes());
     let _ = out.write_all(b"\n");
     let _ = out.flush();
-    ExitCode::from(EXIT_FAILURE)
+    EXIT_FAILURE
 }
 
 /// Writes text to stdout.

@@ -1,0 +1,22 @@
+{
+  "name": "tauri-third-app",
+  "version": "0.0.0",
+  "description": "",
+  "scripts": {
+    "start": "vite",
+    "dev": "vite",
+    "build": "vite build",
+    "serve": "vite preview",
+    "tauri": "tauri"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.4",
+    "vite": "^3.0.9",
+    "vite-plugin-solid": "^2.3.0"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.12.4",
+    "solid-js": "^1.5.1"
+  }
+}

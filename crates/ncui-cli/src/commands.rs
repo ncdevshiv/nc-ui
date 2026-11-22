@@ -33,9 +33,24 @@ pub fn run(command: &Command, format: Format) -> Outcome {
         directory,
         watch,
         url,
+        port,
     } = command
     {
-        return match run_app(directory, *watch, url.as_deref()) {
+        return match run_app(directory, *watch, url.as_deref(), *port) {
+            Ok(payload) => Outcome::Ok {
+                payload,
+                format,
+                failed: false,
+            },
+            Err(message) => Outcome::Err(message),
+        };
+    }
+
+    // `new` scaffolds a directory and touches nothing else: it needs no runtime, and
+    // starting one to write three files would be a runtime spun up for nothing. Handled
+    // here, before the shared runtime is started, for the same reason `run` is.
+    if let Command::New { directory } = command {
+        return match new_app(directory) {
             Ok(payload) => Outcome::Ok {
                 payload,
                 format,
@@ -79,6 +94,7 @@ pub fn run(command: &Command, format: Format) -> Outcome {
         Command::Launch { name, root, link } => launch(name, root.as_deref(), link.as_deref()),
         // `run` returned above; this arm exists so the match is total.
         Command::Run { .. } => Err("the application was not run".to_owned()),
+        Command::New { .. } => Err("the application was not scaffolded".to_owned()),
         Command::Help => Ok((Value::Null, false)),
     };
     runtime.shutdown();
@@ -96,6 +112,55 @@ pub fn run(command: &Command, format: Format) -> Outcome {
 type CommandResult = Result<(Value, bool), String>;
 
 /// Runs an application: serves its assets and opens its window.
+/// Scaffold a new application directory.
+///
+/// Writes a manifest (`ncui.app.json`), an entry page (`public/index.html`),
+/// and a script (`public/app.js`). Refuses to scaffold over a non-empty directory.
+fn new_app(directory: &str) -> Result<Value, String> {
+    use std::path::Path;
+
+    let root = Path::new(directory);
+
+    if root.exists() {
+        let entries =
+            std::fs::read_dir(root).map_err(|e| format!("cannot read {directory}: {e}"))?;
+        if entries.count() > 0 {
+            return Err(format!("{directory} already exists and is not empty"));
+        }
+    }
+
+    let name = root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "directory must have a valid name".to_owned())?;
+    if name.is_empty() || name == "." || name == ".." {
+        return Err("directory name must not be empty, `.` or `..`".to_owned());
+    }
+
+    let public = root.join("public");
+    std::fs::create_dir_all(&public)
+        .map_err(|e| format!("cannot create {directory}/public: {e}"))?;
+
+    let manifest = format!(
+        "{{\n  \"name\": \"{name}\",\n  \"version\": \"1.0.0\",\n  \"entry\": \"index.html\",\n  \"assets\": \"public\",\n  \"window\": {{\"title\": \"{name}\", \"width\": 900, \"height\": 640}},\n  \"capabilities\": [\"read.metrics\", \"window\"]\n}}\n",
+    );
+    std::fs::write(root.join("ncui.app.json"), &manifest)
+        .map_err(|e| format!("cannot write manifest: {e}"))?;
+
+    let html = "<!doctype html>\n<html>\n<head><meta charset=\"utf-8\"><title>APP</title></head>\n<body>\n  <script src=\"/__ncui/reload.js\"></script>\n  <script src=\"app.js\" type=\"module\"></script>\n</body>\n</html>\n";
+    std::fs::write(public.join("index.html"), html.replace("APP", name))
+        .map_err(|e| format!("cannot write index.html: {e}"))?;
+
+    let js = "import { invoke, on } from \"@ncui/client\";\n\nwindow.__ncui_state = window.__ncui_state || { count: 0 };\n\nconst metrics = await invoke(\"describe_metrics\");\nconsole.log(\"metrics:\", metrics);\n\non(\"resized\", ({ width, height }) => {\n  console.log(\"resized:\", width, height);\n});\n";
+    std::fs::write(public.join("app.js"), js).map_err(|e| format!("cannot write app.js: {e}"))?;
+
+    Ok(serde_json::json!({
+        "scaffolded": name,
+        "directory": directory,
+        "files": ["ncui.app.json", "public/index.html", "public/app.js"],
+    }))
+}
+
 ///
 /// The application is a directory with a manifest in it. Its assets are served over
 /// loopback HTTP so the page has a real origin, the window is opened at its entry page,
@@ -104,15 +169,26 @@ type CommandResult = Result<(Value, bool), String>;
 /// Without the `wry-host` feature there is no engine to open a window with, and the
 /// command says so rather than serving assets nobody will look at.
 #[cfg(feature = "wry-host")]
-fn run_app(directory: &str, watch: bool, url: Option<&str>) -> Result<Value, String> {
+fn run_app(
+    directory: &str,
+    watch: bool,
+    url: Option<&str>,
+    port: Option<u16>,
+) -> Result<Value, String> {
     use std::time::Duration;
 
     use ncui_runtime::application::Application;
 
     let directory_path = std::path::Path::new(directory);
-    let mut application = Application::launch(directory_path, Limits::default())
-        .map_err(|error| format!("cannot run the application: {error}"))?
-        .with_link(url.map(str::to_owned));
+    let mut application = if let Some(port) = port {
+        Application::launch_with_port(directory_path, Limits::default(), port)
+            .map_err(|error| format!("cannot run the application: {error}"))?
+            .with_link(url.map(str::to_owned))
+    } else {
+        Application::launch(directory_path, Limits::default())
+            .map_err(|error| format!("cannot run the application: {error}"))?
+            .with_link(url.map(str::to_owned))
+    };
     if watch {
         application
             .watch()
@@ -468,7 +544,7 @@ pub(crate) fn uninstall(name: &str, root: Option<&str>) -> Result<(Value, bool),
 fn launch(name: &str, root: Option<&str>, link: Option<&str>) -> Result<(Value, bool), String> {
     let root = root.map_or_else(ncui_native::default_root, PathBuf::from);
     let installed = resolve_installed(name, &root)?;
-    run_app(&installed.directory, false, link).map(|payload| (payload, false))
+    run_app(&installed.directory, false, link, None).map(|payload| (payload, false))
 }
 
 /// Finds the installed application called `name` under `root`.
@@ -511,7 +587,12 @@ pub(crate) fn installed(root: Option<&str>) -> Result<(Value, bool), String> {
 /// The manifest is still read, so a user whose application is broken hears about the
 /// manifest rather than about the build. The refusal itself is the build's.
 #[cfg(not(feature = "wry-host"))]
-fn run_app(directory: &str, _watch: bool, _url: Option<&str>) -> Result<Value, String> {
+fn run_app(
+    directory: &str,
+    _watch: bool,
+    _url: Option<&str>,
+    _port: Option<u16>,
+) -> Result<Value, String> {
     use ncui_app::AppManifest;
 
     let directory_path = std::path::Path::new(directory);

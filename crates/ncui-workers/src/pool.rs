@@ -165,6 +165,13 @@ pub struct WorkerPool {
     limits: Limits,
     metrics: Arc<MetricsRegistry>,
     threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    /// Whether the worker threads have been spawned.
+    ///
+    /// The pool is built without its threads and spawns them on first use, so a runtime
+    /// that never submits background work never pays for a worker stack. This flag makes
+    /// the one-time spawn race-free: `start` is idempotent and concurrent first submits
+    /// produce exactly one set of threads.
+    spawned: AtomicBool,
 }
 
 impl fmt::Debug for WorkerPool {
@@ -188,10 +195,17 @@ impl fmt::Debug for WorkerPool {
 impl WorkerPool {
     /// Starts a pool sized from `limits`, recording metrics into `metrics`.
     ///
-    /// Returns `Err` rather than clamping when the limits are incoherent, or when the
-    /// operating system refuses the worker threads. A pool that silently starts with fewer
-    /// workers than configured would under-deliver the concurrency it promised, so thread
-    /// creation failure is an error the caller must handle.
+    /// The pool is built **without** its worker threads. The threads are spawned on first
+    /// use — by [`WorkerPool::start`] or the first [`WorkerPool::submit`] — so a runtime
+    /// that never runs background work never pays for a worker stack. Use
+    /// [`WorkerPool::start`] to pay that cost up front, at a chosen moment, rather than on
+    /// the first submission.
+    ///
+    /// Returns `Err` rather than clamping when the limits are incoherent. Thread-creation
+    /// failure is reported from [`WorkerPool::start`] instead of here, for the same reason:
+    /// a pool that silently starts with fewer workers than configured would under-deliver
+    /// the concurrency it promised, so a thread the operating system refuses is an error the
+    /// caller must handle.
     pub fn new(limits: Limits, metrics: Arc<MetricsRegistry>) -> Result<Self> {
         limits.validate()?;
         if limits.max_workers == 0 {
@@ -211,40 +225,71 @@ impl WorkerPool {
             metric_failures: AtomicU64::new(0),
         });
 
+        // The worker records exist before their threads do, so `worker_count` reports the
+        // configured capacity and the inspector can show a worker that has not yet been
+        // given a thread. They are created `Created` and moved to `Active` on spawn.
         let mut workers = Vec::with_capacity(limits.max_workers);
-        let mut threads = Vec::with_capacity(limits.max_workers);
-
         for _ in 0..limits.max_workers {
-            let runtime = Arc::new(WorkerRuntime {
+            workers.push(Arc::new(WorkerRuntime {
                 id: WorkerId::new(),
                 state: Mutex::new(WorkerState::Created),
                 completed: AtomicU64::new(0),
                 failed: AtomicU64::new(0),
                 cancelled: AtomicU64::new(0),
-            });
-            let handle = {
-                let shared = Arc::clone(&shared);
-                let metrics = Arc::clone(&metrics);
-                let thread_runtime = Arc::clone(&runtime);
-                let name = format!("ncui-worker-{}", runtime.id);
-                std::thread::Builder::new().name(name).spawn(move || {
-                    worker_loop(&shared, &metrics, &thread_runtime);
-                })?
-            };
-            threads.push(handle);
-            workers.push(runtime);
+            }));
         }
 
-        let pool = Self {
+        Ok(Self {
             shared,
             workers,
             limits,
             metrics,
-            threads: Mutex::new(threads),
-        };
-        pool.set_all_state(WorkerState::Active);
-        pool.record_gauge(WORKERS_ACTIVE, pool.workers.len() as f64);
-        Ok(pool)
+            threads: Mutex::new(Vec::new()),
+            spawned: AtomicBool::new(false),
+        })
+    }
+
+    /// Spawns the pool's worker threads, once.
+    ///
+    /// Idempotent and race-free: the first caller spawns every thread and moves the workers
+    /// to [`WorkerState::Active`], and every later call — including a concurrent one —
+    /// observes the spawn already done and returns immediately. [`WorkerPool::submit`] calls
+    /// this lazily, so an application that submits work pays for the threads on its first
+    /// submission and one that never does pays nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's error if it refuses a worker thread. The threads
+    /// created before the refusal are kept and joined at shutdown, so a partial spawn is
+    /// visible in [`WorkerPool::shutdown`]'s report rather than silently discarded.
+    pub fn start(&self) -> Result<()> {
+        if self.spawned.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        let mut threads = self.threads.lock_recovering();
+        for runtime in &self.workers {
+            let shared = Arc::clone(&self.shared);
+            let metrics = Arc::clone(&self.metrics);
+            let thread_runtime = Arc::clone(runtime);
+            let name = format!("ncui-worker-{}", runtime.id);
+            let handle = std::thread::Builder::new()
+                .name(name)
+                .spawn(move || {
+                    worker_loop(&shared, &metrics, &thread_runtime);
+                })
+                .map_err(|error| {
+                    NcError::new(ErrorKind::Validation {
+                        field: "max_workers".to_owned(),
+                        reason: format!("the operating system refused a worker thread: {error}"),
+                    })
+                    .operation("workers::pool::start")
+                })?;
+            threads.push(handle);
+        }
+        drop(threads);
+        self.set_all_state(WorkerState::Active);
+        self.record_gauge(WORKERS_ACTIVE, self.workers.len() as f64);
+        Ok(())
     }
 
     /// Starts a pool with limits chosen for `workers` count, for tests and small tools.
@@ -267,6 +312,10 @@ impl WorkerPool {
             })
             .operation("workers::submit"));
         }
+        // Pay for the worker threads on the first submission rather than at construction, so
+        // a pool that never runs background work never spawns a thread. Idempotent: after the
+        // first call this is a single atomic load-and-return.
+        self.start()?;
         if task.payload_bytes > self.limits.max_worker_payload_bytes {
             return Err(NcError::new(ErrorKind::LimitExceeded {
                 resource: "worker.payload.bytes".to_owned(),
@@ -370,6 +419,16 @@ impl WorkerPool {
         self.workers.len()
     }
 
+    /// Whether the pool's worker threads have been spawned.
+    ///
+    /// A pool is built without its threads and spawns them on first use, so this is how a
+    /// caller tells "built but never used" from "running". It is the observable half of the
+    /// lazy spawn: `worker_count` reports the configured capacity either way.
+    #[must_use]
+    pub fn has_started(&self) -> bool {
+        self.spawned.load(Ordering::Acquire)
+    }
+
     /// Total `(completed, failed, cancelled)` across every worker.
     #[must_use]
     pub fn task_counters(&self) -> (u64, u64, u64) {
@@ -442,11 +501,17 @@ impl WorkerPool {
     /// their task returns. Nothing is aborted: a task that finishes normally still runs to
     /// completion, it is simply no longer waited for.
     pub fn shutdown(&self) -> ShutdownReport {
+        // The flag and the notification are made atomic with respect to `take_task`'s
+        // predicate check by taking the queue lock: notifying without the lock lets a
+        // worker that has checked the flag but not yet entered `wait` miss the wake-up
+        // entirely, and a missed wake-up is a worker that outlives the shutdown deadline.
+        let queue = self.shared.lock_queue();
         if !self.shared.shutdown.swap(true, Ordering::AcqRel) {
             self.set_all_state(WorkerState::Stopped);
             self.record_gauge(WORKERS_ACTIVE, 0.0);
         }
         self.shared.signal.notify_all();
+        drop(queue);
 
         let handles = std::mem::take(&mut *self.threads.lock_recovering());
         let deadline =
@@ -694,6 +759,7 @@ mod tests {
     fn a_cancelled_task_never_executes() {
         let pool = pool_with(1, 8);
         // Suspend first so the task cannot be dequeued before it is cancelled.
+        pool.start().expect("start should succeed");
         pool.transition(WorkerState::Suspended).expect("suspend");
 
         let ran = Arc::new(AtomicBool::new(false));
@@ -732,6 +798,7 @@ mod tests {
     #[test]
     fn a_full_queue_rejects_rather_than_dropping_silently() {
         let pool = pool_with(1, 2);
+        pool.start().expect("start should succeed");
         pool.transition(WorkerState::Suspended).expect("suspend");
 
         for _ in 0..2 {
@@ -754,6 +821,7 @@ mod tests {
     #[test]
     fn drop_oldest_keeps_the_bound_and_reports_the_eviction() {
         let pool = pool_with(1, 2);
+        pool.start().expect("start should succeed");
         pool.transition(WorkerState::Suspended).expect("suspend");
 
         for _ in 0..2 {
@@ -797,6 +865,7 @@ mod tests {
     #[test]
     fn queue_depth_never_exceeds_the_configured_bound() {
         let pool = pool_with(2, 4);
+        pool.start().expect("start should succeed");
         pool.transition(WorkerState::Suspended).expect("suspend");
 
         for _ in 0..64 {
@@ -881,11 +950,40 @@ mod tests {
     #[test]
     fn snapshots_report_every_worker_with_distinct_ids() {
         let pool = pool_with(3, 8);
+        // A pool is built without its threads; they come into being on first use.
+        assert!(
+            pool.snapshot()
+                .iter()
+                .all(|w| w.state == WorkerState::Created),
+            "a pool that has not started must report its workers as created, not active"
+        );
+        pool.start().expect("start should succeed");
         let snapshot = pool.snapshot();
         assert_eq!(snapshot.len(), 3);
         assert!(snapshot.iter().all(|w| w.state == WorkerState::Active));
         let unique: HashSet<_> = snapshot.iter().map(|w| w.id).collect();
         assert_eq!(unique.len(), 3, "worker ids must be distinct");
+    }
+
+    #[test]
+    fn a_pool_that_never_runs_work_never_spawns_a_thread() {
+        // The point of the lazy spawn: building a pool is bookkeeping only, so a runtime
+        // that never submits background work pays for no worker stack at all.
+        let pool = pool_with(4, 8);
+        assert!(
+            !pool.has_started(),
+            "a fresh pool must not have spawned its threads"
+        );
+        assert_eq!(
+            pool.worker_count(),
+            4,
+            "the configured capacity is still reported"
+        );
+        // Starting is what spawns them, and it is idempotent.
+        pool.start().expect("start should succeed");
+        assert!(pool.has_started());
+        pool.start()
+            .expect("a second start is a no-op, not an error");
     }
 
     #[test]
@@ -912,6 +1010,7 @@ mod tests {
     fn an_evicted_cancellation_does_not_leak_its_marker() {
         let pool = pool_with(1, 2);
         // Suspend the worker so tasks queue instead of running, making eviction reachable.
+        pool.start().expect("start should succeed");
         pool.transition(WorkerState::Suspended).expect("suspend");
 
         for round in 0..50 {

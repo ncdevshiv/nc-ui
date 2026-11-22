@@ -138,6 +138,15 @@ pub trait WebViewBackend: core::fmt::Debug + Send {
     /// than reporting a success that never happened.
     fn evaluate_script(&self, script: &str) -> bool;
 
+    /// Initiate a window drag (titlebar drag region).
+    ///
+    /// Returns `true` when the drag was initiated, `false` when the backend
+    /// cannot perform this operation. Called by the page when the user
+    /// mousedowns on a `[data-ncui-drag-region]` element.
+    fn drag_window(&self) -> bool {
+        false
+    }
+
     /// Where the window is and how big it is, or `None` when this backend cannot say.
     ///
     /// A backend that cannot report its geometry says so rather than guessing: a guessed
@@ -196,6 +205,115 @@ pub trait WebViewBackend: core::fmt::Debug + Send {
         let _ = tray;
         false
     }
+
+    /// Scales the window's page by `factor`, where `1.0` is the platform default.
+    ///
+    /// `false` when this backend cannot scale — an engine without the call, or a window
+    /// that has gone. The result is not read back: the platform applies the scale and the
+    /// next paint shows it.
+    fn set_zoom(&self, factor: f64) -> bool {
+        let _ = factor;
+        false
+    }
+
+    /// Opens the platform's web inspector for this window.
+    ///
+    /// `false` when this backend cannot open one, or cannot answer whether it did — on a
+    /// platform that opens the inspector without being able to report its state, that is
+    /// the honest answer, and it is reported as such rather than claimed as a success.
+    fn open_devtools(&self) -> bool {
+        false
+    }
+
+    /// Closes the platform's web inspector for this window. See [`WebViewBackend::open_devtools`].
+    fn close_devtools(&self) -> bool {
+        false
+    }
+
+    /// Whether the platform's web inspector is open for this window.
+    ///
+    /// `None` when this backend cannot say — a platform that opens the inspector without a
+    /// state query is reported as unknown, not as closed.
+    fn is_devtools_open(&self) -> Option<bool> {
+        None
+    }
+
+    /// The backend as [`Any`](core::any::Any), for a caller that knows a concrete engine
+    /// type and needs a capability only it exposes (the CDP transport). A backend that has
+    /// no such capability returns a value that downcasts to nothing.
+    fn as_any(&self) -> &dyn core::any::Any;
+
+    /// Sends one CDP command to this window's own `DevTools` endpoint (ADR-017 Phase 2).
+    ///
+    /// The default refuses: a backend without the transport says so by name rather than
+    /// answering a delivery that never happened. The error string is the backend's own
+    /// named reason, ready for the caller's report.
+    fn cdp_send(&self, command: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let _ = command;
+        Err("this backend has no CDP transport".to_owned())
+    }
+
+    /// Builds one child webview inside the parent window's frame
+    /// (ADR-017 Phase 3), returning the engine's identity for it.
+    ///
+    /// The default refuses: a backend without the embedding capability says so by
+    /// name rather than answering a creation that never happened.
+    fn create_child_webview(
+        &self,
+        request: &ncui_webview_child::ChildWebviewRequest,
+    ) -> Result<u64, String> {
+        let _ = request;
+        Err("this backend cannot embed child webviews".to_owned())
+    }
+
+    /// Moves a live child webview to a new rectangle.
+    fn set_child_webview_bounds(
+        &self,
+        child: u64,
+        request: &ncui_webview_child::ChildWebviewRequest,
+    ) -> Result<(), String> {
+        let _ = (child, request);
+        Err("this backend cannot move child webviews".to_owned())
+    }
+
+    /// Closes a live child webview.
+    fn close_child_webview(&self, child: u64) -> Result<(), String> {
+        let _ = child;
+        Err("this backend cannot close child webviews".to_owned())
+    }
+}
+
+/// A backend whose engine can embed and drive child webviews (ADR-017 Phase 3).
+///
+/// Implemented by the wry host; the runtime reaches it by downcasting a window's
+/// backend, so the runtime stays decoupled from the engine crate.
+pub trait ChildWebviewCapable: core::fmt::Debug + Send + Sync + core::any::Any {
+    /// Builds one child webview inside the parent's frame.
+    fn create_child(
+        &self,
+        parent: ncui_core::WindowId,
+        request: &ncui_webview_child::ChildWebviewRequest,
+    ) -> Result<ncui_webview_child::ChildWebviewId, String>;
+
+    /// Moves a live child webview to a new rectangle.
+    fn set_child_bounds(
+        &self,
+        parent: ncui_core::WindowId,
+        child: ncui_webview_child::ChildWebviewId,
+        request: &ncui_webview_child::ChildWebviewRequest,
+    ) -> Result<(), String>;
+
+    /// Closes a live child webview.
+    fn close_child(
+        &self,
+        parent: ncui_core::WindowId,
+        child: ncui_webview_child::ChildWebviewId,
+    ) -> Result<(), String>;
+
+    /// Lists every live child this engine holds.
+    fn list_children(&self) -> Vec<ncui_webview_child::ChildWebviewEntry> {
+        Vec::new()
+    }
 }
 
 /// Lifts an owned backend into a boxed one, so the registry can hold heterogeneous engines.
@@ -204,6 +322,10 @@ pub trait WebViewBackend: core::fmt::Debug + Send {
 /// storing `Box<dyn WebViewBackend>` could not store that box again in another box, and every
 /// call site would have to reach through the box by hand.
 impl<T: WebViewBackend + ?Sized> WebViewBackend for Box<T> {
+    fn as_any(&self) -> &dyn core::any::Any {
+        T::as_any(self)
+    }
+
     fn last_error(&self) -> Option<String> {
         T::last_error(self)
     }
@@ -218,6 +340,10 @@ impl<T: WebViewBackend + ?Sized> WebViewBackend for Box<T> {
 
     fn evaluate_script(&self, script: &str) -> bool {
         T::evaluate_script(self, script)
+    }
+
+    fn drag_window(&self) -> bool {
+        T::drag_window(self)
     }
 
     fn geometry(&self) -> Option<WindowGeometry> {

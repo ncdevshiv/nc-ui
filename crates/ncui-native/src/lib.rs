@@ -23,15 +23,22 @@
 //!
 //! # What is here, and what is not
 //!
-//! Three capabilities are here. Two are implemented completely against `std`, with no
-//! platform binding and no `unsafe`: the filesystem ([`fs`]) and running a program
-//! ([`process`]). The third, the clipboard ([`clipboard`]), goes through the tool each
-//! platform already ships, because the clipboard has no `std` interface and its bindings
-//! are not safe Rust. The rest of the native surface — dialogs, notifications, the tray,
-//! menus and global shortcuts — needs a platform binding this workspace does not have yet,
-//! and `docs/known-gaps.md` records exactly which ones and why. They are not offered here
-//! at all: a command that reports success and does nothing would be worse than one that
-//! does not exist.
+//! Three capabilities are implemented completely against `std`, with no platform binding and
+//! no `unsafe`: the filesystem ([`fs`]) and running a program ([`process`]) need none, and
+//! [`open`] calls the platform's launcher through the process it already ships. The clipboard
+//! ([`clipboard`]) goes through the tool each platform already ships, because the clipboard has
+//! no `std` interface and its bindings are not safe Rust. The rest of the native surface —
+//! notifications, the tray, menus and global shortcuts — needs a platform binding this workspace
+//! does not have yet, and `docs/known-gaps.md` records exactly which ones and why. They are not
+//! offered here at all: a command that reports success and does nothing would be worse than one
+//! that does not exist.
+//!
+//! [`dialog`] is the boundary case between the two halves. Its vocabulary, its option and filter
+//! rules and its validation of the path a person chose are plain Rust and are always compiled and
+//! tested, headlessly. The one part that is not — the modal picker that blocks on a person — is
+//! behind the `dialogs` feature, because a headless machine has no person to answer it. So the
+//! rules about a dialog are here and tested; the showing of one is behind a feature and needs a
+//! one-time human verification that `docs/known-gaps.md` records.
 
 #![cfg_attr(
     test,
@@ -44,6 +51,7 @@
 )]
 
 pub mod clipboard;
+pub mod dialog;
 pub mod fs;
 #[cfg(feature = "global-hotkeys")]
 pub mod hotkey;
@@ -58,6 +66,13 @@ pub mod single_instance;
 pub use clipboard::{
     CLIPBOARD_TIMEOUT, Clipboard, ClipboardError, ClipboardText, ClipboardWritten,
     MAX_CLIPBOARD_BYTES,
+};
+#[cfg(feature = "dialogs")]
+pub use dialog::RfdDialogs;
+pub use dialog::{
+    DialogBackend, DialogError, DialogKind, DialogOptions, DialogOutcome, FileFilter,
+    MAX_DIALOG_TITLE_BYTES, MAX_EXTENSION_BYTES, MAX_PATH_BYTES, validate_chosen_path,
+    validate_options,
 };
 pub use fs::{
     DirectoryListing, Entry, FileContent, FileSystem, FileWritten, FsError, MAX_DIRECTORY_ENTRIES,

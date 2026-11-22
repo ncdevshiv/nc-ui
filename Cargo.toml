@@ -33,6 +33,7 @@ ncui-app = { path = "crates/ncui-app" }
 ncui-native = { path = "crates/ncui-native" }
 ncui-component = { path = "crates/ncui-component" }
 ncui-webview-wry = { path = "crates/ncui-webview-wry" }
+ncui-webview-child = { path = "crates/ncui-webview-child" }
 ncui-gpu = { path = "crates/ncui-gpu" }
 ncui-gpu-renderer = { path = "crates/ncui-gpu-renderer" }
 ncui-cli = { path = "crates/ncui-cli" }
@@ -47,6 +48,12 @@ global-hotkey = "0.9"
 # ADR-012 seventh exception: a tray icon is Shell_NotifyIcon, an AppIndicator or an
 # NSStatusBar, all foreign functions. Confined to the window host and behind a feature.
 tray-icon = "0.26"
+# ADR-012 eighth exception: a native file, save or folder dialog is an IFileOpenDialog, an
+# NSOpenPanel or a GTK file chooser, all foreign functions, and `unsafe_code = "forbid"`
+# rejects calling them. Confined to ncui-native and behind the `dialogs` feature; the
+# permission and path-handling logic around the dialog is plain Rust and is tested without
+# the platform binding. See ADR-012 and crates/ncui-native/src/dialog.rs.
+rfd = "0.18"
 serde_json = "1.0.145"
 thiserror = "2.0.17"
 tracing = "0.1.44"

@@ -71,6 +71,14 @@ pub enum Capability {
     Window,
     /// Raise user notifications.
     Notifications,
+    /// Open a native file, save or folder dialog and read the path the user chose.
+    ///
+    /// Separate from [`Capability::FilesystemRead`] because a dialog is not a read of a
+    /// file: it is permission to put a modal picker in front of the user and to learn the
+    /// path they chose. A page granted filesystem read may not thereby pop a dialog, and a
+    /// page granted a dialog may not thereby read the file it names — that still needs
+    /// `filesystem.read`.
+    Dialog,
     /// Use persistent storage.
     Database,
     /// Allocate GPU resources.
@@ -107,6 +115,8 @@ pub enum Capability {
     RunTests,
     /// Execute the project's benchmarks.
     RunBenchmarks,
+    /// Send CDP (Chrome `DevTools` Protocol) commands to a child webview.
+    Cdp,
 }
 
 impl Capability {
@@ -122,6 +132,7 @@ impl Capability {
         Capability::Clipboard,
         Capability::Window,
         Capability::Notifications,
+        Capability::Dialog,
         Capability::Database,
         Capability::Gpu,
         Capability::Debug,
@@ -136,6 +147,7 @@ impl Capability {
         Capability::InspectGpu,
         Capability::RunTests,
         Capability::RunBenchmarks,
+        Capability::Cdp,
     ];
 
     /// The stable string form, e.g. `"filesystem.read"`.
@@ -149,6 +161,7 @@ impl Capability {
             Self::Clipboard => "clipboard",
             Self::Window => "window",
             Self::Notifications => "notifications",
+            Self::Dialog => "dialog",
             Self::Database => "database",
             Self::Gpu => "gpu",
             Self::Debug => "debug",
@@ -163,6 +176,7 @@ impl Capability {
             Self::InspectGpu => "inspect.gpu",
             Self::RunTests => "run.tests",
             Self::RunBenchmarks => "run.benchmarks",
+            Self::Cdp => "cdp",
         }
     }
 
@@ -175,6 +189,7 @@ impl Capability {
             | Self::ProcessSpawn
             | Self::Network
             | Self::Clipboard
+            | Self::Dialog
             | Self::Window
             | Self::Notifications
             | Self::Database
@@ -189,7 +204,8 @@ impl Capability {
             | Self::InspectRuntime
             | Self::InspectGpu
             | Self::RunTests
-            | Self::RunBenchmarks => CapabilityScope::Agent,
+            | Self::RunBenchmarks
+            | Self::Cdp => CapabilityScope::Agent,
         }
     }
 
@@ -207,6 +223,7 @@ impl Capability {
             // rather than a silent grant.
             Self::FilesystemWrite
                 | Self::ProcessSpawn
+                | Self::Cdp
                 | Self::DeleteData
                 | Self::Deploy
                 | Self::RunComponents
@@ -271,6 +288,7 @@ static CAPABILITY_NAMES: &[&str] = &[
     "clipboard",
     "window",
     "notifications",
+    "dialog",
     "database",
     "gpu",
     "debug",
@@ -285,6 +303,7 @@ static CAPABILITY_NAMES: &[&str] = &[
     "inspect.gpu",
     "run.tests",
     "run.benchmarks",
+    "cdp",
 ];
 
 impl fmt::Display for Capability {

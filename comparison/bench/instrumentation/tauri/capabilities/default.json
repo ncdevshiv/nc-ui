@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capability for the comparison app: the core permissions only, which is the Tauri 2 replacement for the 1.2 allowlist. The window label is the one the config declares.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

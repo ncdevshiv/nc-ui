@@ -2,17 +2,15 @@
   all(not(debug_assertions), target_os = "windows"),
   windows_subsystem = "windows"
 )]
-use tauri::{CustomMenuItem, Menu, MenuItem, Submenu};
-
-
-
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::Manager;
 
 // Our Tauri Command
 #[tauri::command]
-fn return_string(word: String) -> String{
+fn return_string(word: String) -> String {
     // debugging message
     println!("The frontend sent us this argument {}", word);
-    return word
+    word
 }
 
 // The comparison harness sets NCUI_BENCH_OUTPUT. These two commands expose the path to the
@@ -34,31 +32,29 @@ fn write_bench(json: String) -> Result<(), String> {
 }
 
 fn main() {
-
-  // Define two sub items for the submenu
-  let hello = CustomMenuItem::new("hello".to_string(), "Hello");
-  let goodbye = CustomMenuItem::new("goodbye".to_string(), "Goodbye");
-  // define the submenu
-  let submenu = Submenu::new("Menu", Menu::new().add_item(hello).add_item(goodbye));
-  // create main menu object
-  let menu = Menu::new()
-  // add native copy functionality
-  .add_native_item(MenuItem::Copy)
-  // add our submenu
-  .add_submenu(submenu);
-
-
-  
   tauri::Builder::default()
-    .menu(menu)
-    //register menu events
-    .on_menu_event(|event| {
-      match event.menu_item_id() {
+    .menu(|app| {
+      // Tauri 2 menu API: items carry an id and are built against the app handle, and native
+      // items are PredefinedMenuItem constructors rather than MenuItem variants.
+      let hello = MenuItem::with_id(app, "hello", "Hello", true, None::<&str>)?;
+      let goodbye = MenuItem::with_id(app, "goodbye", "Goodbye", true, None::<&str>)?;
+      let submenu = Submenu::with_items(app, "Menu", true, &[&hello, &goodbye])?;
+      let copy = PredefinedMenuItem::copy(app, None)?;
+      Ok(Menu::with_items(app, &[&copy, &submenu])?)
+    })
+    .on_menu_event(|app, event| {
+      // Tauri 2: the event carries an id resolved against the app, and the window is looked
+      // up from the app handle rather than reached through the event.
+      match event.id().as_ref() {
         "hello" => {
-          event.window().maximize();
+          if let Some(window) = app.get_webview_window("main") {
+            let _ = window.maximize();
+          }
         }
         "goodbye" => {
-          event.window().minimize();
+          if let Some(window) = app.get_webview_window("main") {
+            let _ = window.minimize();
+          }
         }
         _ => {}
       }

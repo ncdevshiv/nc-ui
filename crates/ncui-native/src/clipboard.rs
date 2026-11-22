@@ -185,6 +185,7 @@ impl Clipboard {
                 None,
                 CLIPBOARD_TIMEOUT,
                 self.max_bytes + 1,
+                None,
             ) {
                 Ok(output) if output.status == 0 => {
                     if output.stdout.len() > self.max_bytes {
@@ -243,6 +244,7 @@ impl Clipboard {
                 Some(text),
                 CLIPBOARD_TIMEOUT,
                 self.max_bytes,
+                None,
             ) {
                 Ok(output) if output.status == 0 => {
                     return Ok(ClipboardWritten { bytes: text.len() });

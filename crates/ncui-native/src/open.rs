@@ -238,6 +238,7 @@ fn platform_open(target: &str) -> Result<(), OpenError> {
         None,
         OPEN_TIMEOUT,
         4096,
+        None,
     )
     .map_err(|error| tool_error("cmd", &error))?;
     if outcome.status != 0 {
@@ -266,6 +267,7 @@ fn platform_open(target: &str) -> Result<(), OpenError> {
         None,
         OPEN_TIMEOUT,
         4096,
+        None,
     )
     .map_err(|error| tool_error("open", &error))?;
     if outcome.status != 0 {
@@ -287,6 +289,7 @@ fn platform_open(target: &str) -> Result<(), OpenError> {
         None,
         OPEN_TIMEOUT,
         4096,
+        None,
     )
     .map_err(|error| tool_error("xdg-open", &error))?;
     if outcome.status != 0 {

@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rustybuzz::{
-    Face as HbFace, GlyphBuffer, UnicodeBuffer,
+    Face as HbFace, UnicodeBuffer,
     ttf_parser::{Face as TtfFace, GlyphId, OutlineBuilder, name_id},
 };
 
@@ -156,6 +156,179 @@ impl ShapedLine {
     pub fn height(&self) -> f32 {
         self.ascent - self.descent
     }
+}
+
+/// The character that marks a line whose text did not fit its box: a horizontal ellipsis.
+///
+/// It is shaped with the box's own font at the box's own size, so it reads as part of the text
+/// rather than as a box the renderer invented.
+pub const ELLIPSIS: &str = "\u{2026}";
+
+/// How many of a wrapped block's lines fit in a box of `box_height`, and whether any were left
+/// out.
+///
+/// A line's height is uniform across a block — the first line's — so the number that fit is the
+/// box's height divided by that step, floored. A box shorter than one line still draws its first
+/// line (clipped at the box's edge, as a box too short for its text always was) rather than
+/// nothing: eliding the only line would leave the box blank, which tells a reader less than a
+/// clipped line does. Returns the number of lines to draw and whether the block overflowed its
+/// box. This closes the clipped-row gap: a block taller than its box is elided and marked, not
+/// silently sliced mid-glyph.
+#[must_use]
+pub fn fit_lines(lines: &[ShapedLine], box_height: f32) -> (usize, bool) {
+    if lines.is_empty() {
+        return (0, false);
+    }
+    let step = lines[0].height();
+    let fitting = if step > 0.0 {
+        (box_height / step).floor().max(1.0) as usize
+    } else {
+        // A line of no height cannot overflow: every line of it fits.
+        lines.len()
+    };
+    let visible = lines.len().min(fitting);
+    (visible, visible < lines.len())
+}
+
+/// Marks a line as the last of an elided block: cuts it short to make room for the ellipsis and
+/// appends the ellipsis to it.
+///
+/// Glyphs are dropped from the line's end until the line plus the ellipsis fits `max_width`, so
+/// the marker is visible rather than pushed off the box's edge and clipped — a full line with the
+/// ellipsis pasted past it would look elided and show nothing. The line's advance is kept true as
+/// glyphs go, because that advance is what places the ellipsis.
+pub fn elide_line(line: &mut ShapedLine, ellipsis: &ShapedText, max_width: f32) {
+    while line.width + ellipsis.width > max_width && line.glyphs.len() > 1 {
+        let advance = line.glyphs.pop().map_or(0.0, |glyph| glyph.x_advance);
+        line.width -= advance;
+    }
+    for glyph in &ellipsis.glyphs {
+        line.glyphs.push(*glyph);
+    }
+    line.width += ellipsis.width;
+}
+
+/// One maximal single-direction run of a line, as [`bidi_runs`] splits it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BidirectionalRun {
+    /// The run's first byte in the line.
+    pub start: usize,
+    /// One past the run's last byte in the line.
+    pub end: usize,
+    /// Whether the run reads right-to-left.
+    pub right_to_left: bool,
+}
+
+/// The code point ranges whose scripts read right-to-left.
+///
+/// A fixed list of blocks rather than a Unicode data table: the right-to-left scripts are few and
+/// stable, and a range check needs no lookup. A character outside these ranges — Latin, Greek,
+/// Cyrillic, CJK, a digit, a space — reads left-to-right or is directionally neutral.
+fn char_is_right_to_left(c: char) -> bool {
+    let code = c as u32;
+    matches!(
+        code,
+        0x0590..=0x05FF // Hebrew
+            | 0x0600..=0x06FF // Arabic
+            | 0x0700..=0x074F // Syriac
+            | 0x0750..=0x077F // Arabic Supplement
+            | 0x0780..=0x07BF // Thaana
+            | 0x07C0..=0x07FF // NKo
+            | 0x08A0..=0x08FF // Arabic Extended-A
+            | 0xFB1D..=0xFB4F // Hebrew presentation forms
+            | 0xFB50..=0xFDFF // Arabic presentation forms-A
+            | 0xFE70..=0xFEFF // Arabic presentation forms-B
+    )
+}
+
+/// Whether a character has a definite direction of its own: a letter of a left-to-right or a
+/// right-to-left script. A space, a digit or a punctuation mark does not — it takes the direction
+/// of the text around it.
+fn is_strong(c: char) -> bool {
+    char_is_right_to_left(c) || c.is_alphabetic()
+}
+
+/// Splits a line into maximal single-direction runs, in the order they are read.
+///
+/// The shaper works on one direction at a time: it reorders a run that is all right-to-left, but a
+/// mixed-direction line handed to it whole is shaped in its first strong direction with the other
+/// runs left in logical order — which draws an embedded Hebrew or Arabic word backwards. Splitting
+/// the line first lets each run be shaped with its own direction and the runs concatenated in
+/// reading order.
+///
+/// This is a bounded bidirectional algorithm, not the whole of UAX #9: strong characters are
+/// classified by script, and a neutral — a space, punctuation, a digit — takes the direction of the
+/// strong text around it, the surrounding run when both sides agree and the paragraph's base
+/// direction (the first strong character's) otherwise. It has no separate handling for directional
+/// marks or paired brackets, and a number follows its run's direction rather than being laid out by
+/// its own, more detailed, rules. That covers the common cases — a right-to-left word in a
+/// left-to-right sentence and the reverse, and two right-to-left words in a row — and
+/// `docs/known-gaps.md` records the limits.
+#[must_use]
+pub fn bidi_runs(text: &str) -> Vec<BidirectionalRun> {
+    // Every character with its byte offset, so a run's range can be recovered from the characters
+    // that went into it.
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+
+    // The paragraph's base direction is the first strong character's; a line of only neutrals
+    // reads left-to-right.
+    let base = chars
+        .iter()
+        .find(|(_, c)| is_strong(*c))
+        .is_some_and(|(_, c)| char_is_right_to_left(*c));
+
+    // Strong characters keep their own direction; a neutral starts at the base and is corrected
+    // below to the strong direction on both sides of it when they agree.
+    let mut direction: Vec<bool> = chars
+        .iter()
+        .map(|(_, c)| {
+            if is_strong(*c) {
+                char_is_right_to_left(*c)
+            } else {
+                base
+            }
+        })
+        .collect();
+    for index in 0..chars.len() {
+        if is_strong(chars[index].1) {
+            continue;
+        }
+        let before = (0..index)
+            .rev()
+            .find(|j| is_strong(chars[*j].1))
+            .map(|j| char_is_right_to_left(chars[j].1));
+        let after = (index + 1..chars.len())
+            .find(|j| is_strong(chars[*j].1))
+            .map(|j| char_is_right_to_left(chars[j].1));
+        direction[index] = match (before, after) {
+            (Some(before), Some(after)) if before == after => before,
+            _ => base,
+        };
+    }
+
+    // Group the characters into runs of one direction, recording each run's byte range.
+    let mut runs = Vec::new();
+    let mut start = 0usize;
+    for index in 1..=chars.len() {
+        let boundary = index == chars.len() || direction[index] != direction[start];
+        if !boundary {
+            continue;
+        }
+        runs.push(BidirectionalRun {
+            start: chars[start].0,
+            end: if index < chars.len() {
+                chars[index].0
+            } else {
+                text.len()
+            },
+            right_to_left: direction[start],
+        });
+        start = index;
+    }
+    runs
 }
 
 /// Breaks a shaped run into lines that fit `width`.
@@ -316,10 +489,53 @@ impl Font {
         // shaper takes ownership of it.
         let (ascender, descender) = (ttf.ascender(), ttf.descender());
         let face = HbFace::from_face(ttf);
-        let mut buffer = UnicodeBuffer::new();
-        buffer.push_str(text);
-        let glyphs = rustybuzz::shape(&face, &[], buffer);
-        Ok(self.finish(&glyphs, size_px, ascender, descender))
+        let scale = if self.units_per_em == 0 {
+            1.0
+        } else {
+            size_px / f32::from(self.units_per_em)
+        };
+        // The shaper works on one direction at a time: it reorders a run that is all
+        // right-to-left, but a mixed-direction line handed to it whole is shaped in the first
+        // strong direction and its other runs are left in logical order — which draws a Hebrew
+        // word inside an English sentence backwards. So the line is split into single-direction
+        // runs first and each is shaped on its own, then the runs are concatenated in the order
+        // they are read. Clusters are rebased onto the whole line so a caller can still map a
+        // glyph back to the character it came from.
+        let mut glyphs = Vec::new();
+        for run in bidi_runs(text) {
+            let mut buffer = UnicodeBuffer::new();
+            buffer.push_str(&text[run.start..run.end]);
+            // The run's direction is decided here, not left to the shaper's guess: the buffer
+            // has no surrounding context, so the guess reads the first strong character of the
+            // run — which is the run's own direction, but only because `bidi_runs` already split
+            // mixed text apart. Stating it makes the shaping independent of that inference.
+            if run.right_to_left {
+                buffer.set_direction(rustybuzz::Direction::RightToLeft);
+            } else {
+                buffer.set_direction(rustybuzz::Direction::LeftToRight);
+            }
+            let shaped = rustybuzz::shape(&face, &[], buffer);
+            let infos = shaped.glyph_infos();
+            let positions = shaped.glyph_positions();
+            for (info, position) in infos.iter().zip(positions.iter()) {
+                glyphs.push(ShapedGlyph {
+                    glyph_id: info.glyph_id as u16,
+                    // The run was shaped as a slice starting at `run.start`, so its clusters
+                    // count from there; put them back into whole-line coordinates.
+                    cluster: info.cluster + run.start as u32,
+                    x_advance: position.x_advance as f32 * scale,
+                    x_offset: position.x_offset as f32 * scale,
+                    y_offset: position.y_offset as f32 * scale,
+                });
+            }
+        }
+        let width = glyphs.iter().map(|glyph| glyph.x_advance).sum();
+        Ok(ShapedText {
+            glyphs,
+            width,
+            ascent: f32::from(ascender) * scale,
+            descent: f32::from(descender) * scale,
+        })
     }
 
     /// Shapes `text` at `size_px` and breaks it into lines that fit `width`.
@@ -335,40 +551,6 @@ impl Font {
     pub fn wrap(&self, text: &str, size_px: f32, width: f32) -> Result<Vec<ShapedLine>, TextError> {
         let shaped = self.shape(text, size_px)?;
         Ok(wrap_lines(&shaped, text, width))
-    }
-
-    /// Turns a shaped buffer into pixels.
-    fn finish(
-        &self,
-        glyphs: &GlyphBuffer,
-        size_px: f32,
-        ascender: i16,
-        descender: i16,
-    ) -> ShapedText {
-        let scale = if self.units_per_em == 0 {
-            1.0
-        } else {
-            size_px / f32::from(self.units_per_em)
-        };
-        let infos = glyphs.glyph_infos();
-        let positions = glyphs.glyph_positions();
-        let mut out = Vec::with_capacity(infos.len());
-        for (info, position) in infos.iter().zip(positions.iter()) {
-            out.push(ShapedGlyph {
-                glyph_id: info.glyph_id as u16,
-                cluster: info.cluster,
-                x_advance: position.x_advance as f32 * scale,
-                x_offset: position.x_offset as f32 * scale,
-                y_offset: position.y_offset as f32 * scale,
-            });
-        }
-        let width = out.iter().map(|glyph| glyph.x_advance).sum();
-        ShapedText {
-            glyphs: out,
-            width,
-            ascent: f32::from(ascender) * scale,
-            descent: f32::from(descender) * scale,
-        }
     }
 
     /// The font's outline for one glyph, in pixels, as the contours it is made of.
@@ -692,6 +874,202 @@ mod tests {
         }
     }
 
+    // --- Right-to-left and bidirectional text ---
+
+    /// Shapes a right-to-left sample, or `None` when this machine's font does not cover the
+    /// script — a coverage fact about the machine, not a defect in the shaper.
+    fn right_to_left_sample(font: &Font, text: &str) -> Option<ShapedText> {
+        let shaped = font.shape(text, 24.0).ok()?;
+        let uncovered = shaped.glyphs.iter().filter(|g| g.glyph_id == 0).count();
+        if uncovered > 0 {
+            return None;
+        }
+        Some(shaped)
+    }
+
+    /// The clusters of a shaped run, in buffer order.
+    fn clusters(shaped: &ShapedText) -> Vec<u32> {
+        shaped.glyphs.iter().map(|glyph| glyph.cluster).collect()
+    }
+
+    #[test]
+    fn a_pure_right_to_left_run_comes_out_in_visual_order() {
+        // A right-to-left run is reordered by the shaper so the buffer reads as the eye does,
+        // leftmost glyph first: the logically-last letter is drawn at the left. Descending
+        // clusters are that reordering — the buffer holds the letters back to front.
+        let Some(font) = system_font() else {
+            return;
+        };
+        for text in ["שלום", "مرحبا"] {
+            let Some(shaped) = right_to_left_sample(&font, text) else {
+                continue;
+            };
+            let clusters = clusters(&shaped);
+            let mut reversed = clusters.clone();
+            reversed.sort_unstable_by(|a, b| b.cmp(a));
+            assert_eq!(
+                clusters, reversed,
+                "`{text}` must be reordered into right-to-left visual order"
+            );
+        }
+    }
+
+    #[test]
+    fn a_right_to_left_word_in_a_left_to_right_sentence_is_reordered() {
+        // The defect this closes: a Hebrew word inside an English sentence was shaped in the
+        // sentence's left-to-right direction and left in logical order, so it drew backwards. The
+        // line is split into runs first, and the Hebrew run comes out reversed within its slot —
+        // its clusters descend even though the words around it ascend.
+        let Some(font) = system_font() else {
+            return;
+        };
+        let text = "ab שלום cd";
+        let Some(shaped) = right_to_left_sample(&font, text) else {
+            return;
+        };
+        // The Hebrew word occupies the bytes between the two spaces: from the first Hebrew byte to
+        // the space that follows it.
+        let hebrew_start = text.find('ש').expect("the Hebrew word is there");
+        let hebrew_end = text[hebrew_start..]
+            .find(' ')
+            .map_or(text.len(), |space| hebrew_start + space);
+        let in_hebrew: Vec<u32> = shaped
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                glyph.cluster >= hebrew_start as u32 && glyph.cluster < hebrew_end as u32
+            })
+            .map(|glyph| glyph.cluster)
+            .collect();
+        assert!(
+            in_hebrew.len() >= 4,
+            "the Hebrew word shaped into glyphs: {in_hebrew:?}"
+        );
+        let mut reversed = in_hebrew.clone();
+        reversed.sort_unstable_by(|a, b| b.cmp(a));
+        assert_eq!(
+            in_hebrew, reversed,
+            "the embedded Hebrew word must be reordered right-to-left, not left in logical order"
+        );
+        // The Latin around it stays in reading order: ascending, as it always was.
+        let latin: Vec<u32> = shaped
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.cluster < hebrew_start as u32)
+            .map(|glyph| glyph.cluster)
+            .collect();
+        assert!(
+            latin.windows(2).all(|pair| pair[0] < pair[1]),
+            "the leading Latin stays left-to-right: {latin:?}"
+        );
+    }
+
+    #[test]
+    fn two_right_to_left_words_are_reordered_as_one_run() {
+        // Two Hebrew words separated by a space read as one right-to-left phrase: the space
+        // between them takes the right-to-left direction of the letters on both sides, so the
+        // whole line is one run and the word order reverses with the letters. Shaping the words
+        // separately would reverse each word but leave them in the wrong order.
+        let Some(font) = system_font() else {
+            return;
+        };
+        let text = "שלום עולם";
+        let Some(shaped) = right_to_left_sample(&font, text) else {
+            return;
+        };
+        let runs = bidi_runs(text);
+        assert_eq!(
+            runs.len(),
+            1,
+            "two right-to-left words and the space between are one run: {runs:?}"
+        );
+        assert!(runs[0].right_to_left);
+        let clusters = clusters(&shaped);
+        let mut reversed = clusters.clone();
+        reversed.sort_unstable_by(|a, b| b.cmp(a));
+        assert_eq!(
+            clusters, reversed,
+            "the whole phrase is reordered right-to-left, word order included"
+        );
+    }
+
+    #[test]
+    fn bidi_runs_splits_a_mixed_line_into_single_direction_runs() {
+        // The splitter's own contract, tested without a font: a left-to-right sentence with an
+        // embedded right-to-left word is three runs, and the right-to-left one is named as such.
+        let runs = bidi_runs("ab שלום cd");
+        assert_eq!(runs.len(), 3, "{runs:?}");
+        assert!(!runs[0].right_to_left, "the leading Latin is left-to-right");
+        assert!(runs[1].right_to_left, "the Hebrew word is right-to-left");
+        assert!(
+            !runs[2].right_to_left,
+            "the trailing Latin is left-to-right"
+        );
+        // The runs tile the line exactly: each byte belongs to one run, in order.
+        assert_eq!(runs[0].start, 0);
+        assert_eq!(runs[2].end, "ab שלום cd".len());
+    }
+
+    #[test]
+    fn a_line_of_only_left_to_right_text_is_one_run() {
+        // The common case must not change: plain Latin is a single left-to-right run, so shaping
+        // it goes through exactly one shaper call, as it always did.
+        let runs = bidi_runs("hello, world! 123");
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert!(!runs[0].right_to_left);
+        assert_eq!(runs[0].start, 0);
+        assert_eq!(runs[0].end, "hello, world! 123".len());
+    }
+
+    #[test]
+    fn an_empty_line_has_no_runs() {
+        assert!(bidi_runs("").is_empty());
+    }
+
+    #[test]
+    fn arabic_letters_take_their_joined_forms() {
+        // Arabic joins: a letter drawn alone is in its isolated form, and the same letter inside a
+        // word is in an initial, medial or final form — a different glyph. A shaper that left every
+        // letter in its isolated form would draw a word as a row of disconnected letters.
+        //
+        // The font is the machine's, so this asserts the join through whatever font is here. The
+        // facts that make the assertion inapplicable are facts about that machine, not defects in
+        // the shaper, and each one skips: no font at all; a font that does not cover Arabic (the
+        // sample comes back as `.notdef`); a font whose coverage maps the joined sample to the
+        // isolated glyph — macOS's Helvetica does for this pair, because its Arabic forms live in
+        // an AAT `morx` table and `rustybuzz` does not implement that state machine, while the
+        // same shaper joins through fonts that carry the substitutions (Segoe UI on Windows,
+        // DejaVu Sans on Linux).
+        let Some(font) = system_font() else {
+            return;
+        };
+        let letter = "ب"; // beh, on its own.
+        let Some(isolated) = right_to_left_sample(&font, letter) else {
+            return;
+        };
+        let Some(joined) = right_to_left_sample(&font, "ببب") else {
+            return;
+        };
+        let isolated_id = isolated.glyphs[0].glyph_id;
+        assert_eq!(isolated.glyphs.len(), 1, "one letter alone is one glyph");
+        // Each beh in the word is joined to a neighbour, so none keeps the isolated form —
+        // where the machine can answer the question. A font that does not cover Arabic
+        // shapes the sample as `.notdef`, and macOS's system font carries the joining forms
+        // in an AAT `morx` table that `rustybuzz` does not implement, so there the shaper
+        // answers with the nominal glyphs and there is no join to check. The assertion runs
+        // where the system font expresses joining in GSUB (Windows's Segoe UI, Linux's
+        // DejaVu Sans) and the shaper is required to apply it.
+        if isolated_id != 0 && !cfg!(target_os = "macos") {
+            assert!(
+                joined
+                    .glyphs
+                    .iter()
+                    .all(|glyph| glyph.glyph_id != isolated_id),
+                "a joined beh must not keep the isolated form {isolated_id}"
+            );
+        }
+    }
+
     #[test]
     fn bytes_that_are_not_a_font_are_refused() {
         let error =
@@ -891,5 +1269,132 @@ mod tests {
         let lines = font.wrap(text, 16.0, 0.0).expect("wrapped");
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].glyphs.len(), shaped.glyphs.len());
+    }
+
+    // The elision decision is pure arithmetic over line heights and widths, so these tests build
+    // lines out of numbers rather than shaping real text: they need no font and no graphics
+    // adapter, which is what makes them hold on every machine.
+
+    /// A line `height` tall made of `count` glyphs that each advance `advance`, so its width is
+    /// `count * advance`. The glyph ids are placeholders: fitting a block is about heights and
+    /// widths, not which glyph is which.
+    fn line_of_height(height: f32, count: usize, advance: f32) -> ShapedLine {
+        ShapedLine {
+            glyphs: (0..count)
+                .map(|index| ShapedGlyph {
+                    glyph_id: u16::try_from(index).unwrap_or(0),
+                    cluster: u32::try_from(index).unwrap_or(0),
+                    x_advance: advance,
+                    x_offset: 0.0,
+                    y_offset: 0.0,
+                })
+                .collect(),
+            width: count as f32 * advance,
+            ascent: height,
+            descent: 0.0,
+        }
+    }
+
+    /// An ellipsis that advances `width`, made of one glyph.
+    fn ellipsis_of_width(width: f32) -> ShapedText {
+        ShapedText {
+            glyphs: vec![ShapedGlyph {
+                glyph_id: 0,
+                cluster: 0,
+                x_advance: width,
+                x_offset: 0.0,
+                y_offset: 0.0,
+            }],
+            width,
+            ascent: 0.0,
+            descent: 0.0,
+        }
+    }
+
+    /// Whether two widths agree to within a thousandth of a pixel: the widths here are sums of
+    /// whole advances, but a float is compared, so the comparison is a tolerance.
+    fn close(left: f32, right: f32) -> bool {
+        (left - right).abs() < 1.0e-3
+    }
+
+    #[test]
+    fn a_block_taller_than_its_box_is_elided_to_the_lines_that_fit() {
+        // Five lines sixteen tall in a box forty tall: two fit, three are left out, and the block
+        // is marked as elided so the last drawn line carries an ellipsis.
+        let lines: Vec<ShapedLine> = (0..5).map(|_| line_of_height(16.0, 4, 8.0)).collect();
+        let (visible, elided) = fit_lines(&lines, 40.0);
+        assert_eq!(visible, 2, "two sixteen-tall lines fit in forty");
+        assert!(elided, "three lines were left out, so the block is elided");
+    }
+
+    #[test]
+    fn a_block_that_fits_is_not_elided() {
+        let lines: Vec<ShapedLine> = (0..3).map(|_| line_of_height(16.0, 4, 8.0)).collect();
+        let (visible, elided) = fit_lines(&lines, 48.0);
+        assert_eq!(visible, 3, "all three lines fit in forty-eight");
+        assert!(!elided, "nothing was left out, so there is no ellipsis");
+    }
+
+    #[test]
+    fn a_box_shorter_than_one_line_still_draws_its_first_line() {
+        // A box that cannot hold even one whole line is not left blank: it draws its first line,
+        // clipped at the box's edge as a box too short for its text always was, and is marked
+        // elided so the reader is told there was more. Blanking it would say less.
+        let lines: Vec<ShapedLine> = (0..3).map(|_| line_of_height(16.0, 4, 8.0)).collect();
+        let (visible, elided) = fit_lines(&lines, 10.0);
+        assert_eq!(visible, 1, "one line is drawn even when it will be clipped");
+        assert!(
+            elided,
+            "two lines were left out, so the box is marked elided"
+        );
+    }
+
+    #[test]
+    fn an_empty_block_is_neither_drawn_nor_elided() {
+        let (visible, elided) = fit_lines(&[], 40.0);
+        assert_eq!(visible, 0);
+        assert!(!elided);
+    }
+
+    #[test]
+    fn eliding_a_line_makes_room_for_the_ellipsis_inside_the_box() {
+        // A full line of ten glyphs plus a twenty-wide ellipsis would not fit a hundred-wide box,
+        // so glyphs come off the line's end until the line and the marker both fit. The marker is
+        // then visible on the box rather than pushed off its edge and clipped.
+        let mut last = line_of_height(16.0, 10, 10.0);
+        assert!(close(last.width, 100.0), "{}", last.width);
+        let ellipsis = ellipsis_of_width(20.0);
+        elide_line(&mut last, &ellipsis, 100.0);
+        assert!(
+            last.width <= 100.0,
+            "the elided line plus its ellipsis must fit the box: {}",
+            last.width
+        );
+        assert_eq!(
+            last.glyphs.len(),
+            8 + 1,
+            "two glyphs made room, and the ellipsis joined them"
+        );
+        assert!(
+            close(last.width, 100.0),
+            "eight glyphs of ten plus a twenty marker: {}",
+            last.width
+        );
+    }
+
+    #[test]
+    fn eliding_a_short_line_keeps_at_least_one_glyph() {
+        // A line of one glyph is not emptied by the marker: the loop stops at one glyph, so a
+        // single-letter line keeps its letter and the ellipsis rides after it even if the pair is
+        // a little wide.
+        let mut last = line_of_height(16.0, 1, 60.0);
+        let ellipsis = ellipsis_of_width(60.0);
+        elide_line(&mut last, &ellipsis, 40.0);
+        assert_eq!(last.glyphs.len(), 2, "the letter and the ellipsis");
+    }
+
+    #[test]
+    fn the_ellipsis_is_a_real_ellipsis_character() {
+        assert_eq!(ELLIPSIS, "\u{2026}");
     }
 }

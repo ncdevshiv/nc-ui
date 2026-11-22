@@ -16,6 +16,7 @@
   var pending = Object.create(null);
   var pendingCount = 0;
   var listeners = Object.create(null);
+  var commands = Object.create(null);
   var sequence = 0;
 
   function isObject(value) {
@@ -134,9 +135,65 @@
     };
   }
 
+  // Runs a command the page registered and posts the answer back under the reply id the
+  // runtime minted. The runtime started the call and is holding the page's original invoke
+  // open, so this is the second half of a round trip: the answer travels as its own message
+  // rather than as a return value, because the host cannot read one back out of the script
+  // it evaluates. A handler that is missing, or that throws, is reported as a failure rather
+  // than leaving the runtime's call to time out.
+  function runCommand(replyId, name, payload) {
+    var handler = commands[name];
+    var answer;
+    if (typeof handler !== "function") {
+      answer = {
+        id: replyId,
+        action: "command_result",
+        ok: false,
+        error: {
+          code: "not_registered",
+          message: "the page has not registered a handler for `" + name + "`",
+          retryable: false
+        }
+      };
+    } else {
+      try {
+        var result = handler(payload === undefined ? null : payload);
+        answer = {
+          id: replyId,
+          action: "command_result",
+          ok: true,
+          payload: result === undefined ? null : result
+        };
+      } catch (error) {
+        answer = {
+          id: replyId,
+          action: "command_result",
+          ok: false,
+          error: {
+            code: "handler_failed",
+            message: error && error.message ? String(error.message) : "the page's handler threw",
+            retryable: false
+          }
+        };
+      }
+    }
+    try {
+      window.ipc.postMessage(JSON.stringify(answer));
+    } catch (transportError) {
+      // The runtime is holding the call and will report it as unanswered; there is no second
+      // channel to fall back to.
+    }
+  }
+
   Object.defineProperty(window, "ncui", {
     value: Object.freeze({
       protocolVersion: protocolVersion,
+      registerCommand: function (name, handler) {
+        if (typeof name !== "string" || name.length === 0) { return false; }
+        if (typeof handler !== "function") { return false; }
+        commands[name] = handler;
+        return true;
+      },
       invoke: function (action, payload, options) {
         return post(
           { action: "perform", name: String(action), payload: payload, extra: {} },
@@ -158,7 +215,21 @@
         });
         return off;
       },
-      __dispatch: settle
+      __dispatch: settle,
+      __runCommand: runCommand,
+      // Receives one CDP command from the host (`ncui.cdp.send`). The bridge has
+      // no debugging transport of its own: it records the command in a bounded
+      // ring a page can read, and re-dispatches it to listeners registered with
+      // `ncui.on("ncui:cdp", ...)`, so a page that wants a relay implements one
+      // where its own debugging endpoint lives.
+      __cdpSend: function (command) {
+        if (!isObject(command)) { return false; }
+        var log = window.__ncuiCdpLog || (window.__ncuiCdpLog = []);
+        if (log.length >= 64) { log.shift(); }
+        log.push(command);
+        settle({ event: "ncui:cdp", payload: command });
+        return true;
+      }
     })
   });
 })();

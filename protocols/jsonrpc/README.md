@@ -154,6 +154,14 @@ is the one actually enforced.
 | `ncui.window.close` | `window` | no | Close a window by identity |
 | `ncui.window.state` | `window` | no | How a window is presented, and how to change it: fullscreen, maximised, minimised, shown or hidden, or focused. The answer also reports the platform's frame — decorated, resizable, always on top — as the platform has it. A page is told when its window is resized or moved, through `resized` and `moved` events |
 | `ncui.window.theme` | `window` | no | Whether the platform is drawing its interface light or dark, and a `theme` event when it changes |
+| `ncui.window.zoom` | `window` | no | Scale a window's page by a factor between 0.25 and 5.0, where 1.0 is the platform default |
+| `ncui.window.child.create` | `window` | no | Embed a child webview into a window's frame: a starting URL and a rectangle (logical pixels, relative to the window's client area) |
+| `ncui.window.child.bounds` | `window` | no | Move a live child webview to a new rectangle |
+| `ncui.window.child.close` | `window` | no | Close a live child webview |
+| `ncui.window.child.list` | `window` | no | Every live child webview across open windows, with its parent and rectangle |
+| `ncui.window.devtools.open` | `window` | no | Open a window's platform web inspector |
+| `ncui.window.devtools.close` | `window` | no | Close a window's platform web inspector |
+| `ncui.window.devtools.state` | `window` | no | Whether a window's inspector is open: `open`, `closed`, or `unknown` when the platform cannot say |
 | `ncui.window.shape` | `window` | no | Change a window's title, place, size, always-on-top or resizability |
 | `ncui.components.list` | `inspect.runtime` | no | Every component declared by mounted windows' manifests |
 | `ncui.gpu.inspect` | `inspect.gpu` | no | GPU islands, their render modes, the input contract they demonstrate, and the device's health |
@@ -161,6 +169,16 @@ is the one actually enforced.
 | `ncui.component.inspect` | `inspect.runtime` | no | One mounted component, by identity, with its window and grant |
 | `ncui.state.inspect` | `inspect.runtime` | no | A snapshot of the runtime's observable state |
 | `ncui.ipc.inspect` | `inspect.runtime` | no | The IPC protocol version and frame limits |
+| `ncui.devtools.tree` | `inspect.runtime` | no | Live snapshot of the window tree: every open window, its state, and its capability grant |
+| `ncui.devtools.events` | `inspect.runtime` | no | Recent runtime events (navigations, capability denials, window state changes), filterable by kind |
+| `ncui.devtools.profile` | `inspect.runtime` | no | Per-method timing histograms recorded while profiling was active |
+| `ncui.devtools.profile.reset` | `inspect.runtime` | no | Clear all recorded profiling data |
+| `ncui.devtools.summary` | `inspect.runtime` | no | A summary of the devtools subsystem: event count, capacity, profile methods, and call count |
+| `ncui.app.emit` | `window` | no | Emit an application-defined event to a window's page (deep links, notification clicks, custom events) |
+| `ncui.window.drag.region` | `window` | no | Initiate a window drag from a drag region (titlebar) |
+| `ncui.window.create.child` | `window` | no | Open a child window with a narrowed grant |
+| `ncui.cdp.send` | `cdp` | **yes** | Send a CDP command to a child webview |
+| `ncui.consent.mint` | `inspect.runtime` | no | Mint a consent token for a destructive method |
 | `ncui.trace.start` | `inspect.runtime` | no | Begin verbose tracing of operations |
 | `ncui.trace.stop` | `inspect.runtime` | no | End verbose tracing of operations |
 | `ncui.profile.start` | `inspect.runtime` | no | Begin profiling: record per-method timing |

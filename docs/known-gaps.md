@@ -190,12 +190,46 @@ See "Rejected alternatives" in `docs/adr/ADR-005-scheduler.md`. Ageing that coul
 background work above interactive work would break the no-starvation invariant, so the
 invariant was kept and the promotion ceiling lowered instead.
 
-## `require_destructive` takes a plain `bool` consent signal
+## Consent on the page-command path is a plain `bool`, not a token
 
-A caller that writes `true` unconditionally has opted out of the gate. The correct design is
-an unforgeable consent token minted by the runtime at the point of user confirmation; that
-belongs in the runtime's UI surface, which is not implemented. Until then the gate fails
-closed: `AgentSession::require_consent` treats an absent consent parameter as a refusal.
+The two destructive-consent gates are in different states.
+
+- **Agent/dispatch path — done.** A destructive method requires an unforgeable
+  [`ConsentToken`](../crates/ncui-security/src/authz.rs): `dispatch` reads `consent_token`
+  from the request, checks it against the minted ledger, and spends the nonce
+  (`Runtime::mint_consent` / `Runtime::consume_consent`). A bare `consent: true` authorizes
+  nothing there.
+- **Page-command path — still the bool.** `window::run_native_page_command` reads `consent`
+  as a bool; a page that writes `true` unconditionally has opted out of the gate. The gate
+  still fails closed when consent is absent (`AgentSession::require_consent` treats an absent
+  parameter as a refusal).
+
+The page path was deliberately **not** closed to a token, on evidence rather than omission.
+`Runtime::mint_consent` has no production caller — every call site is in a test — so there is
+no runtime path that mints a token a page could present. Closing the gate now would make
+destructive page commands permanently fail closed. That breaks legitimate component loading:
+`component.open` / `component.invoke` / `component.close` are destructive *page* commands
+(their capability `RunComponents` is in `Capability::is_destructive`), and the counter example
+loads its WebAssembly plugin through them. And the security benefit would be low: the page
+already holds `RunComponents` by grant, so the capability check is the real boundary — the bool
+is user-confirmation UX, and removing it stops a legitimate app from confirming without
+stopping a page that holds the capability anyway.
+
+The correct fix is a token minted by the runtime at the point of user confirmation, which
+belongs in the runtime's native consent UI — not implemented. Until that UI exists and mints
+tokens a page can obtain, the page gate keeps the bool and fails closed on absence.
+
+## The platform locale is read from the environment, so Windows reports `"und"`
+
+`platform_locale` reads `LC_ALL` then `LANG` and strips a codeset suffix. That is where a Unix
+platform exposes its locale. Windows exposes it through `GetUserDefaultLocaleName`, an FFI call
+this runtime does not make (`unsafe_code = "forbid"`, and an FFI reader is a scoped, audited
+addition under ADR-012). On such a platform the locale is `"und"` (undetermined) and the derived
+text direction is `"ltr"`, so a page is told the locale is unknown rather than handed a wrong
+one. The locale and direction still flow end to end — the page and the island descriptor carry
+them — but on Windows they say "undetermined" until the FFI reader lands. An application that
+knows its language declares `default_locale` in its manifest, which is validated and available
+to override the platform fallback once the two are wired together.
 
 ## `SafePath` does not follow symlinks
 
@@ -413,6 +447,34 @@ So `gpu.islands` is recorded `complete`: the compositing exists, the input contr
 a live `IslandHost`, the region's content is type rather than a colour, and its contents are described
 to assistive technology through the page that owns them.
 
+## Bidirectional text is a bounded algorithm, not the whole of UAX #9
+
+A GPU island row's text is shaped with `rustybuzz` (a HarfBuzz port), and HarfBuzz shapes one
+direction at a time: it reorders a run that is all right-to-left, but a mixed-direction line handed
+to it whole is shaped in its first strong direction with the other runs left in logical order — which
+drew an embedded Hebrew or Arabic word backwards. `ncui-gpu-renderer`'s `text` module now splits every
+line into single-direction runs (`bidi_runs`) and shapes each with its own direction before
+concatenating them in reading order, so a right-to-left word in a left-to-right sentence and the
+reverse are laid out correctly, and two right-to-left words keep their phrase order.
+
+**What is bounded about it.** The splitter classifies strong characters by script (a fixed list of
+right-to-left blocks: Hebrew, Arabic, Syriac, Thaana, NKo and the Arabic presentation forms) and gives
+a neutral — a space, punctuation, a digit — the direction of the strong text around it, falling back to
+the paragraph's base direction (the first strong character's) when the two sides disagree. It has no
+separate handling for the Unicode bidirectional marks (`LRM`/`RLM`/`RLE`/…), no paired-bracket
+resolution, and no number shaping of its own: a number follows its run's direction rather than being
+laid out by UAX #9's more detailed `EN`/`AN` rules. The common cases — an embedded right-to-left word,
+two right-to-left words, a right-to-left paragraph with a left-to-right word in it — are handled and
+unit-tested (`a_right_to_left_word_in_a_left_to_right_sentence_is_reordered`,
+`two_right_to_left_words_are_reordered_as_one_run`); the exotic ones are not, and a line that leans on
+directional marks or bracket pairing may still lay out incorrectly. The full algorithm is what a
+dedicated bidirectional crate provides, which is a scoped, audited addition under ADR-012 if it is
+wanted.
+
+Joining is verified for Arabic (a letter inside a word takes a joined form, not its isolated form),
+which is what "scripts with ligatures/joining" means here; Latin ligature substitution depends on the
+font's own default features and is applied by the shaper when the font has it, not by this code.
+
 ## The window host is behind a feature, and a default build opens no window
 
 `ncui-webview-wry` implements `HostFactory` over `wry`/`tao`, and the policy governs the
@@ -483,8 +545,13 @@ the suspect, and raising it fourfold changed nothing — 0.94 % of a core over a
 sample either way, which is how the hypothesis was disproved rather than assumed away. The
 consumer was the asset server's accept loop: it accepted on a non-blocking listener and slept
 2 ms between attempts, about five hundred wakeups a second for an application serving
-nothing. It now waits on a channel that `stop` wakes at once, with a 250 ms timeout kept as
-the guarantee that the loop still ends, and the measurement reads 0.00 %.
+nothing. That became a channel receive with a 250 ms timeout, which read 0.00 % idle — but
+the timeout was itself a latent latency defect, because an *incoming* connection cannot wake a
+channel receive, so every fresh connection waited for the poll to expire before `accept()` ran
+(a page's asset fetch measured a p50 of ~253,000 µs). The accept now blocks in the kernel and
+`stop` wakes it by opening one throwaway loopback connection, so the idle CPU stays 0.00 %
+while a connection is answered the moment it arrives (~560 µs p50) rather than on the next
+poll. Both numbers are measured over a real socket, not asserted.
 
 The memory gap is the webview runtime, and the decomposition is measured: `ncui.exe` is about
 26 MiB against Electron's 95 MiB main process, while the WebView2 runtime's own browser
@@ -494,6 +561,65 @@ machinery — scheduler, metrics, audit log, worker pool, capability checks, and
 renderer — which a minimal Tauri binary does not carry. Neither is a defect this document
 hides; both are recorded so a reader comparing the three frameworks starts from the
 measurement rather than from a claim.
+
+The largest single one of those, the GPU island renderer (6.4 MiB), is now **optional at link
+time**: `ncui build --profile minimal` ships the window host without it, measuring **4.902 MiB**
+on the counter example against the full build's 11.292 MiB (`standard`, the default, is unchanged).
+That closes most of the size gap to Tauri's 3.2 MiB for applications that draw no islands. What
+remains — a window host without the renderer cannot go below ~4.9 MiB on this toolchain, because
+that is the WebView2 host itself plus the runtime's own machinery — is the residual, recorded rather
+than overclaimed. An application that draws no islands and ships `minimal` is within 1.7 MiB of
+Tauri; one that draws islands, or ships the default `standard`, still carries the renderer by
+choice.
+
+A2's "≤ 300 MiB idle working set" target is **blocked on the engine, not on host allocations**,
+and the decomposition is measured rather than inferred
+(`scripts/measure_a2_working_set.py`, the comparison harness's own Win32 `process_tree_memory`
+walk, five repeats, median). On a minimal scaffolded application — a window and a counter,
+granted only `read.metrics` and `window` — the tree measures **317.4 MiB**, of which
+`msedgewebview2.exe` is **301.6 MiB** and `ncui.exe` **23.1 MiB**. The host is already lean and
+the subsystems A2 names are now lazy: the worker pool spawns its threads on first submitted task
+rather than at startup, the GPU renderer's `host` stays `None` until islands install, and the
+metrics/log rings bound their pre-allocation. A minimal app's worker pool therefore spawns **zero**
+threads, and the tree is *still* over target — because WebView2's own processes alone measure
+301.6 MiB. No lazy-initialisation of host subsystems can close a gap that is the web engine's
+multi-process footprint. Reaching ≤ 300 MiB requires changing the engine or its process model — a
+different WebView port, a single-process mode, or a lighter engine for minimal apps — which is a
+project decision, recorded here and in the goal prompt rather than claimed as met.
+
+## A command can be answered by any executable or by the page's own JS
+
+C3 asked for two things: a command answered by *any* executable, and a command handler written
+in the page's own JS. Both are delivered and gated.
+
+The any-language sidecar is real. An application declares it in `ncui.app.json`
+(`sidecars: [{command, program, args, requires, timeout_ms, summary}]`), the runtime writes the
+call payload to the program's stdin and reads one JSON answer from its stdout, and the command
+is gated twice — the application must hold `process.spawn` for any sidecar to register, and each
+sidecar's `requires` must sit inside the page grant and gates the call at the seam. It runs
+inside the `process` runner's containment (root-resolved program, secret-scrubbed environment, no
+shell, timeout, bounded output, process-tree stop), and its working directory is pinned to the
+app root so a relative script path resolves next to the manifest — a fix the end-to-end tests
+forced, because an interpreter resolves its script argument against the child's cwd, not the
+host's. A non-zero exit or a non-JSON answer reaches the page as an error. It is tested against
+a real interpreter end to end (`crates/ncui-runtime/src/native.rs`, five sidecar tests) and the
+manifest declaration is tested from real JSON (`crates/ncui-app/src/manifest.rs`).
+
+The JS half is delivered by the webview-callback round trip, with no new dependency. An
+application declares a page command (`page_commands: [{command, requires, summary}]` in
+`ncui.app.json`) and the page registers the function that answers it with
+`window.ncui.registerCommand`. Calling it through the usual `window.ncui.invoke` seam is gated
+exactly like a native command — declared, and the page holds `requires`, or the seam refuses it
+under the page's own correlation id so its promise rejects rather than hangs. Because `wry`
+exposes no way to read a value back out of `evaluate_script`, the runtime does not answer
+directly: it holds the original invoke open, evaluates `window.ncui.__runCommand(replyId, name,
+payload)`, the handler runs and posts its answer back under `replyId`, and the runtime settles the
+original invoke with it. A handler that is missing or throws is reported to the page as an error
+rather than left to time out; a command declared but never handed a handler answers with an
+error rather than running anything. A component cannot reach a page command. It is tested end to
+end through the real page pump (`crates/ncui-runtime/tests/page_bridge.rs`) and against a real
+WebView (`crates/ncui-webview-wry/src/host.rs`). The **component ABI** remains the first-class
+path for precompiled native modules in an AOT language that emits WASM.
 
 ## The `windows` version pin is easy to break
 
@@ -556,24 +682,59 @@ both places: a confirmation the runtime mints, not a value the caller supplies.
 The application story exists: a manifest (`ncui.app.json`) names the entry page, the
 assets, the window and the granted capabilities; a loopback asset server gives the page a
 real origin; `ncui run` starts the server, opens the window and answers the page's calls
-until the window closes (ADR-014). What is *not* built is the step before all of it: turning
-what a developer writes into the files the server serves.
+until the window closes (ADR-014). **`ncui new <directory>`** now writes that first
+application for you — a manifest, an entry page and a script — so first-run-to-window is one
+command rather than a blank directory and a page of documentation. The scaffold grants the
+smallest capability set that opens a window and answers the page's first calls (not
+everything, which would teach the wrong habit on day one), and its entry page includes the
+reload bridge and designates its state, so the dev loop the runtime ships is the one the
+template demonstrates. It refuses to scaffold over an existing non-empty directory, because
+scaffolding over work in progress would destroy it. What is *not* built is the step after
+that: turning what a developer writes into the files the server serves.
 
 **There is no bundler.** The asset server serves the files that are on disk. An
 application that imports a package from `node_modules`, or that writes TypeScript, has to
 build its own output first. The server does not transform a file it is asked for.
 
-`ncui run --watch` closes the other half of the loop — a change reloads the page — but it
-reloads what is on disk, so a TypeScript file is not compiled by it. A bundler is a separate
-tool with its own dependency decision.
+`ncui run --watch` closes the other half of the loop — a change reloads the page — and the
+reload now **preserves the state the page asks to keep**. The page designates what it wants kept
+by assigning it to `window.__ncui_state`; before reloading, the runtime snapshots that one value
+into `sessionStorage`, and after the reload a bridge script restores it and dispatches
+`ncui:state-restored`. The bridge is opt-in: an application includes one `<script
+src="/__ncui/reload.js">` tag on its own origin (the counter example does), and one that does not
+gets the old fresh-reload behaviour unchanged. State the page does not put on `__ncui_state` is
+*not* preserved — a reload tears down the JavaScript heap, which is what a reload is, so this is
+one well-defined slot the application opts into, not a framework's component-tree resurrection.
+The bridge is served from the runtime's own route table (the same mechanism that serves a GPU
+island frame), so the asset server stays a file server that rewrites nothing, and the mechanism
+carries no new dependency.
 
-**The asset server sends no cache validator.** A response carries its content type, its length and
-nothing else, so a reload — or a `--watch` reload — re-sends every asset in full even when nothing
-about it changed. A conditional `GET` would fix that: an `ETag` derived from the file's length and
-modification time, and a server that reads the request's `If-None-Match` and answers `304 Not
-Modified` when it still matches. The plumbing is small but real (a validator on the response, the
-header in the response, the request header parsed on the way in, and the `304` path that sends no
-body) and it is not built.
+**The mechanism has a sharp edge, and it is the part a page must get right.** The bridge is a
+classic script and the application's own code is usually a deferred module, so the bridge restores
+`window.__ncui_state` *before* the application runs. A page therefore has to **seed its state from
+the restored global** — read `window.__ncui_state` into its working variables on load. A page that
+initialises from a literal (`let count = 0`) and writes that back in its render function mentions
+`__ncui_state`, passes a check that only looks for the name, and preserves *nothing*: the literal
+clobbers the restored value on the first render. The counter example and the `ncui new` template
+both seed from the global, and a test asserts the scaffolded script seeds from it rather than from
+a literal — because this was got wrong once and a name-only check did not catch it.
+
+A bundler is still a separate tool with its own dependency decision: `--watch` reloads what is on
+disk, so a TypeScript file is not compiled by it. That decision — a built-in Rust transform layer
+versus a dev-server proxy to an external bundler — trades directly against the no-Node, auditable
+surface this project treats as its moat, and is recorded here rather than made unilaterally.
+
+**The asset server sends cache validators.** Every file response carries both a strong
+`ETag` (derived from the file's modification time and the length actually served, so it can
+never disagree with `Content-Length`) and a `Last-Modified` HTTP-date. A conditional `GET`
+that echoes either back is answered `304 Not Modified` with no body, so a `--watch` reload
+re-sends nothing it does not have to: the cold fetch is a `200` and every request for an
+unchanged file is a `304`. `If-None-Match` takes precedence over `If-Modified-Since`
+(RFC 9110 §13.1.3), a date the server cannot parse is treated as no condition rather than
+as a match — a false `304` would hand back an empty body — and the date comparison is done
+in whole seconds, because that is the resolution an HTTP-date carries. Both paths are
+measured over a real socket (`app.asset_get_200`, `app.asset_conditional_304` in the latency
+harness) rather than asserted.
 
 **There is a build command, an installer and an update path.** `ncui build <directory>` writes a
 portable bundle: the runtime binary, the application, a `bundle.json` describing every file with its
@@ -662,11 +823,13 @@ answer.
 | Opening a file or link with the platform's handler | Implemented, through the platform's tool | A scheme registered during a session may not be live in it: Windows resolves associations through a cache the shell refreshes on its own schedule |
 | Remembering a window's place and size | Implemented for the application's own window, and for a window a page opens under a name: `create_window` takes `remember: "notes"`, the place is applied when the window is created and written down when it closes | A window a page does not name is not remembered |
 | A page's own preferences | Implemented: bounded key-value storage per application | No migrations — a page that changes the shape of what it stores reads its own older shapes |
-| File and colour dialogs | Absent | `rfd`, which is safe to call — but a dialog is *interactive*: `pick_file` blocks until a person answers, so a test cannot complete one. This project's standard is that a capability is evidenced by running it, and a dialog whose core cannot be run by a test would be a capability recorded as verified on the strength of its argument parsing. The honest options are a human-driven verification step the registry does not model, or leaving it absent with this note |
+| File, save and folder dialogs | Implemented behind the `dialogs` feature, except the one step a test cannot drive | The vocabulary (`open.file`, `open.files`, `save.file`, `pick.folder`), the option and filter rules, the validation of the path that comes back and the command registration under `Capability::Dialog` are plain Rust in `ncui-native::dialog` and are tested headlessly in both feature states — a page holding the capability gets `dialog.pick_file`/`dialog.save_file`, whose request rules are enforced whether or not the build can show a picker, and which reports `dialog_unavailable` by name on a build without the feature rather than claiming success. The `rfd` adapter behind the feature shows the platform's own picker. **What is not automated:** the single real modal open — a person clicking the picker and choosing a file — is the one step a test cannot drive, because a test has no person. This project's standard is that a capability is evidenced by running it, and everything *around* the modal is so evidenced; the modal itself needs a one-time human verification the feature registry does not model. It is recorded here rather than claimed. A **colour** dialog is still absent — `rfd` does not provide one, and adding it is a separate decision |
 | Tray icon | Implemented: the manifest declares an image and a tooltip, the host creates it on its engine thread, and a click brings the application's window forward and tells its page | — (the platform's own call, through `tray-icon`) |
 | Native menus | Absent | Not a dependency question. `muda` is already in the tree through `tray-icon`, and on Linux (`init_for_gtk_window`) and macOS (`init_for_nsapp`) it attaches safely — but on **Windows** its entry point is `pub unsafe fn init_for_hwnd(hwnd: isize)`, and `unsafe_code = "forbid"` is a workspace-wide ban this project has refused to lift for any reason. A Windows menu bar therefore needs either a windowing crate that offers a safe seam, or a deliberate change to the safety rule |
-| Developer tools (the platform's web inspector) | Absent | `wry` exposes `open_devtools`, `close_devtools` and `is_devtools_open`, and its Linux backend makes all three real. Its **Windows** backend opens the inspector with `OpenDevToolsWindow` and then reports `is_devtools_open() == false` unconditionally and makes `close_devtools()` a no-op, so on the platform this project verifies first, opening could not be evidenced by a test and closing would not work — the partial implementation the standard here refuses to ship. The three methods are also `#[cfg(any(debug_assertions, feature = "devtools"))]`, so a release build of `ncui` could not call them at all without enabling wry's `devtools` feature, which this project builds with `default-features = false`. A capability is added when a host can both do it and answer whether it was done |
+| Developer tools (the platform's web inspector) | Partial: open and close work; the open state is reported as unknown on Windows | `ncui.window.devtools.open` and `ncui.window.devtools.close` call wry's `open_devtools`/`close_devtools`; `ncui.window.devtools.state` answers `open`, `closed`, or `unknown` — and on **Windows** it answers `unknown`, because wry's Windows backend opens the inspector and then reports `is_devtools_open() == false` unconditionally. The runtime says what the platform told it rather than claiming a state it cannot know. The three calls require the `window` capability |
 | Global shortcuts | Implemented: the manifest declares them, the runtime holds them while it runs and releases them when it stops, and the page hears a `shortcut` event | — (the platform's own registration call, through `global-hotkey`) |
+| Chrome DevTools Protocol (drive a page's engine: navigate, evaluate, inspect) | Implemented on Windows behind `Capability::Cdp`; the relay remains for pages that want it | The engine is created with `--remote-debugging-port=0`; the port and bearer path are read from the user-data directory's `DevToolsActivePort` file, and `ncui.cdp.send` delivers the command over a loopback WebSocket to the page's own DevTools endpoint, returning the endpoint's answer (ADR-017 Phase 2; no `unsafe`, no engine patching). A page can still relay through `ncui.on("ncui:cdp", ...)`. A page without its own relay no longer needs one. Logical child windows (`ncui.window.create.child`) are implemented; an embedded `<ncui-webview>` element remains ADR-017 Phase 3. Not exercised by the suite: the one live WebView2 exchange (the transport is proven to the endpoint boundary) |
+| Running on macOS | The code is written; the platform is not verified | AppKit requires the event loop on the main thread and `tao` offers no any-thread switch, so on macOS the engine loop owns the main thread and the runtime pump runs on a worker (ADR-018). Cross-compiling even a `cargo check` for the macOS target stops in `objc2-exception-helper`'s build script — this machine has no C compiler for the Apple target — so the path is reviewed but **not compiled or run here**; a platform is not "supported" until its gate has run on it, and `cross_platform.verification.macos` stays `not_implemented` until a macOS run says otherwise |
 
 Each capability still absent needs a new dependency, and ADR-012's dependency policy requires an ADR
 exception for each one — the same bar `wry`, `wgpu`, `rustybuzz` and `global-hotkey` had to clear.

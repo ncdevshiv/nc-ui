@@ -20,10 +20,12 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use ncui_app::SidecarConfig;
 use ncui_core::{Capability, CapabilitySet, ErrorKind, NcError, Result};
 use ncui_native::{
-    Clipboard, ClipboardError, FileSystem, FsError, NotificationError, Notifier, OpenError,
-    ProcessError, ProcessRunner, RunRequest, open_with_default,
+    Clipboard, ClipboardError, DialogBackend, DialogError, DialogKind, DialogOptions, FileFilter,
+    FileSystem, FsError, NotificationError, Notifier, OpenError, ProcessError, ProcessRunner,
+    RunOutput, RunRequest, open_with_default, validate_options,
 };
 use ncui_webview::SeamError;
 use serde_json::Value;
@@ -41,6 +43,7 @@ pub const CAPABILITIES: &[Capability] = &[
     Capability::ProcessSpawn,
     Capability::Clipboard,
     Capability::Notifications,
+    Capability::Dialog,
 ];
 
 /// Registers the filesystem commands the runtime's page grant covers.
@@ -57,6 +60,7 @@ pub fn register(
     runtime: &Runtime,
     root: &Path,
     identity: Option<&str>,
+    sidecars: &[SidecarConfig],
 ) -> Result<Vec<CommandRegistration>> {
     let mut registrations = Vec::new();
     let granted = runtime.page_grant();
@@ -80,6 +84,29 @@ pub fn register(
     if granted.contains(Capability::ProcessSpawn) {
         registrations.push(register_open(runtime, &metrics)?);
     }
+    if granted.contains(Capability::Dialog) {
+        // The dialog backend exists only behind the `dialogs` feature: a modal picker blocks on a
+        // person, which a headless build does not have. When the feature is off the command still
+        // registers and the handler still validates the request — so a page holding the capability
+        // gets a command whose request rules are enforced either way — and then reports
+        // `dialog_unavailable` rather than claiming success. That is the notification shape: a
+        // machine without the thing is a fact about the machine, reported by name.
+        let backend = dialog_backend();
+        registrations.push(register_dialog(
+            runtime,
+            backend.clone(),
+            DialogKind::OpenFile,
+            "dialog.pick_file",
+            &metrics,
+        )?);
+        registrations.push(register_dialog(
+            runtime,
+            backend,
+            DialogKind::SaveFile,
+            "dialog.save_file",
+            &metrics,
+        )?);
+    }
     if granted.contains(Capability::ProcessSpawn) {
         let runner = Arc::new(ProcessRunner::new(root).map_err(|error| {
             NcError::new(ErrorKind::Validation {
@@ -89,6 +116,15 @@ pub fn register(
             .operation("native::register")
         })?);
         registrations.push(register_process(runtime, &runner, &metrics)?);
+        // The sidecars the manifest declares. Each is a command a page calls that the
+        // application's own executable answers over standard input and output, so the
+        // application's backend is not Rust-only. They run through the same runner as
+        // `process.run` — contained to the application directory, with a scrubbed
+        // environment, a time limit and bounded output — and are gated at the seam by the
+        // capability each sidecar's `requires` names.
+        for sidecar in sidecars {
+            registrations.push(register_sidecar(runtime, &runner, sidecar, &metrics)?);
+        }
     }
 
     if granted.contains(Capability::FilesystemRead) || granted.contains(Capability::FilesystemWrite)
@@ -217,6 +253,90 @@ fn register_process(
     )
 }
 
+/// Registers one sidecar command the manifest declares.
+///
+/// A sidecar is the runtime calling *out* to a program the application ships or names, rather
+/// than into a Rust handler: the page's payload goes to the program's standard input as one
+/// JSON document, and the program's standard output comes back as the answer. That is what lets
+/// an application's backend be any language — Go, Python, Zig, a shell script — over the same
+/// capability-gated seam a native command uses.
+///
+/// The program runs through the same [`ProcessRunner`] as `process.run`, so it inherits the
+/// containment, the scrubbed environment, the time limit and the bounded output: a sidecar is a
+/// program the runtime starts on a page's behalf, and is treated with exactly the suspicion that
+/// deserves. The response must be valid JSON on standard output; a program that exits non-zero,
+/// or answers with something that is not JSON, is reported as the failure it is rather than
+/// silently handing the page garbage.
+fn register_sidecar(
+    runtime: &Runtime,
+    runner: &Arc<ProcessRunner>,
+    sidecar: &SidecarConfig,
+    metrics: &Arc<ncui_observability::metrics::MetricsRegistry>,
+) -> Result<CommandRegistration> {
+    let runner = Arc::clone(runner);
+    let metrics = Arc::clone(metrics);
+    let program = sidecar.program.clone();
+    let args = sidecar.args.clone();
+    let name = sidecar.command.clone();
+    let timeout_ms = sidecar.timeout_ms;
+    let summary = if sidecar.summary.trim().is_empty() {
+        format!("Run the application's `{program}` sidecar.")
+    } else {
+        sidecar.summary.clone()
+    };
+    register_command(
+        runtime,
+        &sidecar.command,
+        sidecar.requires,
+        &summary,
+        move |payload| {
+            record_sidecar_call(&metrics, &name);
+            let request = RunRequest {
+                program: program.clone(),
+                args: args.clone(),
+                stdin: Some(serde_json::to_string(&payload).unwrap_or_default()),
+                timeout_ms,
+            };
+            let output = runner
+                .run(&request)
+                .map_err(|error| process_error(&error))?;
+            parse_sidecar_output(&output)
+        },
+    )
+}
+
+/// Parses a sidecar's answer for the page.
+///
+/// The contract is one JSON document on the program's standard output. A non-zero exit is a
+/// failure the page sees, because an application's backend is entitled to report "no" and the
+/// page is the part that decides what to do about it.
+fn parse_sidecar_output(output: &RunOutput) -> std::result::Result<Value, SeamError> {
+    if output.status != 0 {
+        return Err(SeamError {
+            code: "sidecar_failed".to_owned(),
+            message: format!(
+                "the sidecar exited with status {}: {}",
+                output.status,
+                output.stderr.trim()
+            ),
+            retryable: false,
+        });
+    }
+    serde_json::from_str(output.stdout.trim()).map_err(|error| SeamError {
+        code: "sidecar_response".to_owned(),
+        message: format!("the sidecar's answer is not valid JSON: {error}"),
+        retryable: false,
+    })
+}
+
+/// Counts one sidecar call, labelled by the command name.
+fn record_sidecar_call(metrics: &ncui_observability::metrics::MetricsRegistry, command: &str) {
+    let Ok(labels) = ncui_observability::metrics::Labels::from_pairs([("command", command)]) else {
+        return;
+    };
+    let _ = metrics.counter_inc("native.sidecar_calls", &labels, 1);
+}
+
 /// Registers one clipboard command.
 fn register_clipboard(
     runtime: &Runtime,
@@ -336,6 +456,179 @@ fn register_open(
                 })
         },
     )
+}
+
+/// The dialog backend, when this build can show a dialog at all.
+///
+/// `Some` behind the `dialogs` feature, where [`RfdDialogs`](ncui_native::RfdDialogs) puts the
+/// platform's own picker on screen; `None` in a build without it, where there is no person to
+/// answer a modal and the command reports [`DialogError::Unavailable`] rather than pretending.
+/// Carrying the backend as a trait object is what lets one [`register_dialog`] serve both: the
+/// request rules run either way, and only the showing of the picker is feature-gated.
+///
+/// The `Option` is deliberate and is the same type in both feature states, so the call site is
+/// written once; the feature-off sibling below returns `None`. Clippy's `unnecessary_wraps` sees
+/// only this half, which always returns `Some`, and would collapse the seam away — so it is
+/// excepted here with that reason rather than by changing the shared signature.
+#[cfg(feature = "dialogs")]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the Option is the feature seam shared with the feature-off sibling, which returns None; collapsing it would split the call site in two"
+)]
+fn dialog_backend() -> Option<Arc<dyn DialogBackend>> {
+    Some(Arc::new(ncui_native::RfdDialogs::new()))
+}
+
+#[cfg(not(feature = "dialogs"))]
+fn dialog_backend() -> Option<Arc<dyn DialogBackend>> {
+    None
+}
+
+/// Registers one dialog command, e.g. `dialog.pick_file`.
+///
+/// The payload is the request the page makes: an optional title, an optional set of file-type
+/// filters and an optional default path. It is validated by
+/// [`validate_options`](ncui_native::validate_options) before the backend is reached, so a
+/// malformed request is refused with a stable code and never puts a malformed dialog on screen.
+/// The backend then blocks until the person answers, and the chosen path is validated again as it
+/// comes back — it is untrusted input from outside this process, handed to a page.
+///
+/// # Errors
+///
+/// Returns an error when the command cannot be registered, which would mean the command table and
+/// the grant disagree.
+fn register_dialog(
+    runtime: &Runtime,
+    backend: Option<Arc<dyn DialogBackend>>,
+    kind: DialogKind,
+    name: &str,
+    metrics: &Arc<ncui_observability::metrics::MetricsRegistry>,
+) -> Result<CommandRegistration> {
+    let metrics = Arc::clone(metrics);
+    register_command(
+        runtime,
+        name,
+        CapabilitySet::empty().with(Capability::Dialog),
+        match kind {
+            DialogKind::OpenFile => "Show a native open dialog and return the file the user chose.",
+            DialogKind::SaveFile => "Show a native save dialog and return the path the user chose.",
+            DialogKind::OpenFiles => {
+                "Show a native open dialog and return the files the user chose."
+            }
+            DialogKind::PickFolder => {
+                "Show a native folder dialog and return the directory the user chose."
+            }
+        },
+        move |payload| {
+            record_dialog_call(&metrics, kind);
+            let options = dialog_options(&payload)?;
+            // The request rules are plain Rust and run whether or not this build can show a picker:
+            // a page holding the capability cannot put a malformed dialog in front of the user
+            // even on a build that cannot show one.
+            validate_options(kind, &options).map_err(|error| dialog_error(&error))?;
+            let Some(backend) = backend.clone() else {
+                return Err(SeamError::new(
+                    "dialog_unavailable",
+                    "this build was compiled without the `dialogs` feature, so it cannot show a \
+                     native dialog",
+                ));
+            };
+            backend
+                .show(kind, &options)
+                .map_err(|error| dialog_error(&error))
+                .and_then(|outcome| to_value(&outcome))
+        },
+    )
+}
+
+/// Reads the dialog request's options from a page's payload.
+///
+/// Every field is optional and the platform's own defaults are the right answer when the page has
+/// no opinion. A filter is read as `{ "name": ..., "extensions": [...] }`; anything else is a
+/// caller's mistake, reported as `invalid_params` before the request rules run.
+fn dialog_options(payload: &Value) -> std::result::Result<DialogOptions, SeamError> {
+    let title = payload
+        .get("title")
+        .map(|value| {
+            value
+                .as_str()
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| SeamError::new("invalid_params", "`title` must be a string"))
+        })
+        .transpose()?;
+    let default_path = payload
+        .get("default_path")
+        .map(|value| {
+            value
+                .as_str()
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| SeamError::new("invalid_params", "`default_path` must be a string"))
+        })
+        .transpose()?;
+    let filters = payload
+        .get("filters")
+        .map(|value| {
+            value
+                .as_array()
+                .ok_or_else(|| {
+                    SeamError::new("invalid_params", "`filters` must be an array of filters")
+                })?
+                .iter()
+                .map(|filter| {
+                    let name = filter.get("name").and_then(Value::as_str).ok_or_else(|| {
+                        SeamError::new("invalid_params", "each filter needs a string `name`")
+                    })?;
+                    let extensions = filter
+                        .get("extensions")
+                        .and_then(Value::as_array)
+                        .ok_or_else(|| {
+                            SeamError::new(
+                                "invalid_params",
+                                "each filter needs an array of string `extensions`",
+                            )
+                        })?
+                        .iter()
+                        .map(|extension| {
+                            extension.as_str().map(ToOwned::to_owned).ok_or_else(|| {
+                                SeamError::new("invalid_params", "each extension must be a string")
+                            })
+                        })
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    Ok(FileFilter {
+                        name: name.to_owned(),
+                        extensions,
+                    })
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()
+        })
+        .transpose()?;
+    Ok(DialogOptions {
+        title,
+        filters,
+        default_path,
+    })
+}
+
+/// Counts one dialog call, labelled by the kind.
+fn record_dialog_call(metrics: &ncui_observability::metrics::MetricsRegistry, kind: DialogKind) {
+    let Ok(labels) = ncui_observability::metrics::Labels::from_pairs([("kind", kind.as_str())])
+    else {
+        return;
+    };
+    let _ = metrics.counter_inc("native.dialog_calls", &labels, 1);
+}
+
+/// Maps a dialog failure onto the bridge's error shape.
+///
+/// A cancellation is not a failure a caller should treat as one, but it is still an answer the
+/// page must handle, so it reaches the page with the `dialog_cancelled` code rather than a
+/// success-shaped payload with no path in it.
+fn dialog_error(error: &DialogError) -> SeamError {
+    SeamError {
+        code: error.code().to_owned(),
+        message: error.to_string(),
+        retryable: false,
+    }
 }
 
 /// Counts one open, so a page that opens a stream of targets is visible.
@@ -550,7 +843,7 @@ mod tests {
     fn a_page_without_the_capability_gets_no_filesystem_commands() {
         let root = scratch();
         let runtime = runtime_with(&[]);
-        let registrations = register(&runtime, &root, None).expect("registration succeeds");
+        let registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
         assert!(registrations.is_empty());
         assert!(
             runtime.page_commands.get("fs.read_text").is_none(),
@@ -563,7 +856,7 @@ mod tests {
     fn the_read_capability_registers_the_read_commands_only() {
         let root = scratch();
         let runtime = runtime_with(&[Capability::FilesystemRead]);
-        let _registrations = register(&runtime, &root, None).expect("registration succeeds");
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
         assert!(runtime.page_commands.get("fs.read_text").is_some());
         assert!(runtime.page_commands.get("fs.list").is_some());
         assert!(runtime.page_commands.get("fs.stat").is_some());
@@ -578,7 +871,7 @@ mod tests {
     fn the_spawn_capability_registers_the_run_command() {
         let root = scratch();
         let runtime = runtime_with(&[Capability::ProcessSpawn]);
-        let _registrations = register(&runtime, &root, None).expect("registration succeeds");
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
         assert!(runtime.page_commands.get("process.run").is_some());
         assert!(
             runtime.page_commands.get("fs.read_text").is_none(),
@@ -591,14 +884,15 @@ mod tests {
     fn the_run_command_executes_a_real_program() {
         let root = scratch();
         let runtime = runtime_with(&[Capability::ProcessSpawn]);
-        let _registrations = register(&runtime, &root, None).expect("registration succeeds");
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
         let command = runtime
             .page_commands
             .get("process.run")
             .expect("registered");
         let handler = match command.target {
             crate::commands::CommandTarget::Native(handler) => handler,
-            crate::commands::CommandTarget::RuntimeMethod(_) => panic!("expected a native command"),
+            crate::commands::CommandTarget::RuntimeMethod(_)
+            | crate::commands::CommandTarget::Page => panic!("expected a native command"),
         };
         let output = if cfg!(windows) {
             handler(serde_json::json!({
@@ -634,14 +928,15 @@ mod tests {
     fn a_program_name_with_a_path_outside_the_application_is_refused_at_the_command() {
         let root = scratch();
         let runtime = runtime_with(&[Capability::ProcessSpawn]);
-        let _registrations = register(&runtime, &root, None).expect("registration succeeds");
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
         let command = runtime
             .page_commands
             .get("process.run")
             .expect("registered");
         let handler = match command.target {
             crate::commands::CommandTarget::Native(handler) => handler,
-            crate::commands::CommandTarget::RuntimeMethod(_) => panic!("expected a native command"),
+            crate::commands::CommandTarget::RuntimeMethod(_)
+            | crate::commands::CommandTarget::Page => panic!("expected a native command"),
         };
         let program = if cfg!(windows) {
             "C:\\Windows\\System32\\cmd.exe"
@@ -658,14 +953,15 @@ mod tests {
     fn a_run_request_with_a_bad_argument_is_refused_before_anything_spawns() {
         let root = scratch();
         let runtime = runtime_with(&[Capability::ProcessSpawn]);
-        let _registrations = register(&runtime, &root, None).expect("registration succeeds");
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
         let command = runtime
             .page_commands
             .get("process.run")
             .expect("registered");
         let handler = match command.target {
             crate::commands::CommandTarget::Native(handler) => handler,
-            crate::commands::CommandTarget::RuntimeMethod(_) => panic!("expected a native command"),
+            crate::commands::CommandTarget::RuntimeMethod(_)
+            | crate::commands::CommandTarget::Page => panic!("expected a native command"),
         };
         for payload in [
             serde_json::json!({}),
@@ -684,7 +980,7 @@ mod tests {
     fn the_clipboard_capability_registers_the_clipboard_commands() {
         let root = scratch();
         let runtime = runtime_with(&[Capability::Clipboard]);
-        let _registrations = register(&runtime, &root, None).expect("registration succeeds");
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
         assert!(runtime.page_commands.get("clipboard.read_text").is_some());
         assert!(runtime.page_commands.get("clipboard.write_text").is_some());
         assert!(
@@ -701,7 +997,7 @@ mod tests {
         // identity the toast is delivered under, which is why the module documents both.
         let root = scratch();
         let runtime = runtime_with(&[Capability::Notifications]);
-        let _registrations = register(&runtime, &root, None).expect("registration succeeds");
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
         let show = runtime
             .page_commands
             .get("notifications.show")
@@ -744,7 +1040,7 @@ mod tests {
         // Windows resolves a scheme through a cache the shell refreshes on its own schedule.
         let root = scratch();
         let runtime = runtime_with(&[Capability::ProcessSpawn]);
-        let _registrations = register(&runtime, &root, None).expect("registration succeeds");
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
         let open = runtime.page_commands.get("shell.open").expect("registered");
         let crate::commands::CommandTarget::Native(open) = open.target.clone() else {
             panic!("shell.open is a native command");
@@ -767,7 +1063,7 @@ mod tests {
     fn a_page_without_the_capability_gets_no_open_command() {
         let root = scratch();
         let runtime = runtime_with(&[Capability::FilesystemRead]);
-        let _registrations = register(&runtime, &root, None).expect("registration succeeds");
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
         assert!(
             runtime.page_commands.get("shell.open").is_none(),
             "reading a file is not permission to start whatever opens a target"
@@ -778,7 +1074,7 @@ mod tests {
     fn a_page_without_the_notification_capability_gets_no_notification_command() {
         let root = scratch();
         let runtime = runtime_with(&[Capability::FilesystemRead]);
-        let _registrations = register(&runtime, &root, None).expect("registration succeeds");
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
         assert!(
             runtime.page_commands.get("notifications.show").is_none(),
             "read.logs is not permission to interrupt the user"
@@ -786,10 +1082,112 @@ mod tests {
     }
 
     #[test]
+    fn a_page_without_the_dialog_capability_gets_no_dialog_command() {
+        // A dialog is not permission that comes with reading a file: it is permission to put a
+        // modal picker in front of the user and to learn the path they chose, which is a different
+        // question from reading a file the application already has.
+        let root = scratch();
+        let runtime = runtime_with(&[Capability::FilesystemRead]);
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
+        assert!(
+            runtime.page_commands.get("dialog.pick_file").is_none(),
+            "reading a file is not permission to put a picker in front of the user"
+        );
+        assert!(runtime.page_commands.get("dialog.save_file").is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_dialog_capability_registers_the_dialog_commands_only() {
+        let root = scratch();
+        let runtime = runtime_with(&[Capability::Dialog]);
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
+        assert!(runtime.page_commands.get("dialog.pick_file").is_some());
+        assert!(runtime.page_commands.get("dialog.save_file").is_some());
+        assert!(
+            runtime.page_commands.get("fs.read_text").is_none(),
+            "a dialog must not bring the filesystem with it: learning a path is not reading it"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_dialog_request_with_a_bad_argument_is_refused_before_any_picker_is_shown() {
+        // The request rules run whether or not this build can show a picker, so they are asserted
+        // here in the headless default build: a page holding the capability cannot put a malformed
+        // dialog in front of the user even on a machine that cannot show one.
+        let root = scratch();
+        let runtime = runtime_with(&[Capability::Dialog]);
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
+        let pick = runtime
+            .page_commands
+            .get("dialog.pick_file")
+            .expect("registered");
+        let crate::commands::CommandTarget::Native(pick) = pick.target.clone() else {
+            panic!("dialog.pick_file is a native command");
+        };
+        for payload in [
+            serde_json::json!({ "title": "" }),
+            serde_json::json!({ "title": "t".repeat(ncui_native::MAX_DIALOG_TITLE_BYTES + 1) }),
+            serde_json::json!({ "filters": [] }),
+            serde_json::json!({ "filters": [{ "name": "Text", "extensions": [] }] }),
+            serde_json::json!({ "filters": [{ "name": "Text", "extensions": [".txt"] }] }),
+            serde_json::json!({ "filters": [{ "name": "", "extensions": ["txt"] }] }),
+            serde_json::json!({ "default_path": "/home/someone/\nnotes" }),
+        ] {
+            let error = pick(payload.clone()).expect_err("the request is refused");
+            assert_eq!(error.code, "dialog_request_refused", "for {payload}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_dialog_argument_that_is_not_the_right_shape_is_invalid_params() {
+        let root = scratch();
+        let runtime = runtime_with(&[Capability::Dialog]);
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
+        let pick = runtime
+            .page_commands
+            .get("dialog.pick_file")
+            .expect("registered");
+        let crate::commands::CommandTarget::Native(pick) = pick.target.clone() else {
+            panic!("dialog.pick_file is a native command");
+        };
+        let error = pick(serde_json::json!({ "title": 7 })).expect_err("a number is not a title");
+        assert_eq!(error.code, "invalid_params");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_dialog_command_reports_unavailable_on_a_build_without_the_feature() {
+        // On the headless default build there is no picker to show: the command still registers
+        // and still validates the request, and then reports `dialog_unavailable` by name rather
+        // than claiming success. What it cannot assert is that a person sees a picker — that is
+        // the one-time human verification `docs/known-gaps.md` records.
+        #[cfg(not(feature = "dialogs"))]
+        {
+            let root = scratch();
+            let runtime = runtime_with(&[Capability::Dialog]);
+            let _registrations =
+                register(&runtime, &root, None, &[]).expect("registration succeeds");
+            let pick = runtime
+                .page_commands
+                .get("dialog.pick_file")
+                .expect("registered");
+            let crate::commands::CommandTarget::Native(pick) = pick.target.clone() else {
+                panic!("dialog.pick_file is a native command");
+            };
+            let error = pick(serde_json::json!({})).expect_err("no picker on this build");
+            assert_eq!(error.code, "dialog_unavailable");
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
     fn the_clipboard_commands_round_trip_real_text() {
         let root = scratch();
         let runtime = runtime_with(&[Capability::Clipboard]);
-        let _registrations = register(&runtime, &root, None).expect("registration succeeds");
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
         let write = runtime
             .page_commands
             .get("clipboard.write_text")
@@ -839,7 +1237,7 @@ mod tests {
     fn a_clipboard_write_without_text_is_refused_before_the_tool_is_reached() {
         let root = scratch();
         let runtime = runtime_with(&[Capability::Clipboard]);
-        let _registrations = register(&runtime, &root, None).expect("registration succeeds");
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
         let write = runtime
             .page_commands
             .get("clipboard.write_text")
@@ -856,7 +1254,7 @@ mod tests {
     fn the_write_capability_registers_the_write_command() {
         let root = scratch();
         let runtime = runtime_with(&[Capability::FilesystemWrite]);
-        let _registrations = register(&runtime, &root, None).expect("registration succeeds");
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
         assert!(runtime.page_commands.get("fs.write_text").is_some());
         assert!(runtime.page_commands.get("fs.read_text").is_none());
         let _ = std::fs::remove_dir_all(&root);
@@ -866,7 +1264,7 @@ mod tests {
     fn the_registered_command_is_advertised_to_the_page() {
         let root = scratch();
         let runtime = runtime_with(&[Capability::FilesystemRead]);
-        let _registrations = register(&runtime, &root, None).expect("registration succeeds");
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
         let actions: ActionTable = runtime.page_commands.actions();
         assert!(
             actions.requires("fs.read_text").is_some(),
@@ -880,7 +1278,7 @@ mod tests {
         let root = scratch();
         std::fs::write(root.join("note.txt"), "from disk").expect("the fixture is written");
         let runtime = runtime_with(&[Capability::FilesystemRead]);
-        let _registrations = register(&runtime, &root, None).expect("registration succeeds");
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
 
         let command = runtime
             .page_commands
@@ -891,10 +1289,206 @@ mod tests {
             crate::commands::CommandTarget::RuntimeMethod(method) => {
                 panic!("expected a native command, got `{method}`")
             }
+            crate::commands::CommandTarget::Page => panic!("expected a native command"),
         };
         let value = handler(serde_json::json!({ "path": "note.txt" })).expect("the call succeeds");
         assert_eq!(value["text"], "from disk");
         assert_eq!(value["bytes"], 9);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A sidecar that reads one JSON document on standard input and echoes a field of it
+    /// back as JSON, answered by an ordinary interpreter reading standard input.
+    ///
+    /// The shape is the whole C3 sidecar contract: `program` is the *interpreter* — the
+    /// backend's runtime, which here is Python but could be Go, Node or a compiled binary —
+    /// and the script it runs rides in `args`. A `.py` file is data, not an executable, so on
+    /// Windows it cannot be started directly; naming the interpreter and passing the script is
+    /// how any-language backends work on every platform. That the backend is not Rust and is
+    /// not compiled here is the point.
+    fn echo_sidecar(root: &Path, command: &str) -> SidecarConfig {
+        let script = root.join("sidecar.py");
+        std::fs::write(
+            &script,
+            "import json, sys\n\
+             request = json.load(sys.stdin)\n\
+             json.dump({\"echoed\": request.get(\"word\", \"\"), \"command\": request.get(\"command\", \"\")}, sys.stdout)\n",
+        )
+        .expect("the sidecar script is written");
+        SidecarConfig {
+            command: command.to_owned(),
+            program: interpreter(),
+            args: vec![script.file_name().map_or_else(
+                || script.to_string_lossy().into_owned(),
+                |name| name.to_string_lossy().into_owned(),
+            )],
+            requires: CapabilitySet::empty(),
+            timeout_ms: Some(15_000),
+            summary: "Echo a word back from another language.".to_owned(),
+        }
+    }
+
+    /// A Python interpreter the sidecar tests run their script with.
+    ///
+    /// Named as a bare program so the `process` runner resolves it the way it resolves any
+    /// tool the application does not ship, and so the test runs wherever a Python is on the
+    /// path. The sidecar contract is language-agnostic; Python only stands in for "some
+    /// interpreter".
+    fn interpreter() -> String {
+        if cfg!(windows) {
+            "python".to_owned()
+        } else {
+            "python3".to_owned()
+        }
+    }
+
+    /// The canonical form of a scratch directory, which is what the `process` runner roots
+    /// itself at.
+    ///
+    /// The runner canonicalizes its root when it is built, so a script written into a
+    /// non-canonical path would not be found by a program path resolved against the
+    /// canonical one — on Windows the two spellings of the scratch directory differ in
+    /// case. Rooting the runner and writing the fixture at the same canonical path keeps the
+    /// test about the sidecar contract rather than about path spelling.
+    fn canonical_scratch() -> std::path::PathBuf {
+        let root = scratch();
+        root.canonicalize().unwrap_or(root)
+    }
+
+    #[test]
+    fn a_sidecar_answers_a_page_over_standard_input_and_output() {
+        let root = canonical_scratch();
+        let sidecar = echo_sidecar(&root, "echo.word");
+        let runtime = runtime_with(&[Capability::ProcessSpawn]);
+        let _registrations =
+            register(&runtime, &root, None, &[sidecar]).expect("registration succeeds");
+
+        let command = runtime
+            .page_commands
+            .get("echo.word")
+            .expect("the sidecar is registered as a command the page can call");
+        let handler = match command.target {
+            crate::commands::CommandTarget::Native(handler) => handler,
+            crate::commands::CommandTarget::RuntimeMethod(method) => {
+                panic!("expected a native command, got `{method}`")
+            }
+            crate::commands::CommandTarget::Page => panic!("expected a native command"),
+        };
+        let answer =
+            handler(serde_json::json!({ "word": "from the page" })).expect("the sidecar answers");
+        assert_eq!(
+            answer["echoed"], "from the page",
+            "the sidecar must receive the page's payload on standard input"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_sidecar_that_exits_non_zero_is_a_failure_the_page_sees() {
+        let root = canonical_scratch();
+        // A backend that reports "no" through its exit code is a real answer, not a crash:
+        // the page is the part that decides what to do about a refusal.
+        std::fs::write(
+            root.join("refusing.py"),
+            "import sys\nsys.stderr.write(\"no such record\")\nsys.exit(2)\n",
+        )
+        .expect("the refusing sidecar is written");
+        let sidecar = SidecarConfig {
+            command: "refuse.always".to_owned(),
+            program: interpreter(),
+            args: vec!["refusing.py".to_owned()],
+            requires: CapabilitySet::empty(),
+            timeout_ms: Some(15_000),
+            summary: "Always refuse, through its exit code.".to_owned(),
+        };
+        let runtime = runtime_with(&[Capability::ProcessSpawn]);
+        let _registrations =
+            register(&runtime, &root, None, &[sidecar]).expect("registration succeeds");
+
+        let command = runtime
+            .page_commands
+            .get("refuse.always")
+            .expect("registered");
+        let crate::commands::CommandTarget::Native(handler) = command.target else {
+            panic!("expected a native command");
+        };
+        let error =
+            handler(serde_json::json!({})).expect_err("a non-zero exit is a failure the page sees");
+        assert_eq!(error.code, "sidecar_failed", "got: {}", error.message);
+        assert!(
+            error.message.contains("no such record"),
+            "the sidecar's own words must reach the page: {}",
+            error.message
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_sidecar_that_answers_with_something_that_is_not_json_is_reported() {
+        let root = canonical_scratch();
+        std::fs::write(
+            root.join("plain.py"),
+            "import sys\nsys.stdout.write(\"just text, not json\")\n",
+        )
+        .expect("the plain sidecar is written");
+        let sidecar = SidecarConfig {
+            command: "plain.text".to_owned(),
+            program: interpreter(),
+            args: vec!["plain.py".to_owned()],
+            requires: CapabilitySet::empty(),
+            timeout_ms: Some(15_000),
+            summary: "Answer with text that is not JSON.".to_owned(),
+        };
+        let runtime = runtime_with(&[Capability::ProcessSpawn]);
+        let _registrations =
+            register(&runtime, &root, None, &[sidecar]).expect("registration succeeds");
+
+        let command = runtime.page_commands.get("plain.text").expect("registered");
+        let crate::commands::CommandTarget::Native(handler) = command.target else {
+            panic!("expected a native command");
+        };
+        let error = handler(serde_json::json!({}))
+            .expect_err("a non-JSON answer is reported rather than handed to the page");
+        assert_eq!(error.code, "sidecar_response", "got: {}", error.message);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sidecars_register_only_when_the_application_may_spawn_programs() {
+        let root = scratch();
+        let sidecar = echo_sidecar(&root, "echo.word");
+        // A sidecar runs a program, so it is the `process.spawn` capability that authorises
+        // declaring one. An application without it gets no sidecar command at all, and
+        // `describe` does not advertise a name that would be refused.
+        let runtime = runtime_with(&[]);
+        let _registrations =
+            register(&runtime, &root, None, &[sidecar]).expect("registration succeeds");
+        assert!(
+            runtime.page_commands.get("echo.word").is_none(),
+            "an application that may not spawn programs must not be offered a sidecar"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_sidecar_command_is_advertised_with_the_capability_it_requires() {
+        let root = scratch();
+        let mut sidecar = echo_sidecar(&root, "echo.word");
+        sidecar.requires = CapabilitySet::empty().with(Capability::FilesystemRead);
+        // Declaring a sidecar is the `process.spawn` capability, and the command's own
+        // `requires` (`filesystem.read`) must sit inside the page grant to register at all —
+        // `describe` then advertises exactly that gate, which is what this asserts.
+        let runtime = runtime_with(&[Capability::ProcessSpawn, Capability::FilesystemRead]);
+        let _registrations =
+            register(&runtime, &root, None, &[sidecar]).expect("registration succeeds");
+        let actions: ActionTable = runtime.page_commands.actions();
+        let required = actions
+            .requires("echo.word")
+            .expect("the sidecar is discoverable");
+        assert!(
+            required.contains(Capability::FilesystemRead),
+            "the sidecar's `requires` must gate the call at the seam"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -905,14 +1499,15 @@ mod tests {
         let root = scratch();
         std::fs::write(root.join("note.txt"), "counted").expect("the fixture is written");
         let runtime = runtime_with(&[Capability::FilesystemRead]);
-        let _registrations = register(&runtime, &root, None).expect("registration succeeds");
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
         let command = runtime
             .page_commands
             .get("fs.read_text")
             .expect("registered");
         let handler = match command.target {
             crate::commands::CommandTarget::Native(handler) => handler,
-            crate::commands::CommandTarget::RuntimeMethod(_) => panic!("expected a native command"),
+            crate::commands::CommandTarget::RuntimeMethod(_)
+            | crate::commands::CommandTarget::Page => panic!("expected a native command"),
         };
         handler(serde_json::json!({ "path": "note.txt" })).expect("the read succeeds");
         let labels = ncui_observability::metrics::Labels::from_pairs([("op", "read_text")])
@@ -929,14 +1524,15 @@ mod tests {
     fn a_missing_path_argument_is_refused_before_the_filesystem_is_reached() {
         let root = scratch();
         let runtime = runtime_with(&[Capability::FilesystemRead]);
-        let _registrations = register(&runtime, &root, None).expect("registration succeeds");
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
         let command = runtime
             .page_commands
             .get("fs.read_text")
             .expect("registered");
         let handler = match command.target {
             crate::commands::CommandTarget::Native(handler) => handler,
-            crate::commands::CommandTarget::RuntimeMethod(_) => panic!("expected a native command"),
+            crate::commands::CommandTarget::RuntimeMethod(_)
+            | crate::commands::CommandTarget::Page => panic!("expected a native command"),
         };
         let error = handler(serde_json::json!({})).expect_err("a missing path is refused");
         assert_eq!(error.code, "invalid_params");
@@ -947,14 +1543,15 @@ mod tests {
     fn an_escape_is_refused_at_the_command_boundary() {
         let root = scratch();
         let runtime = runtime_with(&[Capability::FilesystemRead]);
-        let _registrations = register(&runtime, &root, None).expect("registration succeeds");
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
         let command = runtime
             .page_commands
             .get("fs.read_text")
             .expect("registered");
         let handler = match command.target {
             crate::commands::CommandTarget::Native(handler) => handler,
-            crate::commands::CommandTarget::RuntimeMethod(_) => panic!("expected a native command"),
+            crate::commands::CommandTarget::RuntimeMethod(_)
+            | crate::commands::CommandTarget::Page => panic!("expected a native command"),
         };
         let error = handler(serde_json::json!({ "path": "../../etc/passwd" }))
             .expect_err("an escape is refused");
@@ -969,7 +1566,7 @@ mod tests {
         let root = scratch();
         std::fs::write(root.join("note.txt"), "through the seam").expect("the fixture is written");
         let runtime = runtime_with(&[Capability::FilesystemRead]);
-        let _registrations = register(&runtime, &root, None).expect("registration succeeds");
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
         let actions = runtime.page_commands.actions();
 
         let lifecycle = ncui_webview::WindowLifecycle::new();
@@ -1005,6 +1602,7 @@ mod tests {
                     crate::commands::CommandTarget::RuntimeMethod(_) => {
                         panic!("expected a native command")
                     }
+                    crate::commands::CommandTarget::Page => panic!("expected a native command"),
                 }
             },
         );

@@ -237,10 +237,7 @@ met:
    so the pixels cross the CPU. A different port or a different composition boundary would be
    needed.
 4. **A Windows menu bar and file dialogs** — recorded absent with their reasons.
-5. **A row taller than its text is clipped, not scrolled** — wrapping fits a row's text into
-   the row's width, but a block of lines taller than the row is cut off at the bottom rather
-   than scrolled or elided.
-6. **The release binary is reproducible for one directory only** — a dependency embeds its
+5. **The release binary is reproducible for one directory only** — a dependency embeds its
    build-output path, so the same source built into two directories differs by 403,978 bytes
    on Windows. A consumer rebuilding elsewhere cannot verify the published digest. Recorded
    in `docs/known-gaps.md` with the byte evidence; not fixable inside this tree.

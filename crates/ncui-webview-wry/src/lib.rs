@@ -30,7 +30,45 @@
     reason = "test assertions must abort loudly on failure"
 )]
 
+pub mod cdp;
+#[cfg(feature = "wry-engine")]
+pub mod child;
 pub mod host;
 mod host_scripts;
 
-pub use host::{WindowHost, WryHostFactory};
+pub use cdp::{CdpError, DevToolsEndpoint, send_command as cdp_send_command};
+#[cfg(feature = "wry-engine")]
+pub use child::WryChildWebviewEngine;
+#[cfg(feature = "wry-engine")]
+pub use host::{HostEvent, WindowHost, WryHostFactory, engine_proxy};
+
+/// Runs the engine's event loop on the main thread, with the application on a worker.
+/// macOS only — see [`host::run_on_main_thread`] (ADR-018).
+#[cfg(all(feature = "wry-engine", target_os = "macos"))]
+pub use host::run_on_main_thread;
+
+#[cfg(not(feature = "wry-engine"))]
+#[allow(
+    missing_docs,
+    reason = "the engine types below do not exist without the engine; the crate docs \
+              above link them, and the links must resolve in every configuration"
+)]
+pub mod placeholder_types {
+    /// The window host. Only present in a build with the `wry-engine` feature.
+    #[derive(Debug)]
+    #[allow(
+        missing_docs,
+        reason = "documented at the type site above; the inner attribute cannot carry it"
+    )]
+    pub struct WindowHost;
+    /// The adapter from NC-UI's host port to `wry`.
+    #[derive(Debug)]
+    #[allow(
+        missing_docs,
+        reason = "documented at the type site above; the inner attribute cannot carry it"
+    )]
+    pub struct WryHostFactory;
+}
+
+#[cfg(not(feature = "wry-engine"))]
+pub use placeholder_types::{WindowHost, WryHostFactory};

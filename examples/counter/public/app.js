@@ -21,11 +21,41 @@ const shortcutStatus = document.getElementById("shortcut-status");
 
 let fullscreen = false;
 
-let count = 0;
+// The bridge script runs before this module (it is a classic script, this is a deferred module), so
+// it has already restored any snapshot the host left onto `window.__ncui_state` by the time this
+// line executes. Seed the count from it — this read is the whole mechanism. Seeding from a literal 0
+// here would clobber the restored value the moment `render()` writes it back, and the reload would
+// preserve nothing.
+let count =
+  window.__ncui_state && typeof window.__ncui_state.count === "number"
+    ? window.__ncui_state.count
+    : 0;
 
 function render() {
   countElement.textContent = String(count);
+  // The state this page wants kept across a `--watch` reload. The runtime snapshots this one value
+  // before it reloads and the bridge script puts it back afterwards, so a dev-loop reload stops
+  // throwing the counter away. Anything not put here is not preserved — that is the contract.
+  window.__ncui_state = { count };
 }
+
+// A fallback for a restore that lands after this module is already live: the bridge normally
+// restores before the module runs (so the read above sees it), but if a future change moves the
+// restore later, the event re-renders rather than the new state being missed.
+window.addEventListener("ncui:state-restored", (event) => {
+  count = Number(event.detail && event.detail.count) || 0;
+  render();
+});
+
+// A command the page itself answers, in JavaScript. The manifest declares `counter.summary`
+// (so it is in the action table and capability-gated like any other command), and here the page
+// registers the function that answers it. When something calls it through `window.ncui.invoke`,
+// the runtime hands it to this handler and returns the result: a JavaScript-only backend, going
+// through the same gated seam a native command uses.
+window.ncui.registerCommand("counter.summary", () => ({
+  count,
+  label: count === 1 ? "one increment" : `${count} increments`,
+}));
 
 function describeRuntime() {
   return Promise.all([

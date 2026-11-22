@@ -492,6 +492,14 @@ pub struct WindowRegistry {
     /// opens is visible to that window without rebuilding its seam. The registry remains
     /// the single place that decides what a page can ask for.
     actions: ActionTable,
+    /// The platform locale and the text direction it lays out in, told to a page that asks
+    /// `describe`.
+    ///
+    /// The runtime reads the locale and derives the direction, so every window's page is told
+    /// the same matched pair. Defaults to `"und"`/`"ltr"` — the honest "unknown" — when the
+    /// runtime does not say.
+    default_locale: String,
+    default_text_direction: String,
 }
 
 impl Default for WindowRegistry {
@@ -513,7 +521,24 @@ impl WindowRegistry {
             default_navigation: NavigationPolicy::new(&[]),
             default_grant: CapabilityGrant::none(),
             actions: ActionTable::new(),
+            default_locale: "und".to_owned(),
+            default_text_direction: "ltr".to_owned(),
         }
+    }
+
+    /// The platform locale and its text direction, told to a page that asks `describe`.
+    ///
+    /// The runtime derives the direction from the locale before handing both over, so a page
+    /// never sees a locale with a direction that contradicts it.
+    #[must_use]
+    pub fn with_default_locale(
+        mut self,
+        locale: impl Into<String>,
+        direction: impl Into<String>,
+    ) -> Self {
+        self.default_locale = locale.into();
+        self.default_text_direction = direction.into();
+        self
     }
 
     /// The navigation policy every window without an explicit one uses.
@@ -700,7 +725,11 @@ impl WindowRegistry {
         // seam: a host that had to be created first and told its policy afterwards would be
         // a host that had already navigated somewhere before it learned the rules.
         let seam = HostSeam::new(seam_lifecycle, seam_grant, self.default_navigation.clone())
-            .with_action_table(self.actions.clone());
+            .with_action_table(self.actions.clone())
+            .with_locale(
+                self.default_locale.clone(),
+                self.default_text_direction.clone(),
+            );
         let seam = Arc::new(seam);
         let host = factory.spawn(id, request, &seam);
         let window = Window {
@@ -883,6 +912,10 @@ mod tests {
     }
 
     impl crate::WebViewBackend for RecordingBackend {
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+
         fn last_error(&self) -> Option<String> {
             self.state.error.clone()
         }

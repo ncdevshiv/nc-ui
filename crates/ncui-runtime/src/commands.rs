@@ -9,11 +9,12 @@
 //! registry is shared with every open window's seam, so a command registered later is
 //! immediately visible to pages without rebuilding a window.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
-use ncui_core::{Capability, CapabilitySet};
+use ncui_core::{Capability, CapabilitySet, WindowId};
 use ncui_webview::{ActionTable, ActionTableError, SeamError};
 use serde_json::Value;
 
@@ -64,6 +65,13 @@ pub(crate) enum CommandTarget {
     RuntimeMethod(&'static str),
     /// An application handler.
     Native(CommandHandler),
+    /// A handler the page registered in JavaScript.
+    ///
+    /// The runtime holds no function to call: it hands the command to the page over the
+    /// bridge and the page's own handler answers over a second message. There is nothing to
+    /// store here — the page holds the handler — so the variant is a marker the dispatch
+    /// path routes to the page rather than a callable.
+    Page,
 }
 
 /// One registered command.
@@ -82,11 +90,35 @@ struct Inner {
     commands: BTreeMap<String, PageCommand>,
 }
 
+/// A page-handler call the runtime has started and is awaiting an answer for.
+///
+/// The runtime handed a command to the page's own JavaScript and did not answer the page's
+/// original `invoke`; it holds the original correlation id here so that when the handler's
+/// answer arrives under the reply id, the runtime can settle the call that produced it.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingReply {
+    /// The window the call came from, which is where the answer is delivered.
+    pub window: WindowId,
+    /// The correlation id of the original `invoke`, echoed when the answer settles it.
+    pub original_id: String,
+}
+
+/// How many page-handler calls may be outstanding at once.
+///
+/// Bounded because a handler that never answers must not grow the map without end: the page's
+/// own `invoke` times out, but this map would otherwise hold the entry forever. Reaching the
+/// cap refuses further page-handler calls with a busy error rather than queueing without bound.
+const MAX_PENDING_PAGE_CALLS: usize = 1024;
+
 /// The runtime's command registry and the action table pages are checked against.
 #[derive(Clone, Default)]
 pub struct PageCommands {
     inner: Arc<RwLock<Inner>>,
     actions: ActionTable,
+    /// Page-handler calls awaiting their answer, keyed by the reply id minted for them.
+    pending: Arc<Mutex<HashMap<String, PendingReply>>>,
+    /// The source of reply ids, minted per started page-handler call.
+    reply_counter: Arc<AtomicU64>,
 }
 
 impl fmt::Debug for PageCommands {
@@ -221,6 +253,15 @@ impl PageCommands {
                     "`{name}` is the runtime-internal method `{method}`, which a component                      cannot reach"
                 ),
             )),
+            // A page command's handler is the page's own JavaScript. A component reaching it
+            // would be a component running page code, and a page that registered a handler did
+            // not agree to have a component drive it, so it is refused rather than routed.
+            CommandTarget::Page => Err(SeamError::new(
+                "not_available",
+                format!(
+                    "`{name}` is answered by the page's own code, which a component cannot reach"
+                ),
+            )),
         }
     }
 
@@ -240,6 +281,69 @@ impl PageCommands {
             CommandTarget::RuntimeMethod(method),
             caller_window,
         )
+    }
+
+    /// Registers a command the page's own JavaScript answers.
+    ///
+    /// This is deliberately distinct from [`crate::Runtime::register_page_command`], which registers a
+    /// *native* command a page may call. This one registers a command whose handler lives in the
+    /// page: the runtime holds no function, and hands the call to the page over the bridge. It
+    /// is called `register_js_command` rather than sharing that name because the two put
+    /// different things behind the same seam — a native closure here versus page code there —
+    /// and a reader should never have to guess which a call site means.
+    ///
+    /// Declaring the command here is what puts it in the action table pages are checked against,
+    /// so it is gated exactly like a native command: an undeclared name is refused, and a name
+    /// the page's grant does not cover is refused at the seam. The handler itself is not
+    /// registered here — the page registers it when it runs — so a command declared but never
+    /// handed a handler answers with an error rather than running anything.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommandRegistrationError::Action`] for an invalid or duplicate name.
+    pub fn register_js_command(
+        &self,
+        name: &str,
+        requires: CapabilitySet,
+        summary: impl Into<String>,
+    ) -> Result<(), CommandRegistrationError> {
+        self.insert(name, requires, summary.into(), CommandTarget::Page, false)
+    }
+
+    /// Starts a page-handler call: mints a reply id and records the call it will settle.
+    ///
+    /// Returns `None` when [`MAX_PENDING_PAGE_CALLS`] are already outstanding, which the caller
+    /// turns into a busy refusal for the original `invoke` rather than queueing without bound.
+    #[must_use]
+    pub(crate) fn begin_page_call(&self, window: WindowId, original_id: &str) -> Option<String> {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending.len() >= MAX_PENDING_PAGE_CALLS {
+            return None;
+        }
+        let reply_id = format!(
+            "page-reply-{}",
+            self.reply_counter.fetch_add(1, Ordering::Relaxed) + 1
+        );
+        pending.insert(
+            reply_id.clone(),
+            PendingReply {
+                window,
+                original_id: original_id.to_owned(),
+            },
+        );
+        Some(reply_id)
+    }
+
+    /// Takes a page-handler call that has been answered, removing it so it cannot settle twice.
+    #[must_use]
+    pub(crate) fn take_page_call(&self, reply_id: &str) -> Option<PendingReply> {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(reply_id)
     }
 
     fn insert(
@@ -413,5 +517,85 @@ mod tests {
             !registration.dispose(),
             "a second dispose must report that it removed nothing"
         );
+    }
+
+    #[test]
+    fn a_js_command_is_registered_and_advertised_as_one_the_page_answers() {
+        // A JavaScript command is gated like any other: it goes in the action table, so
+        // `describe` advertises it and the seam refuses it for a page that lacks the
+        // capability. What distinguishes it is its target, which the dispatch path routes to
+        // the page rather than running here.
+        let commands = PageCommands::new();
+        commands
+            .register_js_command(
+                "cart.total",
+                requires(Capability::InspectRuntime),
+                "Total the cart",
+            )
+            .expect("register a js command");
+        let command = commands
+            .get("cart.total")
+            .expect("the command is registered");
+        assert!(
+            matches!(command.target, CommandTarget::Page),
+            "a js command's target is the page"
+        );
+        assert_eq!(command.requires, requires(Capability::InspectRuntime));
+        let actions = commands.actions();
+        let advertised = actions.requires("cart.total").expect("advertised");
+        assert_eq!(advertised, requires(Capability::InspectRuntime));
+    }
+
+    #[test]
+    fn a_js_command_can_share_a_name_no_native_command_holds() {
+        // It registers through the same table, so a duplicate is refused whatever the kind.
+        let commands = PageCommands::new();
+        commands
+            .register_js_command("dup", CapabilitySet::empty(), "one")
+            .expect("the first registers");
+        assert!(
+            commands
+                .register_js_command("dup", CapabilitySet::empty(), "two")
+                .is_err(),
+            "a second command of the same name is refused"
+        );
+    }
+
+    #[test]
+    fn a_page_handler_call_is_recorded_then_settled_once() {
+        // The deferred reply is what makes a page command work end to end: the runtime mints a
+        // reply id and remembers the call it will settle, and the answer removes that record so
+        // it cannot settle twice or answer a call nobody started.
+        let commands = PageCommands::new();
+        let window = WindowId::new();
+        let reply_id = commands
+            .begin_page_call(window, "p1-original")
+            .expect("a call is started");
+        let pending = commands
+            .take_page_call(&reply_id)
+            .expect("the call is awaiting its answer");
+        assert_eq!(pending.window, window);
+        assert_eq!(pending.original_id, "p1-original");
+        assert!(
+            commands.take_page_call(&reply_id).is_none(),
+            "a call that has been settled is gone, so it cannot settle twice"
+        );
+        assert!(
+            commands.take_page_call("page-reply-nope").is_none(),
+            "an answer for a call nobody started is dropped"
+        );
+    }
+
+    #[test]
+    fn page_handler_reply_ids_are_distinct_per_call() {
+        let commands = PageCommands::new();
+        let window = WindowId::new();
+        let first = commands
+            .begin_page_call(window, "a")
+            .expect("the first call");
+        let second = commands
+            .begin_page_call(window, "b")
+            .expect("the second call");
+        assert_ne!(first, second, "each call mints its own reply id");
     }
 }

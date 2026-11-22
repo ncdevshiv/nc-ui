@@ -4,8 +4,13 @@
 //! a real `wgpu` surface created from it, and a frame presented through it. It runs on
 //! a machine with a display and a GPU; everywhere else it reports that it was skipped,
 //! because "no display" and "no GPU" are facts about the machine.
+//!
+//! The probe is the Windows composition path: it drives the event loop through tao's
+//! Windows extension, and a headless runner has neither the display the surface needs nor
+//! a way to answer "what would this render", so other targets compile it out rather than
+//! carry a test that cannot run.
 
-#![cfg(feature = "wgpu-device")]
+#![cfg(all(windows, feature = "wgpu-device"))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

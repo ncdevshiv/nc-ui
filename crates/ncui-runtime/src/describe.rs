@@ -51,6 +51,18 @@ pub struct Description {
     pub platform: String,
     /// Target CPU architecture.
     pub architecture: String,
+    /// The locale the platform is set to, as a BCP 47 tag (e.g. `"en-US"`, `"he"`).
+    ///
+    /// A page is told the platform's locale so it can match its own formatting and text
+    /// direction to the machine the runtime runs on. `"und"` (undetermined) when the platform
+    /// does not say — a page that cannot learn the locale formats for itself rather than
+    /// guessing one.
+    pub locale: String,
+    /// The text direction the platform's locale lays out in (`"ltr"` or `"rtl"`).
+    ///
+    /// Derived from `locale`, so a page does not have to keep its own table of which scripts
+    /// run right-to-left.
+    pub text_direction: String,
     /// The methods available.
     pub methods: Vec<MethodDescription>,
     /// The agent roles available.
@@ -78,11 +90,19 @@ pub struct ScopeDescription {
 /// gone.
 #[must_use]
 pub fn describe(granted: CapabilitySet, methods: &[MethodDescription]) -> Description {
+    // The platform locale and its direction are computed once: a page is told both, and they
+    // come from the same tag, so they cannot disagree.
+    let locale = platform_locale();
+    let text_direction = ncui_a11y::TextDirection::for_locale(&locale)
+        .as_str()
+        .to_owned();
     Description {
         runtime_version: crate::RUNTIME_VERSION.to_owned(),
         api_version: crate::rpc::API_VERSION.to_owned(),
         platform: std::env::consts::OS.to_owned(),
         architecture: std::env::consts::ARCH.to_owned(),
+        locale,
+        text_direction,
         methods: methods.to_vec(),
         roles: AgentRole::ALL
             .iter()
@@ -105,6 +125,30 @@ pub fn describe(granted: CapabilitySet, methods: &[MethodDescription]) -> Descri
         .collect(),
         granted,
     }
+}
+
+/// The locale the platform is set to, as a BCP 47 tag, or `"und"` when it does not say.
+///
+/// Read from the process environment, which is where a Unix platform exposes its locale
+/// (`LC_ALL`, then `LANG`). A platform that exposes its locale another way — Windows reports it
+/// through `GetUserDefaultLocaleName`, which would need an FFI call this runtime does not make —
+/// is not read here, so on such a platform this returns `"und"` and the page is told the locale
+/// is undetermined rather than being handed a wrong one. An FFI-based reader is the fix, and it
+/// is a scoped, audited addition under ADR-012 when it comes.
+#[must_use]
+pub fn platform_locale() -> String {
+    for key in ["LC_ALL", "LANG"] {
+        if let Ok(value) = std::env::var(key) {
+            let tag = value.trim();
+            // A locale can carry a codeset suffix (`en_US.UTF-8`); the BCP 47 tag is the part
+            // before the dot.
+            let tag = tag.split('.').next().unwrap_or(tag);
+            if !tag.is_empty() {
+                return tag.to_owned();
+            }
+        }
+    }
+    "und".to_owned()
 }
 
 fn role_summary(role: AgentRole) -> &'static str {
@@ -149,6 +193,38 @@ mod tests {
         assert_eq!(description.capabilities.len(), 3, "one entry per scope");
         assert_eq!(description.methods, methods);
         assert!(!description.runtime_version.is_empty());
+    }
+
+    #[test]
+    fn the_description_tells_the_page_the_locale_and_its_direction() {
+        // A page is told the platform's locale and the direction that locale lays out in, and
+        // the two agree: the direction is derived from the locale, not asserted separately, so
+        // a page never has to keep its own table of right-to-left scripts.
+        let description = describe(CapabilitySet::empty(), &[]);
+        assert!(
+            !description.locale.is_empty(),
+            "the locale is always named, `und` when the platform does not say"
+        );
+        let direction = description.text_direction.as_str();
+        assert!(
+            direction == "ltr" || direction == "rtl",
+            "the direction is one of the two wire names: {direction}"
+        );
+        assert_eq!(
+            direction,
+            ncui_a11y::TextDirection::for_locale(&description.locale).as_str(),
+            "the reported direction is the one the reported locale implies"
+        );
+    }
+
+    #[test]
+    fn the_platform_locale_carries_no_codeset_suffix() {
+        // A Unix locale can carry a codeset (`en_US.UTF-8`); the BCP 47 tag a page is given is
+        // the part before the dot, so a page is never handed a tag with a dot in it.
+        assert!(
+            !platform_locale().contains('.'),
+            "the locale a page is given is a BCP 47 tag, not a codeset-qualified locale"
+        );
     }
 
     #[test]

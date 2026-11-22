@@ -94,7 +94,21 @@ impl Application {
     /// the entry page does not exist, or when this build has no window host — a runtime
     /// that could not open a window must say so rather than serve assets nobody sees.
     pub fn launch(directory: &Path, limits: Limits) -> Result<Self> {
-        Self::launch_with(directory, limits, None, |_| Ok(()))
+        Self::launch_with(directory, limits, None, None, |_| Ok(()))
+    }
+
+    /// Launches the application with a pinned loopback port.
+    ///
+    /// The asset server binds to `127.0.0.1:<port>` instead of an ephemeral port.
+    /// This gives the page a stable origin across restarts, so origin-scoped
+    /// storage (`localStorage`, `IndexedDB`, service workers) persists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the port cannot be bound (e.g. already in use),
+    /// in addition to the same errors as [`Application::launch`].
+    pub fn launch_with_port(directory: &Path, limits: Limits, port: u16) -> Result<Self> {
+        Self::launch_with(directory, limits, None, Some(port), |_| Ok(()))
     }
 
     /// Launches the application in `directory`, after `setup` has prepared the runtime.
@@ -117,6 +131,7 @@ impl Application {
         directory: &Path,
         limits: Limits,
         window_state: Option<PathBuf>,
+        port: Option<u16>,
         setup: impl FnOnce(&mut Runtime) -> Result<()>,
     ) -> Result<Self> {
         let manifest = AppManifest::load(directory).map_err(|error| {
@@ -131,17 +146,35 @@ impl Application {
         // The GPU island surface, when this build has one. The route lives on the page's own origin,
         // so a page fetches a rendered island the way it fetches its own files: same origin, no
         // per-platform URL scheme, and no second server to trust.
+        //
+        // The reload bridge is on the same route table: a page that wants its state preserved across
+        // a `--watch` reload includes one script from its own origin. It is always registered, and
+        // costs nothing for an application that does not include it.
         #[cfg(feature = "gpu-islands")]
-        let routes = vec![crate::islands::Islands::new().route()];
+        let routes = vec![
+            crate::islands::Islands::new().route(),
+            crate::reload::reload_route(),
+        ];
         #[cfg(not(feature = "gpu-islands"))]
-        let routes = Vec::new();
-        let server = AssetServer::start_with(&assets, routes).map_err(|error| {
-            NcError::new(ErrorKind::Validation {
-                field: "assets".to_owned(),
-                reason: format!("the application's assets cannot be served: {error}"),
-            })
-            .operation("application::launch")
-        })?;
+        let routes = vec![crate::reload::reload_route()];
+        let server = if let Some(port) = port {
+            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+            AssetServer::start_on_with(&assets, addr, routes).map_err(|error| {
+                NcError::new(ErrorKind::Validation {
+                    field: "port".to_owned(),
+                    reason: format!("cannot bind to port {port}: {error}"),
+                })
+                .operation("application::launch")
+            })?
+        } else {
+            AssetServer::start_with(&assets, routes).map_err(|error| {
+                NcError::new(ErrorKind::Validation {
+                    field: "assets".to_owned(),
+                    reason: format!("the application's assets cannot be served: {error}"),
+                })
+                .operation("application::launch")
+            })?
+        };
 
         // The entry must be a file that exists. A window opened at a 404 is not an
         // application running, and the failure is far easier to diagnose here than in a
@@ -171,8 +204,37 @@ impl Application {
         // The native commands the manifest's grant covers. Registered before the window
         // opens, because a page's first call is made as soon as it loads.
         let link: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let native_commands =
-            crate::native::register(&runtime, directory, manifest.identity.as_deref())?;
+        let native_commands = crate::native::register(
+            &runtime,
+            directory,
+            manifest.identity.as_deref(),
+            &manifest.sidecars,
+        )?;
+        // The commands the manifest declares the page answers in JavaScript. Declared in the
+        // manifest rather than registered by the page so the command sits in the action table
+        // pages are checked against and is gated by `requires` exactly like a native command;
+        // the page registers the function that answers it with `registerCommand` when it runs,
+        // and a command the page never hands a handler answers with an error rather than
+        // running anything.
+        for declared in &manifest.page_commands {
+            runtime
+                .page_commands
+                .register_js_command(
+                    &declared.command,
+                    declared.requires,
+                    declared.summary.clone(),
+                )
+                .map_err(|error| {
+                    NcError::new(ErrorKind::Validation {
+                        field: declared.command.clone(),
+                        reason: format!(
+                            "`{}` could not be registered as a page command: {error}",
+                            declared.command
+                        ),
+                    })
+                    .operation("application::launch")
+                })?;
+        }
         // The link this launch was opened with, answerable by the page.
         //
         // It requires no capability: the page *is* the application the link was addressed to, and
@@ -626,10 +688,14 @@ impl Application {
         match changed {
             Ok(true) => {
                 self.reloads += 1;
-                let _ = self
-                    .runtime
-                    .windows
-                    .post_to_page(self.window, "window.location.reload();");
+                // Reload with the page's designated state kept, rather than a blunt reload that
+                // throws it away. An application that never opts in — that never assigns
+                // `window.__ncui_state` or includes the bridge — gets exactly today's reload, because
+                // the snapshot is guarded and restores nothing when there was nothing to save.
+                let _ = self.runtime.windows.post_to_page(
+                    self.window,
+                    &crate::reload::state_preserving_reload_script(),
+                );
                 let labels = ncui_observability::metrics::Labels::new();
                 let _ = self.runtime.metrics.counter_inc("app.reloads", &labels, 1);
                 tracing::info!(

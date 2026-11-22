@@ -302,6 +302,44 @@ where
     })
 }
 
+/// Times one wall-clock workload and reports it as a single-sample `Repeated`.
+///
+/// This is for scenarios where the operation is inherently a one-shot — `cargo check`, a
+/// unit-test run, an edit→reload cycle — and cannot be looped thousands of times the way
+/// `measure` / `repeat` loop a micro-operation. The closure runs once, its elapsed time is
+/// recorded as the single sample, and the result flows through the same `Report` / baseline
+/// / noise machinery as every other scenario so a regression is visible rather than
+/// invisible. Because there is only one sample, the p50/p90/p95/p99/min/max all equal that
+/// one observation — which is honest: a one-shot measurement has no distribution to report,
+/// and the `noise` entry (spread 1.0) states that plainly rather than implying precision
+/// that was not measured.
+///
+/// The returned `usize` from the closure is ignored by the timing path; the closure's
+/// contract is "run the workload to completion", and the measured value is the wall time
+/// it took. Use this for build/test/edit-loop costs that are seconds-to-minutes operations
+/// and must not be run `REPEATS` times per invocation.
+///
+/// # Errors
+///
+/// Returns an error only if the closure panics, which is not caught here; a panic aborts
+/// the benchmark run, which is the correct behaviour for a broken workload.
+pub fn measure_wall_clock<F>(name: &str, workload: &str, body: F) -> Repeated
+where
+    F: FnOnce() -> usize,
+{
+    let started = Instant::now();
+    let _produced = body();
+    let elapsed = started.elapsed();
+    let summary = Summary::from_samples(name, workload, &[elapsed], 0);
+    Repeated {
+        name: name.to_owned(),
+        workload: workload.to_owned(),
+        summary: summary.clone(),
+        floor: summary.clone(),
+        repeats: vec![summary],
+    }
+}
+
 fn measure_once<F>(
     name: &str,
     workload: &str,

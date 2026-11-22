@@ -205,6 +205,7 @@ fn platform_register(identity: &str, display_name: &str) -> Result<(), IdentityE
         None,
         IDENTITY_TIMEOUT,
         1024,
+        None,
     )
     .map_err(|error| tool_error(REG, &error))?;
     if outcome.status != 0 {
@@ -227,6 +228,7 @@ fn platform_unregister(identity: &str) -> Result<(), IdentityError> {
         None,
         IDENTITY_TIMEOUT,
         1024,
+        None,
     )
     .map_err(|error| tool_error(REG, &error))?;
     if outcome.status != 0 && !outcome.stderr.contains("unable to find") {
@@ -254,6 +256,7 @@ fn platform_registered(identity: &str) -> Result<Option<String>, IdentityError> 
         None,
         IDENTITY_TIMEOUT,
         4096,
+        None,
     )
     .map_err(|error| tool_error(REG, &error))?;
     if outcome.status != 0 {

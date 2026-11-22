@@ -38,7 +38,6 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 
@@ -49,14 +48,18 @@ use std::time::{Duration, SystemTime};
 /// bound.
 pub const MAX_REQUEST_HEAD_BYTES: usize = 16 * 1024;
 
-/// How long the accept loop waits for its wake before re-checking the shutdown flag.
+/// The largest request body the server will read, in bytes.
 ///
-/// This is a safety net, not the shutdown path: [`AssetServer::stop`] sends on the wake
-/// channel, which ends the wait at once. The timeout is what guarantees the loop still
-/// terminates if that send is ever lost. It is deliberately long — the loop used to poll
-/// every 2 ms, and an idle application measured 0.94 % of a core over a ten-second sample
-/// doing it, against 0.00 % for runtimes whose accept blocks in the kernel.
-const SHUTDOWN_POLL: Duration = Duration::from_millis(250);
+/// A `POST` body is how a page moves a large buffer to the runtime without JSON-encoding it
+/// (the binary data channel). 64 MiB is far more than an application buffer needs and small
+/// enough that a client cannot make the server allocate without bound. A body declaring more
+/// than this is refused before a byte of it is read.
+pub const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+/// The three-letter English month abbreviations an HTTP-date uses, indexed `0` = January.
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
 
 /// How long the server waits for a client to send its request head.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -84,9 +87,14 @@ pub struct Served {
 
 /// Answers a request the runtime serves itself.
 ///
+/// The responder is handed the request target (path and query) and the request body. A `GET`
+/// or `HEAD` carries no body, so the body is empty for the routes that only produce a body
+/// (an island frame, the reload bridge); a `POST` carries the bytes the page sent, which is
+/// how a large buffer reaches the runtime un-encoded.
+///
 /// `None` means "not mine", which is how a responder declines a path rather than answering it with
 /// an empty body — an empty body is a 200, and a page cannot tell it from a real one.
-pub type Responder = Arc<dyn Fn(&str) -> Option<Served> + Send + Sync>;
+pub type Responder = Arc<dyn Fn(&str, &[u8]) -> Option<Served> + Send + Sync>;
 
 /// One path prefix the runtime serves itself.
 ///
@@ -110,12 +118,12 @@ impl Route {
     }
 
     /// The body for `target`, when the target is this route's.
-    fn answer(&self, target: &str) -> Option<Served> {
+    fn answer(&self, target: &str, body: &[u8]) -> Option<Served> {
         let path = target.split('?').next().unwrap_or(target);
         if path != self.prefix && !path.starts_with(&format!("{}/", self.prefix)) {
             return None;
         }
-        (self.responder)(target)
+        (self.responder)(target, body)
     }
 }
 
@@ -145,8 +153,6 @@ pub struct AssetServer {
     /// Counted rather than inferred, because "the application is serving" is a claim an
     /// operator needs to be able to check.
     served: Arc<AtomicU64>,
-    /// Wakes the accept loop so a stop is immediate rather than a poll interval away.
-    wake: Option<Sender<()>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -220,12 +226,10 @@ impl AssetServer {
         }
         let listener = TcpListener::bind(address)?;
         let bound = listener.local_addr()?;
-        listener.set_nonblocking(true)?;
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let served = Arc::new(AtomicU64::new(0));
         let routes = Arc::new(routes);
-        let (wake_tx, wake_rx) = std::sync::mpsc::channel::<()>();
         let worker = {
             let shutdown = Arc::clone(&shutdown);
             let served = Arc::clone(&served);
@@ -234,7 +238,7 @@ impl AssetServer {
             std::thread::Builder::new()
                 .name("ncui-asset-server".to_owned())
                 .spawn(move || {
-                    accept_loop(&listener, &canonical, &shutdown, &served, &routes, &wake_rx);
+                    accept_loop(&listener, &canonical, &shutdown, &served, &routes);
                 })?
         };
 
@@ -243,7 +247,6 @@ impl AssetServer {
             address: bound,
             shutdown,
             served,
-            wake: Some(wake_tx),
             worker: Some(worker),
         })
     }
@@ -296,11 +299,19 @@ impl AssetServer {
     ///
     /// Stopping is explicit and idempotent: a second call does nothing rather than
     /// panicking on an already-joined thread.
+    ///
+    /// The accept loop blocks in `accept()`, so a flag alone would not wake it — the loop
+    /// would sit in the kernel until the next connection. Opening one loopback connection
+    /// to our own address hands `accept()` a connection to return at once; the loop sees
+    /// the shutdown flag, drops the throwaway stream, and exits. This is what lets the
+    /// accept block in the kernel (zero idle CPU) *and* still stop immediately, rather
+    /// than trading one against the other through a poll interval.
     pub fn stop(&mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
-        if let Some(wake) = self.wake.take() {
-            let _ = wake.send(());
-        }
+        // A dropped connection is expected here: the accept loop is being told to stop, so
+        // it will not answer this probe. Ignore the result either way — the join below is
+        // what confirms the loop actually ended.
+        let _ = TcpStream::connect(self.address);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -315,35 +326,47 @@ impl Drop for AssetServer {
 
 /// Accepts connections until the server is asked to stop.
 ///
-/// The listener is non-blocking, so the wait between connections is a channel receive rather
-/// than a sleep: a stop sends on `wake` and the loop ends at once. The timeout is the safety
-/// net that bounds a lost send.
+/// The listener is blocking, so `accept()` parks in the kernel until a connection arrives
+/// and costs nothing while the application is idle — measured at 0.00 % of a core, the same
+/// as runtimes whose accept blocks, and against the 0.94 % the previous 2 ms poll read. A
+/// connection is therefore answered the moment it arrives rather than on the next poll, and
+/// a stop wakes the loop by opening one throwaway connection (`AssetServer::stop`), so the
+/// two goals that a poll trades against — idle CPU and accept latency — are both met.
 fn accept_loop(
     listener: &TcpListener,
     root: &Path,
     shutdown: &AtomicBool,
     served: &Arc<AtomicU64>,
     routes: &Arc<Vec<Route>>,
-    wake: &Receiver<()>,
 ) {
     while !shutdown.load(Ordering::SeqCst) {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                let root = root.to_path_buf();
-                let served = Arc::clone(served);
-                let routes = Arc::clone(routes);
-                let _ = std::thread::Builder::new()
-                    .name("ncui-asset-connection".to_owned())
-                    .spawn(move || {
-                        let _ = serve_connection(&root, &routes, stream);
-                        served.fetch_add(1, Ordering::SeqCst);
-                    });
+        // Blocking accept. The only error this normally produces is an interrupted or
+        // aborted accept, and a spurious wakeup is handled by looping rather than by
+        // treating it as fatal: a busy server must not die because one accept came back
+        // empty. The shutdown flag is re-read at the top of the loop, so the throwaway
+        // connection `stop` opens is accepted, seen to be during shutdown, and dropped.
+        let accepted = listener.accept();
+        let Ok((stream, _)) = accepted else {
+            if shutdown.load(Ordering::SeqCst) {
+                return;
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                let _ = wake.recv_timeout(SHUTDOWN_POLL);
-            }
-            Err(_) => return,
+            continue;
+        };
+        if shutdown.load(Ordering::SeqCst) {
+            // This is the probe `stop` opened to wake us, or a client that raced a stop.
+            // Either way the server is done: drop the stream rather than answering it.
+            drop(stream);
+            return;
         }
+        let root = root.to_path_buf();
+        let served = Arc::clone(served);
+        let routes = Arc::clone(routes);
+        let _ = std::thread::Builder::new()
+            .name("ncui-asset-connection".to_owned())
+            .spawn(move || {
+                let _ = serve_connection(&root, &routes, stream);
+                served.fetch_add(1, Ordering::SeqCst);
+            });
     }
 }
 
@@ -378,19 +401,43 @@ fn serve_connection(root: &Path, routes: &[Route], mut stream: TcpStream) -> io:
         return Ok(());
     };
 
-    if method != "GET" && method != "HEAD" {
+    // A `POST` is how a page moves a large buffer to the runtime without JSON-encoding it: the
+    // body is the payload, read here once and handed to the route. `GET` and `HEAD` carry no
+    // body, so their routes see an empty one.
+    let body = if method == "POST" {
+        match read_body(&mut stream, &request)? {
+            Some(body) => body,
+            None => {
+                // The body declared more than the server will read; refuse before
+                // reading a byte of it.
+                write_response(&mut stream, &Response::payload_too_large(), true)?;
+                return Ok(());
+            }
+        }
+    } else if method != "GET" && method != "HEAD" {
         write_response(&mut stream, &Response::method_not_allowed(), true)?;
         return Ok(());
-    }
+    } else {
+        Vec::new()
+    };
 
     // The runtime's own routes are answered first, and by the target as it arrived: a route's
     // parameters are its own business, and a route that had to be percent-decoded first would be a
     // route whose parameters the file server had already interpreted.
     for route in routes {
-        if let Some(served) = route.answer(target) {
+        if let Some(served) = route.answer(target, &body) {
             let response = Response::ok(served.content_type, served.body);
-            return write_response(&mut stream, &response, method == "GET");
+            // A `POST` answer carries its body like a `GET` does; only a `HEAD` omits it.
+            return write_response(&mut stream, &response, method != "HEAD");
         }
+    }
+
+    // A `POST` is answered only by a route that claims its path. The file server serves `GET`
+    // and `HEAD`, so a `POST` no route claimed must not fall through to reading a file — it is
+    // refused here rather than served the file's bytes.
+    if method != "GET" && method != "HEAD" {
+        write_response(&mut stream, &Response::method_not_allowed(), true)?;
+        return Ok(());
     }
 
     let path = target.split('?').next().unwrap_or(target);
@@ -439,14 +486,18 @@ fn serve_connection(root: &Path, routes: &[Route], mut stream: TcpStream) -> io:
         return Ok(());
     };
     let content_type = content_type_for(&canonical);
-    let etag = etag_for(&canonical, body.len());
-    if let Some(if_none_match) = header_value(&request, "if-none-match")
-        && etag_matches(&if_none_match, &etag)
-    {
-        let response = Response::not_modified(etag);
+    // The modification time drives both validators, so it is read once and handed to
+    // each: the `ETag` folds it into its strong value and `Last-Modified` renders it as
+    // an HTTP-date. Two validators, one read.
+    let modified = modification_time(&canonical);
+    let etag = etag_for(modified, body.len());
+    let last_modified = modified.map(http_date);
+    let matches_condition = is_condition_met(&request, &etag, modified);
+    if matches_condition {
+        let response = Response::not_modified(etag, last_modified);
         return write_response(&mut stream, &response, false);
     }
-    let response = Response::ok_with_etag(content_type, body, etag);
+    let response = Response::ok_with_etag(content_type, body, etag, last_modified);
     // A `HEAD` response carries the head a `GET` would carry, including the length, and
     // no body: the client asked for the headers, not for the file.
     write_response(&mut stream, &response, method != "HEAD")
@@ -459,6 +510,7 @@ struct Response {
     content_type: &'static str,
     body: Vec<u8>,
     etag: Option<String>,
+    last_modified: Option<String>,
 }
 
 impl Response {
@@ -469,26 +521,37 @@ impl Response {
             content_type,
             body,
             etag: None,
+            last_modified: None,
         }
     }
 
-    /// A response carrying a body and an `ETag` validator.
-    fn ok_with_etag(content_type: &'static str, body: Vec<u8>, etag: String) -> Self {
+    /// A response carrying a body, an `ETag` validator and a `Last-Modified` date.
+    fn ok_with_etag(
+        content_type: &'static str,
+        body: Vec<u8>,
+        etag: String,
+        last_modified: Option<String>,
+    ) -> Self {
         Self {
             status: "200 OK",
             content_type,
             body,
             etag: Some(etag),
+            last_modified,
         }
     }
 
-    /// A `304 Not Modified` response: the head, an `ETag`, no body, no `Content-Type`.
-    fn not_modified(etag: String) -> Self {
+    /// A `304 Not Modified` response: the head, both validators, no body, no `Content-Type`.
+    ///
+    /// A `304` must carry the same validators the `200` would have, so a cache that
+    /// stored the representation can keep using it and keep validating against it.
+    fn not_modified(etag: String, last_modified: Option<String>) -> Self {
         Self {
             status: "304 Not Modified",
             content_type: "",
             body: Vec::new(),
             etag: Some(etag),
+            last_modified,
         }
     }
 
@@ -499,7 +562,21 @@ impl Response {
 
     /// A response for a method the server does not serve.
     fn method_not_allowed() -> Self {
-        Self::text("405 Method Not Allowed", "this server serves GET and HEAD")
+        Self::text(
+            "405 Method Not Allowed",
+            "this server serves GET, HEAD and POST",
+        )
+    }
+
+    /// A response for a `POST` body larger than the server will read.
+    ///
+    /// Refused before a byte of the body is read, so a client cannot make the server
+    /// allocate without bound by declaring a huge `Content-Length`.
+    fn payload_too_large() -> Self {
+        Self::text(
+            "413 Payload Too Large",
+            "the request body is larger than this server reads",
+        )
     }
 
     /// A response for a path that names nothing.
@@ -519,6 +596,7 @@ impl Response {
             content_type: "text/plain; charset=utf-8",
             body: body.as_bytes().to_vec(),
             etag: None,
+            last_modified: None,
         }
     }
 }
@@ -541,6 +619,9 @@ fn write_response(
     if let Some(etag) = &response.etag {
         let _ = write!(head, "ETag: {etag}\r\n");
     }
+    if let Some(last_modified) = &response.last_modified {
+        let _ = write!(head, "Last-Modified: {last_modified}\r\n");
+    }
     let _ = write!(
         head,
         "Content-Length: {}\r\nConnection: close\r\n\r\n",
@@ -553,20 +634,185 @@ fn write_response(
     stream.flush()
 }
 
-/// Builds the `ETag` validator for a file: `"<mtime_ns>-<len>"`, quoted per RFC 9110.
-///
-/// `mtime_ns` is the file's modified time in nanoseconds since the Unix epoch, or `0`
-/// when the filesystem reports none (or a pre-epoch time). `len` is the byte length
-/// the server actually serves, so the validator and `Content-Length` can never
-/// disagree. The strong form is used: the value changes whenever the file does.
-#[must_use]
-fn etag_for(path: &Path, len: usize) -> String {
-    let mtime_ns: u128 = std::fs::metadata(path)
+/// The file's modification time, or `None` when the filesystem reports none.
+fn modification_time(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path)
         .and_then(|metadata| metadata.modified())
         .ok()
+}
+
+/// Builds the `ETag` validator for a file: `"<mtime_ns>-<len>"`, quoted per RFC 9110.
+///
+/// `modified` is the file's modification time, `None` when the filesystem reports none.
+/// `mtime_ns` becomes `0` for `None` or a pre-epoch time. `len` is the byte length the
+/// server actually serves, so the validator and `Content-Length` can never disagree. The
+/// strong form is used: the value changes whenever the file does.
+#[must_use]
+fn etag_for(modified: Option<SystemTime>, len: usize) -> String {
+    let mtime_ns: u128 = modified
         .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
         .map_or(0, |duration| duration.as_nanos());
     format!("\"{mtime_ns}-{len}\"")
+}
+
+/// Renders a time as an HTTP-date: IMF-fixdate, e.g. `Sun, 06 Nov 1994 08:49:37 GMT`
+/// (RFC 9110 §5.6.1). This is the one format `Last-Modified` and `If-Modified-Since`
+/// speak, and the only one this server emits.
+#[must_use]
+fn http_date(time: SystemTime) -> String {
+    let Ok(secs) = time.duration_since(SystemTime::UNIX_EPOCH) else {
+        // A pre-epoch time has no HTTP-date. `Last-Modified` is omitted rather than
+        // guessed at, and a dateless response simply cannot be conditionally fetched
+        // by date — which is the honest answer for a file older than the epoch.
+        return String::new();
+    };
+    let (year, month, day, hour, minute, second, weekday) = civil_from_unix(secs.as_secs());
+    format!("{weekday}, {day:02} {month} {year:04} {hour:02}:{minute:02}:{second:02} GMT")
+}
+
+/// Splits seconds since the Unix epoch into civil date and time, plus the weekday name.
+///
+/// The days-from-civil algorithm (Howard Hinnant's) is used rather than a date library:
+/// the workspace carries no chronology dependency, and a proleptic Gregorian conversion
+/// is a dozen lines of arithmetic. Dates before 1970 are not produced here because the
+/// only caller converts a duration-since-epoch, which is non-negative by construction.
+#[must_use]
+fn civil_from_unix(secs: u64) -> (u64, &'static str, u64, u64, u64, u64, &'static str) {
+    const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+    let days = secs / 86_400;
+    let rem = secs % 86_400;
+    let hour = rem / 3_600;
+    let minute = (rem % 3_600) / 60;
+    let second = rem % 60;
+
+    // Shift the epoch to March 1 of the year 0 so the leap-day is the last day of the
+    // year and the leap correction falls out of the year count cleanly.
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z % 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    // `mp` runs 0..=11 over March..February of the shifted year. Mapping it back to a
+    // civil month: March (mp=0) is index 2, and January/February wrap to indices 0/1
+    // *of the following* civil year, so the year only steps back for mp >= 10.
+    let month_index = if mp < 10 { mp + 2 } else { mp - 10 };
+    let year = if mp >= 10 {
+        yoe + era * 400 + 1
+    } else {
+        yoe + era * 400
+    };
+
+    // 1970-01-01 was a Thursday (index 4 with Sunday as 0).
+    let weekday = WEEKDAYS[((days + 4) % 7) as usize];
+    (
+        year,
+        MONTHS[month_index as usize],
+        day,
+        hour,
+        minute,
+        second,
+        weekday,
+    )
+}
+
+/// Whether a file modified at `modified` is unchanged as of an `If-Modified-Since` date.
+///
+/// RFC 9110 §13.1.2: the condition is "not modified" when the modification date is
+/// *earlier than or equal to* the date the client sends. HTTP-dates carry 1-second
+/// resolution, so both sides are truncated to whole seconds before comparing — otherwise
+/// a file modified at `…37.5` would compare *greater* than the `…37` date the client
+/// echoes back from `Last-Modified`, and every conditional request would miss. A
+/// sub-second `Last-Modified` is a validator this format cannot round-trip, so the
+/// comparison is done in whole seconds, which is what the format actually carries.
+///
+/// An unparseable date is treated as no condition at all rather than as a mismatch, so a
+/// client that sends a date this server cannot read still gets its representation — a
+/// false 304 would be worse, because it would hand back an empty body and the client
+/// would show nothing.
+#[must_use]
+fn modified_within(if_modified_since: &str, modified: SystemTime) -> bool {
+    let Some(condition) = parse_http_date(if_modified_since) else {
+        return false;
+    };
+    // Truncate both to whole seconds: the HTTP-date format has no sub-second field, so
+    // comparing anything finer would make the condition depend on digits neither side
+    // transmitted.
+    let modified_secs = modified
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()
+        .map_or(0, |duration| duration.as_secs());
+    let condition_secs = condition
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()
+        .map_or(0, |duration| duration.as_secs());
+    modified_secs <= condition_secs
+}
+
+/// Parses an HTTP-date in IMF-fixdate form into a time since the Unix epoch.
+///
+/// Only IMF-fixdate is accepted (`Sun, 06 Nov 1994 08:49:37 GMT`). The two obsolete
+/// RFC 9110 forms (`Sunday, 06-Nov-94 …` and `Sun Nov  6 08:49:37 1994`) are declined:
+/// a client that emits one of them is answered with a full `200` rather than a `304`,
+/// which is the safe direction. Returns `None` for anything else.
+#[must_use]
+fn parse_http_date(value: &str) -> Option<SystemTime> {
+    let value = value.trim();
+    let rest = value.split_once(", ").map_or(value, |(_, rest)| rest);
+    let mut parts = rest.split(' ').filter(|part| !part.is_empty());
+    let day: u64 = parts.next()?.parse().ok()?;
+    let month_name = parts.next()?;
+    let year: u64 = parts.next()?.parse().ok()?;
+    let mut clock = parts.next()?.split(':');
+    let hour: u64 = clock.next()?.parse().ok()?;
+    let minute: u64 = clock.next()?.parse().ok()?;
+    let second: u64 = clock.next()?.parse().ok()?;
+    if parts.next()? != "GMT" {
+        return None;
+    }
+    if !(hour < 24 && minute < 60 && second < 60) {
+        return None;
+    }
+
+    let month_index = MONTHS.iter().position(|name| *name == month_name)? as u64;
+
+    let days = days_from_civil(year, month_index, day)?;
+    let secs = days
+        .checked_mul(86_400)?
+        .checked_add(hour.checked_mul(3_600)?)?
+        .checked_add(minute.checked_mul(60)?)?
+        .checked_add(second)?;
+    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+}
+
+/// Days since the Unix epoch for a proleptic-Gregorian date, or `None` if out of range.
+///
+/// `month_index` is 0-based civil (`0` = January). The inverse of [`civil_from_unix`]:
+/// January and February are folded into the previous March-based year, so the leap
+/// correction stays uniform, exactly as in the forward conversion.
+fn days_from_civil(year: u64, month_index: u64, day: u64) -> Option<u64> {
+    if month_index > 11 || !(1..=31).contains(&day) {
+        return None;
+    }
+    let m = month_index + 1; // 1-based civil month, as the classic conversion expects.
+    let (y, mp) = if m <= 2 {
+        (year.checked_sub(1)?, m + 9) // Jan/Feb: previous year, mp 10/11
+    } else {
+        (year, m - 3) // Mar..Dec: this year, mp 0..9
+    };
+    let era = y / 400;
+    let yoe = y % 400;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe
+        .checked_mul(365)?
+        .checked_add(yoe / 4)?
+        .checked_sub(yoe / 100)?
+        .checked_add(doy)?;
+    era.checked_mul(146_097)?
+        .checked_add(doe)?
+        .checked_sub(719_468)
 }
 
 /// Extracts a header value from the request head, case-insensitively.
@@ -586,6 +832,27 @@ fn header_value(head: &str, name: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Whether a conditional `GET`/`HEAD` is satisfied by a file's current validators, so the
+/// server answers `304 Not Modified` rather than resending the body.
+///
+/// `If-None-Match` takes precedence over `If-Modified-Since` (RFC 9110 §13.1.3): a client
+/// that sends both is making an entity-tag request that also carries a date, and the tag is
+/// the stronger claim. The date is consulted only when no tag was sent.
+fn is_condition_met(request: &str, etag: &str, modified: Option<SystemTime>) -> bool {
+    match header_value(request, "if-none-match") {
+        Some(if_none_match) => etag_matches(&if_none_match, etag),
+        None => match (
+            header_value(request, "if-modified-since").as_deref(),
+            modified,
+        ) {
+            (Some(if_modified_since), Some(modified)) => {
+                modified_within(if_modified_since, modified)
+            }
+            _ => false,
+        },
+    }
 }
 
 /// Whether `if_none_match` matches the current `ETag`.
@@ -645,6 +912,29 @@ fn read_request_head(stream: &mut TcpStream) -> io::Result<Option<String>> {
 ///
 /// Returns `None` when the encoding is malformed, which is a bad request rather than a
 /// path to guess at.
+/// Reads a `POST` request body of `Content-Length` bytes, bounded by
+/// [`MAX_REQUEST_BODY_BYTES`].
+///
+/// The head has already been read, so the body — if any arrived with it — is still in the socket
+/// and is read here directly. A body that declares more than the limit is refused *before* a byte
+/// is read (`None`), so a client cannot make the server allocate without bound. A missing or
+/// malformed `Content-Length` is treated as an empty body: there is nothing to read, and a route
+/// that wanted a body sees none rather than the server guessing.
+fn read_body(stream: &mut TcpStream, head: &str) -> io::Result<Option<Vec<u8>>> {
+    let Some(value) = header_value(head, "Content-Length") else {
+        return Ok(Some(Vec::new()));
+    };
+    let Ok(length) = value.trim().parse::<usize>() else {
+        return Ok(Some(Vec::new()));
+    };
+    if length > MAX_REQUEST_BODY_BYTES {
+        return Ok(None);
+    }
+    let mut body = vec![0u8; length];
+    stream.read_exact(&mut body)?;
+    Ok(Some(body))
+}
+
 fn percent_decode(input: &str) -> Option<String> {
     let bytes = input.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -765,5 +1055,72 @@ mod tests {
             Some("\"1-2\"")
         );
         assert_eq!(header_value(head, "X-Absent"), None);
+    }
+
+    #[test]
+    fn the_epoch_renders_as_the_canonical_http_date() {
+        // The one date the format is named for: 1970-01-01T00:00:00Z was a Thursday.
+        assert_eq!(
+            http_date(SystemTime::UNIX_EPOCH),
+            "Thu, 01 Jan 1970 00:00:00 GMT"
+        );
+    }
+
+    #[test]
+    fn a_known_instant_renders_as_the_rfc_example_date() {
+        // RFC 9110 §5.6.1 uses 1994-11-06T08:49:37Z throughout; it was a Sunday.
+        let secs = 784_111_777_u64;
+        let time = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+        assert_eq!(
+            http_date(time),
+            "Sun, 06 Nov 1994 08:49:37 GMT",
+            "the rendered date must match the RFC's own example"
+        );
+    }
+
+    #[test]
+    fn a_date_round_trips_through_parse() {
+        // Every date this server emits must parse back to the same instant, or a client
+        // echoing Last-Modified would get a full 200 instead of a 304.
+        for secs in [0_u64, 1, 86_399, 784_111_777, 1_700_000_000, 4_102_444_799] {
+            let time = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+            let rendered = http_date(time);
+            assert_eq!(parse_http_date(&rendered), Some(time), "at {secs}s");
+        }
+    }
+
+    #[test]
+    fn a_leap_day_round_trips() {
+        // 2024-02-29 is a real leap day; a date conversion that drops it would parse a
+        // Last-Modified from a leap day into the wrong instant.
+        let rendered = "Thu, 29 Feb 2024 12:00:00 GMT";
+        let parsed = parse_http_date(rendered).expect("the leap day parses");
+        assert_eq!(http_date(parsed), rendered, "the leap day round-trips");
+    }
+
+    #[test]
+    fn an_unparseable_date_is_not_a_condition() {
+        // A date the server cannot read must not produce a 304 (that would hand back an
+        // empty body); it is treated as no condition and the file is served in full.
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        for value in ["", "not a date", "Sat, 06 Nov 1994 08:49:37 PST", "0"] {
+            assert!(
+                !modified_within(value, now),
+                "{value:?} must not be read as a satisfied condition"
+            );
+        }
+    }
+
+    #[test]
+    fn a_modified_time_at_or_before_the_date_satisfies_the_condition() {
+        // RFC 9110 §13.1.2: "not modified" when the file's date is <= the client's date.
+        let file = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let earlier = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
+        let later = SystemTime::UNIX_EPOCH + Duration::from_secs(500);
+        assert!(modified_within(&http_date(earlier), file), "file <= client");
+        assert!(
+            !modified_within(&http_date(later), file),
+            "a file newer than the client's date must be served"
+        );
     }
 }

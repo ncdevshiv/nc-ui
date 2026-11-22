@@ -24,6 +24,20 @@ use std::time::{Duration, Instant};
 use ncui_core::Limits;
 use ncui_runtime::application::Application;
 
+/// Skips a test when this machine cannot open a real window.
+macro_rules! require_real_window {
+    () => {
+        if std::env::consts::OS == "macos"
+            || (std::env::consts::OS != "windows"
+                && std::env::var("DISPLAY").is_err()
+                && std::env::var("WAYLAND_DISPLAY").is_err())
+        {
+            eprintln!("skipping: this machine cannot open a real window");
+            return;
+        }
+    };
+}
+
 /// The repository root, from this crate's manifest directory.
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -112,6 +126,7 @@ fn pump_until_result(application: &mut Application, result_path: &Path) -> serde
 
 #[test]
 fn the_electron_quick_start_port_runs_its_page_and_measures_ipc() {
+    require_real_window!();
     let port = PortCopy::new("electron-quick-start");
     write_bench_config(port.path(), 20);
 
@@ -141,6 +156,7 @@ fn the_electron_quick_start_port_runs_its_page_and_measures_ipc() {
 
 #[test]
 fn the_tauri_word_signal_port_loads_its_component_and_measures_ipc() {
+    require_real_window!();
     let port = PortCopy::new("tauri-word-signal");
     write_bench_config(port.path(), 20);
 

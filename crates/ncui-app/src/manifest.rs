@@ -61,6 +61,33 @@ pub struct AppManifest {
     /// program is using. What a page can do is *hear* about a shortcut this application declared.
     #[serde(default)]
     pub shortcuts: Vec<ShortcutConfig>,
+    /// The sidecar commands the application declares.
+    ///
+    /// A sidecar is a command a page can call that is answered by *any* executable the
+    /// application ships or names — a Go binary, a Python script, a Zig tool, anything that
+    /// reads a JSON request on standard input and writes a JSON answer on standard output.
+    /// It is how an application's backend is not Rust-only: the page calls `mycommand`, the
+    /// runtime runs the program, and the program's answer comes back over the same
+    /// capability-gated seam a native command uses.
+    ///
+    /// Declared in the manifest rather than registered by a page for the same reason a shortcut
+    /// is: which programs an application runs is the application author's decision, and the
+    /// `process.spawn` capability is what authorises running them at all. A sidecar is only
+    /// registered when the application holds that capability, and a page still needs the
+    /// capability each sidecar's `requires` names to call it.
+    #[serde(default)]
+    pub sidecars: Vec<SidecarConfig>,
+    /// The commands the application declares the page answers in JavaScript.
+    ///
+    /// A page command is the other half of "a command is not Rust-only": where a sidecar hands
+    /// the call to another program, a page command hands it back to the page's own handler. It
+    /// is declared here — not registered by the page at runtime — so the command is in the action
+    /// table pages are checked against and gated by `requires` exactly like a native command,
+    /// and so the page cannot invent a route the author did not declare. The page registers the
+    /// function that answers it with `window.ncui.registerCommand`; a command declared but never
+    /// handed a handler answers with an error rather than running anything.
+    #[serde(default)]
+    pub page_commands: Vec<PageCommandConfig>,
     /// The capabilities the application's pages are granted.
     #[serde(default)]
     pub capabilities: CapabilitySet,
@@ -80,6 +107,15 @@ pub struct AppManifest {
     /// something else. An application that names none gets one derived from its name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<String>,
+    /// The language the application's interface is written in, as a BCP 47 tag.
+    ///
+    /// Optional. An application that declares one is telling the runtime — and so a screen
+    /// reader, and the page's own formatting — what language its text is in, which decides the
+    /// text direction the interface lays out in: an application declaring `he` or `ar` lays out
+    /// right-to-left. Absent means the runtime falls back to the platform's locale, and an
+    /// application that knows neither is told `"und"` (undetermined) rather than guessing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_locale: Option<String>,
 }
 
 /// The tray icon an application shows.
@@ -101,6 +137,74 @@ pub struct ShortcutConfig {
     /// A name rather than an action: what a shortcut *does* is the application's decision, and the
     /// page is the part of the application that knows. The runtime's job is to deliver the press.
     pub command: String,
+}
+
+/// One sidecar command an application declares.
+///
+/// The contract between the runtime and the program is a line of JSON each way: the runtime
+/// writes the call's payload to the program's standard input and reads one JSON answer from
+/// its standard output. Anything that can read stdin and write stdout can be a backend,
+/// in whatever language the author likes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SidecarConfig {
+    /// The command name the page calls, such as `search.index`.
+    ///
+    /// Validated like any other command name, so it cannot collide with a built-in or carry
+    /// something that is not a name.
+    pub command: String,
+    /// The program to run: a path inside the application, or a bare name the operating system
+    /// resolves.
+    ///
+    /// The same containment rule the `process` capability uses applies — a relative path is
+    /// resolved inside the application, an absolute one is refused — so a sidecar cannot name
+    /// an arbitrary file elsewhere on the disk.
+    pub program: String,
+    /// The arguments passed to the program, as an argument vector and never through a shell.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// The capability a page must hold to call this command.
+    ///
+    /// Empty means any page of the application may call it; otherwise only a page granted this
+    /// capability can. The call is gated at the seam either way, so declaring a capability here
+    /// is how an author exposes a powerful backend only to a page that was granted it.
+    #[serde(default)]
+    pub requires: CapabilitySet,
+    /// How long the program may run, in milliseconds, before it is stopped.
+    ///
+    /// Absent uses the `process` runner's own default. A sidecar is a program the runtime
+    /// starts on a page's behalf, so it is timed like one: a backend that never answers must
+    /// not hang the page that called it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    /// One line describing what the command does, shown by `describe`.
+    #[serde(default)]
+    pub summary: String,
+}
+
+/// One command an application declares the page answers in JavaScript.
+///
+/// The command is gated exactly like a native one: it goes in the action table pages are
+/// checked against, and a page must hold `requires` to call it. What the runtime does with a
+/// call is hand it to the page's own handler rather than run a native function, so a
+/// JavaScript-only application gets the same seam, the same capability check and the same
+/// audit trail as a command the runtime answers itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageCommandConfig {
+    /// The command name the page calls, such as `cart.total`.
+    ///
+    /// Validated like any other command name, so it cannot collide with a built-in or carry
+    /// something that is not a name.
+    pub command: String,
+    /// The capability a page must hold to call this command.
+    ///
+    /// Empty means any page of the application may call it; otherwise only a page granted this
+    /// capability can. The call is gated at the seam either way, so declaring a capability here
+    /// is how an author exposes a command only to a page that was granted it.
+    #[serde(default)]
+    pub requires: CapabilitySet,
+    /// One line describing what the command does, shown by `describe`.
+    #[serde(default)]
+    pub summary: String,
 }
 
 /// Whether `scheme` has the shape of a URL scheme.
@@ -132,6 +236,26 @@ pub fn is_identity(identity: &str) -> bool {
                     character,
                     '{' | '}' | '\\' | '.' | '-' | '_' | ' ' | '!' | '~'
                 )
+        })
+}
+
+/// Whether `tag` has the shape of a BCP 47 language tag.
+///
+/// The shape only: whether a tag names a real language is a question for the renderer, and a
+/// tag this accepts but the platform does not know degrades to left-to-right rather than
+/// breaking. A tag is letters (the language, then optional script/region/variant subtags)
+/// separated by `-` or `_`, each subtag one to eight alphanumeric characters. This refuses an
+/// empty tag and one carrying a path separator or whitespace, which would be a value that is
+/// not a locale pretending to be one.
+pub fn is_locale_tag(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag.len() <= 35
+        && tag.split(['-', '_']).all(|subtag| {
+            !subtag.is_empty()
+                && subtag.len() <= 8
+                && subtag
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric())
         })
 }
 
@@ -305,8 +429,21 @@ impl AppManifest {
                 ),
             });
         }
+        if let Some(locale) = &self.default_locale
+            && !is_locale_tag(locale)
+        {
+            return Err(ManifestError::Invalid {
+                field: "default_locale".to_owned(),
+                reason: format!(
+                    "must be a BCP 47 language tag — letters separated by `-` or `_`, \
+                     e.g. `en`, `pt-BR`, `he-IL` — got `{locale}`"
+                ),
+            });
+        }
         self.check_tray()?;
         self.check_shortcuts()?;
+        self.check_sidecars()?;
+        self.check_page_commands()?;
         if self.version.trim().is_empty() {
             return Err(ManifestError::Invalid {
                 field: "version".to_owned(),
@@ -441,6 +578,82 @@ impl AppManifest {
                     reason: "must not be empty".to_owned(),
                 });
             }
+        }
+        Ok(())
+    }
+
+    /// Checks the sidecar commands the application declares.
+    ///
+    /// A sidecar's *behaviour* is checked where it runs — the `process` runner contains the
+    /// program path, scrubs the environment and times the run — because that lives in the crate
+    /// that starts programs. What is checked here is the declaration's shape: a sidecar must name
+    /// the command a page would call and the program that answers it, and no two sidecars may
+    /// claim the same command name, or one would silently shadow the other.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManifestError::Invalid`] for a sidecar with no command, no program, or a command
+    /// name another sidecar already claimed.
+    fn check_sidecars(&self) -> Result<(), ManifestError> {
+        let mut claimed: Vec<&str> = Vec::new();
+        for (index, sidecar) in self.sidecars.iter().enumerate() {
+            if sidecar.command.trim().is_empty() {
+                return Err(ManifestError::Invalid {
+                    field: format!("sidecars[{index}].command"),
+                    reason: "must not be empty".to_owned(),
+                });
+            }
+            if sidecar.program.trim().is_empty() {
+                return Err(ManifestError::Invalid {
+                    field: format!("sidecars[{index}].program"),
+                    reason: "must not be empty; a sidecar names the program that answers it"
+                        .to_owned(),
+                });
+            }
+            if let Some(duplicate) = claimed.iter().find(|name| **name == sidecar.command) {
+                return Err(ManifestError::Invalid {
+                    field: format!("sidecars[{index}].command"),
+                    reason: format!(
+                        "duplicate command `{duplicate}`: two sidecars answer the same name, so \
+                         one would shadow the other"
+                    ),
+                });
+            }
+            claimed.push(&sidecar.command);
+        }
+        Ok(())
+    }
+
+    /// Checks the commands the application declares the page answers in JavaScript.
+    ///
+    /// The declaration's shape is what is checked here: a page command must name the command a
+    /// page would call, and no two commands — page or sidecar — may answer the same name. A
+    /// collision with a *built-in* is caught where the command is registered, against the same
+    /// action table the page bridge enforces; this check catches the ones this file can see.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManifestError::Invalid`] for a page command with no name, or a name another
+    /// page command or sidecar already claimed.
+    fn check_page_commands(&self) -> Result<(), ManifestError> {
+        let mut claimed: Vec<&str> = self.sidecars.iter().map(|s| s.command.as_str()).collect();
+        for (index, command) in self.page_commands.iter().enumerate() {
+            if command.command.trim().is_empty() {
+                return Err(ManifestError::Invalid {
+                    field: format!("page_commands[{index}].command"),
+                    reason: "must not be empty".to_owned(),
+                });
+            }
+            if let Some(duplicate) = claimed.iter().find(|name| **name == command.command) {
+                return Err(ManifestError::Invalid {
+                    field: format!("page_commands[{index}].command"),
+                    reason: format!(
+                        "duplicate command `{duplicate}`: two commands answer the same name, so \
+                         one would shadow the other"
+                    ),
+                });
+            }
+            claimed.push(&command.command);
         }
         Ok(())
     }
@@ -610,6 +823,54 @@ mod tests {
         manifest.scheme = Some("ncui://open".to_owned());
         let error = manifest.validate().expect_err("not a scheme");
         assert!(error.to_string().contains("scheme"), "{error}");
+    }
+
+    #[test]
+    fn a_default_locale_is_validated_as_a_language_tag() {
+        // A locale decides the text direction an interface lays out in, so a manifest that
+        // declares one must declare a language tag rather than a value that is not one.
+        let base = AppManifest::parse(
+            r#"{"name":"counter","version":"1.0.0"}"#,
+            Path::new("ncui.app.json"),
+        )
+        .expect("a minimal manifest");
+        assert!(is_locale_tag("en"));
+        assert!(is_locale_tag("pt-BR"));
+        assert!(is_locale_tag("he-IL"));
+        assert!(is_locale_tag("zh_Hans"));
+        assert!(!is_locale_tag(""));
+        assert!(!is_locale_tag("en US"), "a space is not a subtag separator");
+        assert!(!is_locale_tag("en.US"), "a dot is a codeset, not a tag");
+        assert!(!is_locale_tag("../etc"), "a locale is not a path");
+        assert!(!is_locale_tag("toolongsubtag"));
+
+        let mut manifest = AppManifest {
+            default_locale: Some("he-IL".to_owned()),
+            ..base
+        };
+        assert!(manifest.validate().is_ok());
+        manifest.default_locale = Some("not a locale".to_owned());
+        let error = manifest.validate().expect_err("not a locale tag");
+        assert!(error.to_string().contains("default_locale"), "{error}");
+    }
+
+    #[test]
+    fn a_manifest_declaring_a_default_locale_parses_it() {
+        // The declared locale round-trips through the manifest, so an application that names
+        // its interface language has it honoured rather than dropped on the floor.
+        let manifest = AppManifest::parse(
+            r#"{"name":"counter","version":"1.0.0","default_locale":"he"}"#,
+            Path::new("ncui.app.json"),
+        )
+        .expect("a manifest with a default locale");
+        assert_eq!(manifest.default_locale.as_deref(), Some("he"));
+        // Absent stays absent: an application that declares none falls back to the platform.
+        let bare = AppManifest::parse(
+            r#"{"name":"counter","version":"1.0.0"}"#,
+            Path::new("ncui.app.json"),
+        )
+        .expect("a minimal manifest");
+        assert_eq!(bare.default_locale, None);
     }
 
     #[test]
@@ -883,5 +1144,156 @@ mod tests {
         let parsed = manifest(r#"{"name":"a","version":"1.0.0","entry":"my pages/a b.html"}"#)
             .expect("manifest");
         assert_eq!(parsed.entry_url_path(), "/my%20pages/a%20b.html");
+    }
+
+    #[test]
+    fn a_sidecar_declared_in_the_manifest_is_parsed_with_its_contract() {
+        // The author-facing half of a sidecar is the manifest entry: the author writes the
+        // command a page calls, the program that answers it, and the capability that gates it.
+        // This drives a real `ncui.app.json` through the loader rather than building the
+        // struct in Rust, so the declared shape is what the loader accepts.
+        let parsed = manifest(
+            r#"{
+                "name": "searcher",
+                "version": "1.0.0",
+                "capabilities": ["process.spawn", "filesystem.read"],
+                "sidecars": [{
+                    "command": "search.index",
+                    "program": "tools/index.py",
+                    "args": ["--quiet"],
+                    "requires": ["filesystem.read"],
+                    "timeout_ms": 2500,
+                    "summary": "build the search index"
+                }]
+            }"#,
+        )
+        .expect("a manifest declaring a sidecar");
+        assert_eq!(parsed.sidecars.len(), 1, "the sidecar is declared");
+        let sidecar = &parsed.sidecars[0];
+        assert_eq!(sidecar.command, "search.index");
+        assert_eq!(sidecar.program, "tools/index.py");
+        assert_eq!(sidecar.args, vec!["--quiet".to_owned()]);
+        assert!(
+            sidecar.requires.contains(Capability::FilesystemRead),
+            "the declared capability gates the command"
+        );
+        assert_eq!(sidecar.timeout_ms, Some(2500));
+        assert_eq!(sidecar.summary, "build the search index");
+    }
+
+    #[test]
+    fn a_manifest_with_no_sidecars_declares_none() {
+        let parsed = manifest(r#"{"name":"a","version":"1.0.0"}"#).expect("a manifest");
+        assert!(
+            parsed.sidecars.is_empty(),
+            "a sidecar-less application declares no sidecars"
+        );
+    }
+
+    #[test]
+    fn a_sidecar_with_no_command_or_no_program_is_refused() {
+        for raw in [
+            r#"{"name":"a","version":"1.0.0","sidecars":[{"command":"","program":"x.py"}]}"#,
+            r#"{"name":"a","version":"1.0.0","sidecars":[{"command":"c","program":"  "}]}"#,
+        ] {
+            let error = manifest(raw).expect_err("a sidecar with a missing name");
+            assert!(
+                matches!(error, ManifestError::Invalid { .. }),
+                "got: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_sidecars_may_not_answer_the_same_command() {
+        let error = manifest(
+            r#"{"name":"a","version":"1.0.0","sidecars":[
+                {"command":"dup","program":"one.py"},
+                {"command":"dup","program":"two.py"}]}"#,
+        )
+        .expect_err("a duplicate sidecar command");
+        assert!(
+            matches!(error, ManifestError::Invalid { .. }),
+            "got: {error}"
+        );
+        assert!(
+            error.to_string().contains("dup"),
+            "the refusal names the command two sidecars claimed; got: {error}"
+        );
+    }
+
+    #[test]
+    fn a_page_command_declared_in_the_manifest_is_parsed_with_its_gate() {
+        // The JavaScript half of a command is declared here, not registered by the page: the
+        // author names the command and the capability that gates it, so the command sits in the
+        // action table pages are checked against exactly like a native one. This drives a real
+        // `ncui.app.json` through the loader.
+        let parsed = manifest(
+            r#"{
+                "name": "cart",
+                "version": "1.0.0",
+                "capabilities": ["inspect.runtime"],
+                "page_commands": [{
+                    "command": "cart.total",
+                    "requires": ["inspect.runtime"],
+                    "summary": "total the cart"
+                }]
+            }"#,
+        )
+        .expect("a manifest declaring a page command");
+        assert_eq!(
+            parsed.page_commands.len(),
+            1,
+            "the page command is declared"
+        );
+        let command = &parsed.page_commands[0];
+        assert_eq!(command.command, "cart.total");
+        assert_eq!(command.summary, "total the cart");
+        assert!(
+            command.requires.contains(Capability::InspectRuntime),
+            "the declared capability gates the command"
+        );
+    }
+
+    #[test]
+    fn a_manifest_with_no_page_commands_declares_none() {
+        let parsed = manifest(r#"{"name":"a","version":"1.0.0"}"#).expect("a manifest");
+        assert!(
+            parsed.page_commands.is_empty(),
+            "an application that declares none has none"
+        );
+    }
+
+    #[test]
+    fn a_page_command_with_no_name_is_refused() {
+        let error = manifest(
+            r#"{"name":"a","version":"1.0.0","page_commands":[{"command":"","summary":"x"}]}"#,
+        )
+        .expect_err("a page command with no name");
+        assert!(
+            matches!(error, ManifestError::Invalid { .. }),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn a_page_command_may_not_answer_the_name_a_sidecar_claims() {
+        // A sidecar and a page command both become commands the page calls, registered in the
+        // same action table. A name two of them claim would shadow, so it is refused here where
+        // the author can see it rather than at registration.
+        let error = manifest(
+            r#"{"name":"a","version":"1.0.0",
+                "sidecars":[{"command":"dup","program":"x.py"}],
+                "page_commands":[{"command":"dup","summary":"x"}]}"#,
+        )
+        .expect_err("a page command shadowing a sidecar");
+        assert!(
+            matches!(error, ManifestError::Invalid { .. }),
+            "got: {error}"
+        );
+        assert!(
+            error.to_string().contains("dup"),
+            "the refusal names the contested command; got: {error}"
+        );
     }
 }

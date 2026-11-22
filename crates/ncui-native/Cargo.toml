@@ -16,6 +16,12 @@ workspace = true
 # Linux the crate needs a connection to an X server, which a headless machine does not have, so
 # gating it keeps the default build — and the Linux gate — exactly as they are.
 global-hotkeys = ["dep:global-hotkey"]
+# Enables native file, save and folder dialogs, which need the platform's own dialog call.
+# Off by default: a modal dialog blocks on a person, so gating it keeps the default build and
+# the headless gate exactly as they are. The `DialogBackend` seam and every path-handling and
+# permission rule around the dialog are plain Rust and are tested without this feature; the
+# feature only supplies the thin platform adapter that shows the real picker.
+dialogs = ["dep:rfd"]
 
 [dependencies]
 ncui-core = { workspace = true }
@@ -24,3 +30,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 global-hotkey = { workspace = true, optional = true }
+rfd = { workspace = true, optional = true }

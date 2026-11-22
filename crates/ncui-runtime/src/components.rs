@@ -628,7 +628,9 @@ mod tests {
             .target
         {
             CommandTarget::Native(handler) => handler,
-            CommandTarget::RuntimeMethod(_) => panic!("component commands are native"),
+            CommandTarget::RuntimeMethod(_) | CommandTarget::Page => {
+                panic!("component commands are native")
+            }
         }
     }
 
@@ -893,7 +895,8 @@ mod example_tests {
             Capability::FilesystemRead,
             Capability::ReadMetrics,
         ]);
-        let _native = crate::native::register(&runtime, &root, None).expect("the native surface");
+        let _native =
+            crate::native::register(&runtime, &root, None, &[]).expect("the native surface");
         let _components = register(&runtime, &root).expect("the component surface");
 
         let opened = command(&runtime, "component.open")(json!({

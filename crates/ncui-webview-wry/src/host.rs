@@ -25,6 +25,8 @@
 //! thread; the default build (feature off) is a small, honest fallback so the crate still
 //! compiles everywhere, including Linux CI without `webkit2gtk`.
 
+#[cfg(all(feature = "wry-engine", target_os = "macos"))]
+use std::sync::atomic::AtomicI32;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{
     Arc, Mutex,
@@ -34,10 +36,13 @@ use std::sync::{
 use std::sync::{OnceLock, atomic::AtomicU64};
 use std::time::Duration;
 
+#[cfg(feature = "wry-engine")]
+use crate::child::{ChildWebviewError, child_bounds};
+use ncui_core::WindowId;
 use ncui_webview::{HostSeam, PageMessage, WebViewBackend};
 
 #[cfg(feature = "wry-engine")]
-use crate::host_scripts::{moved_script, resized_script};
+use crate::host_scripts::{DRAG_REGION_SCRIPT, dropped_files_script, moved_script, resized_script};
 
 #[cfg(feature = "wry-engine")]
 use std::collections::HashMap;
@@ -158,8 +163,13 @@ const MONITORS_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 #[cfg(feature = "wry-engine")]
 #[derive(Debug)]
-enum HostEvent {
+pub enum HostEvent {
     /// Build a window and its webview.
+    #[allow(
+        private_interfaces,
+        reason = "the event is the engine's internal command bus; the binding's public \
+                  constructor names the type because it hands out the proxy that carries it"
+    )]
     Create(Box<CreateRequest>),
     /// Run a script in one window's page.
     Eval {
@@ -173,6 +183,70 @@ enum HostEvent {
         /// The window to close.
         window: u64,
     },
+    /// Initiate a window drag (titlebar drag region).
+    DragWindow {
+        /// The window to drag.
+        window: u64,
+    },
+    /// Build a child webview inside a parent window's frame.
+    CreateChild {
+        /// The parent window's engine identity, as its display string.
+        parent: String,
+        /// The child's starting URL and rectangle.
+        request: Box<ncui_webview_child::ChildWebviewRequest>,
+        /// Where the child's engine identity, or the failure, is delivered.
+        reply: Sender<Result<u64, ChildWebviewError>>,
+    },
+    /// Move a live child webview to a new rectangle.
+    ChildBounds {
+        /// The child's engine identity.
+        child: u64,
+        /// The new rectangle.
+        request: Box<ncui_webview_child::ChildWebviewRequest>,
+        /// Where the acceptance is delivered.
+        reply: Sender<Result<(), ChildWebviewError>>,
+    },
+    /// Close a live child webview.
+    CloseChild {
+        /// The child's engine identity.
+        child: u64,
+        /// Where the acceptance is delivered.
+        reply: Sender<Result<(), ChildWebviewError>>,
+    },
+    /// Run one CDP command against a window's `DevTools` endpoint.
+    CdpRequest {
+        /// The window whose endpoint is targeted.
+        window: String,
+        /// The CDP command (id/method/params).
+        command: serde_json::Value,
+        /// Where the endpoint's answer, or the failure, is delivered.
+        reply: Sender<Result<serde_json::Value, String>>,
+    },
+    /// Scale one window's page by a zoom factor.
+    Zoom {
+        /// The window whose page is scaled.
+        window: u64,
+        /// The zoom factor, where `1.0` is the platform default.
+        factor: f64,
+        /// Where the acceptance is reported.
+        reply: Sender<bool>,
+    },
+    /// Open, close, or query the platform's web inspector for one window.
+    DevTools {
+        /// The window whose inspector is meant.
+        window: u64,
+        /// What to do to it.
+        action: DevToolsAction,
+        /// Where the acceptance (or the queried state) is reported.
+        reply: Sender<bool>,
+    },
+    /// Stop the engine's event loop, ending the process with the code the
+    /// application finished with.
+    ///
+    /// macOS only: there the engine's loop owns the main thread (ADR-018), so it
+    /// is the loop that ends the process with the application's exit code.
+    #[cfg(all(feature = "wry-engine", target_os = "macos"))]
+    Quit,
     /// Show the application's tray icon, or remove it, reporting whether the platform agreed.
     #[cfg(feature = "tray-icon")]
     Tray {
@@ -234,7 +308,7 @@ enum HostEvent {
 /// Everything needed to build one window.
 #[cfg(feature = "wry-engine")]
 #[derive(Debug)]
-struct CreateRequest {
+pub(crate) struct CreateRequest {
     /// The window's shape, or `None` for the default empty page.
     request: Option<ncui_webview::WindowRequest>,
     /// The policy the page in it obeys.
@@ -249,9 +323,24 @@ struct CreateRequest {
     reply: Sender<Result<u64, String>>,
 }
 
+/// What to do to a window's web inspector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DevToolsAction {
+    /// Open the inspector.
+    Open,
+    /// Close the inspector.
+    Close,
+    /// Report whether the inspector is open.
+    Query,
+}
+
 /// The number every window created by the engine is known by.
 #[cfg(feature = "wry-engine")]
 static NEXT_WINDOW: AtomicU64 = AtomicU64::new(1);
+
+/// The number every child webview created by the engine is known by.
+#[cfg(feature = "wry-engine")]
+static NEXT_CHILD: AtomicU64 = AtomicU64::new(1);
 
 /// The process-wide engine, created on first use.
 ///
@@ -259,6 +348,14 @@ static NEXT_WINDOW: AtomicU64 = AtomicU64::new(1);
 /// lock would suggest it could be replaced.
 #[cfg(feature = "wry-engine")]
 static ENGINE: OnceLock<Option<EventLoopProxy<HostEvent>>> = OnceLock::new();
+
+/// The exit code the application finished with, which the engine's loop exits with.
+///
+/// On macOS the engine's loop owns the main thread (ADR-018), so the process ends
+/// inside that loop: the application's worker writes its exit code here and asks
+/// the loop to quit.
+#[cfg(all(feature = "wry-engine", target_os = "macos"))]
+static QUIT_CODE: AtomicI32 = AtomicI32::new(0);
 
 /// What a page hears when the tray icon is clicked.
 ///
@@ -381,8 +478,36 @@ struct EngineWindow {
     alive: Arc<AtomicBool>,
 }
 
-/// The engine's proxy, starting the loop on first use.
+/// One live child webview inside a parent window's frame.
 #[cfg(feature = "wry-engine")]
+struct EngineChild {
+    /// The wry webview, built as a child of the parent's HWND.
+    webview: WebView,
+}
+
+/// The engine's proxy, installed before the application's work begins.
+///
+/// On macOS this does not start anything: `AppKit` requires the event loop on the
+/// main thread and `tao` offers no any-thread switch there (ADR-018), so the loop
+/// is started by [`run_on_main_thread`] before the application's work begins and
+/// this only reads the proxy that was installed then.
+#[cfg(all(feature = "wry-engine", target_os = "macos"))]
+fn engine() -> Option<&'static EventLoopProxy<HostEvent>> {
+    ENGINE.get().and_then(Option::as_ref)
+}
+
+/// The engine's proxy, for bindings that drive the loop from outside this crate.
+///
+/// `None` when the loop could not be started. The proxy is clone-and-send, so a
+/// binding can hold it and post events from its own thread.
+#[cfg(feature = "wry-engine")]
+#[must_use]
+pub fn engine_proxy() -> Option<EventLoopProxy<HostEvent>> {
+    engine().cloned()
+}
+
+/// The engine's proxy, starting the loop on first use.
+#[cfg(all(feature = "wry-engine", not(target_os = "macos")))]
 fn engine() -> Option<&'static EventLoopProxy<HostEvent>> {
     ENGINE
         .get_or_init(|| {
@@ -397,10 +522,9 @@ fn engine() -> Option<&'static EventLoopProxy<HostEvent>> {
                         builder.with_any_thread(true);
                     }
                     // tao's Unix backend asserts the main thread unless the builder is told
-                    // otherwise, and the engine loop lives on its own thread by design. The
-                    // switch exists on the X11/Wayland targets only — AppKit requires the main
-                    // thread and tao exposes no such option for macOS, which is why that target
-                    // is absent here rather than configured.
+                    // otherwise. The switch exists on X11/Wayland only. macOS (AppKit)
+                    // requires the main thread and tao exposes no any-thread option, which is
+                    // why that target starts its loop in `run_on_main_thread` instead.
                     #[cfg(any(
                         target_os = "linux",
                         target_os = "dragonfly",
@@ -427,6 +551,100 @@ fn engine() -> Option<&'static EventLoopProxy<HostEvent>> {
         .as_ref()
 }
 
+/// The process-wide user-data directory the engine's browsers use, recorded when a window
+/// is built so the CDP transport can find the port file without guessing.
+#[cfg(feature = "wry-engine")]
+static CDP_USER_DATA_DIR: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+
+/// The `DevTools` endpoint the engine published, resolved from the recorded
+/// user-data directory.
+///
+/// Engine-gated: the static and the data-root helper below exist only when the
+/// engine does, and the only caller sits inside the engine's own loop.
+#[cfg(feature = "wry-engine")]
+pub(crate) fn cdp_endpoint() -> crate::cdp::DevToolsEndpoint {
+    let dir = CDP_USER_DATA_DIR
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .unwrap_or_else(webview_data_root);
+    crate::cdp::read_devtools_endpoint(&dir).expect("the engine published its DevTools port")
+}
+
+/// Where this application's `WebView2` data lives: under the local data root, in a directory
+/// named for the running executable, so two applications do not share one browser state.
+///
+/// The callers sit behind `feature = "wry-engine"` — one in `create_window`, one in the
+/// transport test — and the cfg below mirrors that, so a build without the engine does not
+/// carry (and dead-code-deny) the helpers.
+#[cfg(feature = "wry-engine")]
+fn webview_data_root() -> std::path::PathBuf {
+    let name = std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "ncui".to_owned());
+    dirs_local().join(name).join("webview")
+}
+
+/// The platform's per-user local data root.
+#[cfg(all(feature = "wry-engine", target_os = "windows"))]
+fn dirs_local() -> std::path::PathBuf {
+    std::env::var_os("LOCALAPPDATA").map_or_else(std::env::temp_dir, std::path::PathBuf::from)
+}
+
+/// The platform's per-user local data root.
+#[cfg(all(feature = "wry-engine", not(target_os = "windows")))]
+fn dirs_local() -> std::path::PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".local/share"))
+        })
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+/// Runs the engine's event loop on the main thread, and the application on a worker.
+///
+/// macOS (`AppKit`) requires the event loop to be created and run on the main
+/// thread, and `tao` offers no any-thread switch there — the host's usual
+/// worker-thread loop panics at startup (ADR-018). So on macOS the two roles the
+/// other platforms use are exchanged: the engine loop owns the main thread, and
+/// the application's work — the runtime pump that opens windows and serves
+/// pages — runs on a worker that reaches the loop through the same proxy every
+/// other thread uses.
+///
+/// When `app` returns, the loop is asked to quit and the process ends with the
+/// code `app` returned. This must be the first thing `main` does on macOS: a
+/// window created before the loop exists has no engine to be created in.
+#[cfg(all(feature = "wry-engine", target_os = "macos"))]
+pub fn run_on_main_thread(app: impl FnOnce() -> i32 + Send + 'static) -> ! {
+    let event_loop = EventLoopBuilder::<HostEvent>::with_user_event().build();
+    let proxy = event_loop.create_proxy();
+    let _ = ENGINE.set(Some(proxy.clone()));
+    let worker = thread::Builder::new()
+        .name("ncui-application".to_owned())
+        .spawn(move || {
+            let code = app();
+            QUIT_CODE.store(code, Ordering::SeqCst);
+        });
+    // The joiner needs its own handle: the loop's proxy is consumed by `run_engine`.
+    let quit_proxy = proxy.clone();
+    if let Ok(worker) = worker {
+        // Detached: it ends the loop when the application finishes, and the main
+        // thread is inside the loop by then and cannot wait here.
+        let _ = thread::Builder::new()
+            .name("ncui-application-quit".to_owned())
+            .spawn(move || {
+                let _ = worker.join();
+                let _ = quit_proxy.send_event(HostEvent::Quit);
+            });
+    }
+    run_engine(event_loop, proxy)
+}
+
 /// Runs the loop, creating, evaluating in, and closing windows.
 ///
 /// The proxy is handed in rather than made here because the tray needs to send events to the loop it
@@ -444,8 +662,16 @@ fn engine() -> Option<&'static EventLoopProxy<HostEvent>> {
                   across both configurations keeps the call site from being conditional"
     )
 )]
-fn run_engine(event_loop: tao::event_loop::EventLoop<HostEvent>, proxy: EventLoopProxy<HostEvent>) {
+#[allow(
+    clippy::too_many_lines,
+    reason = "the event loop match arms are each a distinct window event; splitting them would obscure the event flow"
+)]
+fn run_engine(
+    event_loop: tao::event_loop::EventLoop<HostEvent>,
+    proxy: EventLoopProxy<HostEvent>,
+) -> ! {
     let mut windows: HashMap<u64, EngineWindow> = HashMap::new();
+    let mut children: HashMap<u64, EngineChild> = HashMap::new();
     // The tray belongs to the application rather than to a window, so it lives beside the windows
     // rather than inside one: an application whose window is closed is still an application a user
     // may need to reach.
@@ -466,6 +692,115 @@ fn run_engine(event_loop: tao::event_loop::EventLoop<HostEvent>, proxy: EventLoo
                 if let Some(entry) = windows.remove(&window) {
                     entry.alive.store(false, Ordering::SeqCst);
                 }
+            }
+            Event::UserEvent(HostEvent::DragWindow { window }) => {
+                if let Some(entry) = windows.get(&window) {
+                    let _ = entry.window.drag_window();
+                }
+            }
+            Event::UserEvent(HostEvent::CdpRequest {
+                window: _,
+                command,
+                reply,
+            }) => {
+                // The transport targets this process's engine endpoint; the
+                // window id is carried for auditability.
+                let answer = crate::cdp::send_command(&cdp_endpoint(), &command)
+                    .map_err(|error| error.to_string());
+                let _ = reply.send(answer);
+            }
+            Event::UserEvent(HostEvent::CreateChild {
+                parent,
+                request,
+                reply,
+            }) => {
+                let parsed_parent = parent.parse::<u64>().ok();
+                let answer = match parsed_parent.as_ref().and_then(|id| windows.get(id)) {
+                    Some(entry) => {
+                        let built = WebViewBuilder::new()
+                            .with_url(request.url.clone())
+                            .with_bounds(child_bounds(&request))
+                            .build_as_child(&entry.window);
+                        match built {
+                            Ok(webview) => {
+                                let id = NEXT_CHILD.fetch_add(1, Ordering::SeqCst);
+                                children.insert(id, EngineChild { webview });
+                                Ok(id)
+                            }
+                            Err(error) => Err(ChildWebviewError::EngineFailed {
+                                reason: error.to_string(),
+                            }),
+                        }
+                    }
+                    None => Err(ChildWebviewError::ParentUnavailable {
+                        window: parent
+                            .parse::<WindowId>()
+                            .unwrap_or_else(|_| WindowId::new()),
+                    }),
+                };
+                let _ = reply.send(answer);
+            }
+            Event::UserEvent(HostEvent::ChildBounds {
+                child,
+                request,
+                reply,
+            }) => {
+                let answer =
+                    match children.get_mut(&child) {
+                        Some(surface) => surface
+                            .webview
+                            .set_bounds(child_bounds(&request))
+                            .map_err(|error| ChildWebviewError::EngineFailed {
+                                reason: error.to_string(),
+                            }),
+                        None => Err(ChildWebviewError::EngineFailed {
+                            reason: format!("child webview {child} is not live"),
+                        }),
+                    };
+                let _ = reply.send(answer);
+            }
+            Event::UserEvent(HostEvent::CloseChild { child, reply }) => {
+                let answer = match children.remove(&child) {
+                    Some(_) => Ok(()),
+                    None => Err(ChildWebviewError::EngineFailed {
+                        reason: format!("child webview {child} is not live"),
+                    }),
+                };
+                let _ = reply.send(answer);
+            }
+            Event::UserEvent(HostEvent::Zoom {
+                window,
+                factor,
+                reply,
+            }) => {
+                let accepted = windows
+                    .get(&window)
+                    .is_some_and(|entry| entry.webview.zoom(factor).is_ok());
+                let _ = reply.send(accepted);
+            }
+            Event::UserEvent(HostEvent::DevTools {
+                window,
+                action,
+                reply,
+            }) => {
+                let answer = windows.get(&window).map(|entry| match action {
+                    DevToolsAction::Open => {
+                        entry.webview.open_devtools();
+                        // wry's Windows backend opens the inspector but reports no state,
+                        // so this is an acceptance, not a verified state.
+                        true
+                    }
+                    DevToolsAction::Close => {
+                        entry.webview.close_devtools();
+                        true
+                    }
+                    DevToolsAction::Query => entry.webview.is_devtools_open(),
+                });
+                let _ = reply.send(answer.unwrap_or(false));
+            }
+            #[cfg(all(feature = "wry-engine", target_os = "macos"))]
+            Event::UserEvent(HostEvent::Quit) => {
+                *control_flow = ControlFlow::ExitWithCode(QUIT_CODE.load(Ordering::SeqCst));
             }
             #[cfg(feature = "tray-icon")]
             Event::UserEvent(HostEvent::Tray { request, reply }) => {
@@ -527,6 +862,17 @@ fn run_engine(event_loop: tao::event_loop::EventLoop<HostEvent>, proxy: EventLoo
                 if let Some(entry) = window_entry(&windows, window_id) {
                     let logical = position.to_logical::<f64>(entry.window.scale_factor());
                     tell_page(&windows, window_id, &moved_script(logical));
+                }
+            }
+            // The user dropped files onto the window. The page is told so it can
+            // process them. Each path is a file the user dragged from the OS.
+            Event::WindowEvent {
+                window_id,
+                event: WindowEvent::DroppedFile(path),
+                ..
+            } => {
+                if let Some(_entry) = window_entry(&windows, window_id) {
+                    tell_page(&windows, window_id, &dropped_files_script(&[path]));
                 }
             }
             Event::WindowEvent {
@@ -934,14 +1280,43 @@ fn build_window(
         navigation_seam.evaluate_navigation(&request).is_allowed()
     };
 
-    let builder = WebViewBuilder::new()
+    // One user-data directory for the process's browsers, under the runtime's own data
+    // root. A directory the runtime owns is what makes the CDP port findable: WebView2
+    // writes `DevToolsActivePort` into it, and the transport reads it from there rather
+    // than guessing. It also keeps this application's browser state separate from every
+    // other WebView2 consumer on the machine, which a shared default would not. The
+    // context outlives the builder because the builder only borrows it.
+    let dir = webview_data_root();
+    let _ = std::fs::create_dir_all(&dir);
+    *CDP_USER_DATA_DIR
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(dir.clone());
+    let mut web_context = wry::WebContext::new(Some(dir));
+    let builder = WebViewBuilder::new_with_web_context(&mut web_context)
         .with_ipc_handler(move |request: wry::http::Request<String>| {
             // Bridge the page's IPC payload into the in-process channel so the runtime can
             // evaluate it through the seam.
             let _ = ipc_tx.send(request.body().to_owned());
         })
         .with_navigation_handler(navigation_handler)
-        .with_initialization_script(BRIDGE_SCRIPT);
+        .with_initialization_script(format!(
+            "{BRIDGE_SCRIPT}
+{DRAG_REGION_SCRIPT}"
+        ));
+
+    // Remote debugging (ADR-017 Phase 2): an ephemeral port keeps two instances of the
+    // same application from colliding, and the chosen port is published by the runtime in
+    // the user-data directory's `DevToolsActivePort` file, which the CDP transport reads.
+    // The default arguments are repeated because supplying any argument replaces wry's
+    // defaults rather than adding to them.
+    #[cfg(target_os = "windows")]
+    let builder = {
+        use wry::WebViewBuilderExtWindows as _;
+        builder.with_additional_browser_args(
+            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+             --remote-debugging-port=0",
+        )
+    };
 
     let builder = match request {
         Some(request) => builder.with_url(request.url.clone()),
@@ -1114,6 +1489,10 @@ pub struct WindowHost {
     /// This window's identity inside the engine.
     #[cfg(feature = "wry-engine")]
     window: Option<u64>,
+    /// Where the engine publishes its `DevTools` endpoint (`DevToolsActivePort`), when the
+    /// application set one. Absent means the CDP transport cannot find the port and says
+    /// so rather than searching the disk.
+    cdp_user_data_dir: Mutex<Option<std::path::PathBuf>>,
 }
 
 impl Default for WindowHost {
@@ -1145,6 +1524,7 @@ impl WindowHost {
                 ipc_tx,
                 ipc_rx: Mutex::new(ipc_rx),
                 seam: Arc::new(HostSeam::disabled()),
+                cdp_user_data_dir: Mutex::new(None),
             }
         }
     }
@@ -1170,6 +1550,20 @@ impl WindowHost {
         #[cfg(not(feature = "wry-engine"))]
         {
             let _ = script;
+        }
+    }
+
+    /// Initiate a window drag (titlebar drag region).
+    ///
+    /// Sends a `HostEvent::DragWindow` to the process-wide engine event loop,
+    /// which calls `tao::window::Window::drag_window()`. This is called by the
+    /// page when the user mousedowns on a `[data-ncui-drag-region]` element.
+    #[cfg(feature = "wry-engine")]
+    pub fn drag_window(&self) -> bool {
+        if let (Some(engine), Some(window)) = (&self.engine, self.window) {
+            engine.send_event(HostEvent::DragWindow { window }).is_ok()
+        } else {
+            false
         }
     }
 
@@ -1319,6 +1713,161 @@ impl WindowHost {
         }
     }
 
+    /// Sends one CDP command to this window's own `DevTools` endpoint (ADR-017 Phase 2).
+    ///
+    /// The engine was created with `--remote-debugging-port=0`; the port it picked is read
+    /// from the user-data directory set with [`WindowHost::set_cdp_user_data_dir`]. A host
+    /// with no directory set, or an engine that never exposed the port, refuses by name
+    /// rather than inventing an answer.
+    #[cfg(feature = "wry-engine")]
+    pub fn cdp_send(
+        &self,
+        command: &serde_json::Value,
+    ) -> Result<serde_json::Value, crate::cdp::CdpError> {
+        // The window's own directory wins; the process-wide one recorded when the window
+        // was built is the fallback, and it is the one a normally-constructed host has.
+        let owned = self
+            .cdp_user_data_dir
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let dir = owned
+            .or_else(|| {
+                CDP_USER_DATA_DIR
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            })
+            .ok_or_else(|| crate::cdp::CdpError::PortUnavailable {
+                reason: "no user-data directory was set for this window's engine".to_owned(),
+            })?;
+        let endpoint = crate::cdp::read_devtools_endpoint(&dir)?;
+        crate::cdp::send_command(&endpoint, command)
+    }
+
+    /// The no-engine form of [`WindowHost::cdp_send`]: without an engine there is no
+    /// browser and no `DevTools` endpoint, so the command is refused by name.
+    #[cfg(not(feature = "wry-engine"))]
+    pub fn cdp_send(&self, _command: &serde_json::Value) -> Result<serde_json::Value, String> {
+        Err("this build has no WebView engine, so there is no DevTools endpoint".to_owned())
+    }
+
+    /// Sets where this window's engine publishes its `DevTools` endpoint.
+    ///
+    /// Must be set before the window's browser starts to be effective: the file is written
+    /// at engine startup. Setting it late is not an error, but the transport will report
+    /// the file as missing until the engine next starts.
+    pub fn set_cdp_user_data_dir(&self, dir: std::path::PathBuf) {
+        *self
+            .cdp_user_data_dir
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(dir);
+    }
+
+    /// Scales this window's page by `factor`, where `1.0` is the platform default.
+    ///
+    /// `false` when the engine could not be reached or has no such window. The result is
+    /// not read back: the platform applies the scale and the next paint shows it.
+    pub fn set_zoom(&self, factor: f64) -> bool {
+        #[cfg(feature = "wry-engine")]
+        {
+            let (Some(engine), Some(window)) = (&self.engine, self.window) else {
+                return false;
+            };
+            let (reply, answers) = mpsc::channel();
+            if engine
+                .send_event(HostEvent::Zoom {
+                    window,
+                    factor,
+                    reply,
+                })
+                .is_err()
+            {
+                return false;
+            }
+            answers
+                .recv_timeout(ENGINE_REQUEST_TIMEOUT)
+                .unwrap_or(false)
+        }
+        #[cfg(not(feature = "wry-engine"))]
+        {
+            let _ = (self, factor);
+            false
+        }
+    }
+
+    /// Opens the platform's web inspector for this window.
+    ///
+    /// `false` when the engine cannot open one, or cannot answer whether it did — which on
+    /// some platforms is the honest answer (wry's Windows backend opens the inspector but
+    /// cannot report its state), and is reported as such rather than claimed as success.
+    pub fn open_devtools(&self) -> bool {
+        self.devtools_request(DevToolsAction::Open)
+    }
+
+    /// Closes the platform's web inspector for this window. See [`WindowHost::open_devtools`].
+    pub fn close_devtools(&self) -> bool {
+        self.devtools_request(DevToolsAction::Close)
+    }
+
+    /// Whether the platform's web inspector is open for this window.
+    ///
+    /// `None` when the engine cannot say — a platform that opens the inspector without a
+    /// state query is reported as unknown, not as closed.
+    #[must_use]
+    pub fn is_devtools_open(&self) -> Option<bool> {
+        self.devtools_query()
+    }
+
+    fn devtools_request(&self, action: DevToolsAction) -> bool {
+        #[cfg(feature = "wry-engine")]
+        {
+            let (Some(engine), Some(window)) = (&self.engine, self.window) else {
+                return false;
+            };
+            let (reply, answers) = mpsc::channel();
+            if engine
+                .send_event(HostEvent::DevTools {
+                    window,
+                    action,
+                    reply,
+                })
+                .is_err()
+            {
+                return false;
+            }
+            answers
+                .recv_timeout(ENGINE_REQUEST_TIMEOUT)
+                .unwrap_or(false)
+        }
+        #[cfg(not(feature = "wry-engine"))]
+        {
+            let _ = (self, action);
+            false
+        }
+    }
+
+    fn devtools_query(&self) -> Option<bool> {
+        #[cfg(feature = "wry-engine")]
+        {
+            let (engine, window) = (self.engine.as_ref()?, self.window?);
+            let (reply, answers) = mpsc::channel();
+            engine
+                .send_event(HostEvent::DevTools {
+                    window,
+                    action: DevToolsAction::Query,
+                    reply,
+                })
+                .ok()?;
+            answers.recv_timeout(ENGINE_REQUEST_TIMEOUT).ok()
+        }
+        #[cfg(not(feature = "wry-engine"))]
+        {
+            let _ = self;
+            None
+        }
+    }
+
     /// Clone of the producer side of the IPC channel.
     ///
     /// Mostly useful for wiring: the `wry` handler already holds its own clone, but a
@@ -1350,6 +1899,104 @@ impl WindowHost {
 }
 
 impl WebViewBackend for WindowHost {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn cdp_send(&self, command: &serde_json::Value) -> Result<serde_json::Value, String> {
+        #[cfg(feature = "wry-engine")]
+        {
+            WindowHost::cdp_send(self, command).map_err(|error| error.to_string())
+        }
+        #[cfg(not(feature = "wry-engine"))]
+        {
+            let _ = (self, command);
+            Err("this backend has no CDP transport".to_owned())
+        }
+    }
+
+    #[cfg(feature = "wry-engine")]
+    fn create_child_webview(
+        &self,
+        request: &ncui_webview_child::ChildWebviewRequest,
+    ) -> Result<u64, String> {
+        let (Some(engine), Some(window)) = (&self.engine, self.window) else {
+            return Err("this window's engine is not running".to_owned());
+        };
+        let (reply, answers) = mpsc::channel();
+        engine
+            .send_event(HostEvent::CreateChild {
+                parent: window.to_string(),
+                request: Box::new(request.clone()),
+                reply,
+            })
+            .map_err(|error| error.to_string())?;
+        answers
+            .recv_timeout(ENGINE_REQUEST_TIMEOUT)
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(not(feature = "wry-engine"))]
+    fn create_child_webview(
+        &self,
+        _request: &ncui_webview_child::ChildWebviewRequest,
+    ) -> Result<u64, String> {
+        Err("this build has no window engine".to_owned())
+    }
+
+    #[cfg(feature = "wry-engine")]
+    fn set_child_webview_bounds(
+        &self,
+        child: u64,
+        request: &ncui_webview_child::ChildWebviewRequest,
+    ) -> Result<(), String> {
+        let (Some(engine), Some(_)) = (&self.engine, self.window) else {
+            return Err("this window's engine is not running".to_owned());
+        };
+        let (reply, answers) = mpsc::channel();
+        engine
+            .send_event(HostEvent::ChildBounds {
+                child,
+                request: Box::new(request.clone()),
+                reply,
+            })
+            .map_err(|error| error.to_string())?;
+        answers
+            .recv_timeout(ENGINE_REQUEST_TIMEOUT)
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(not(feature = "wry-engine"))]
+    fn set_child_webview_bounds(
+        &self,
+        _child: u64,
+        _request: &ncui_webview_child::ChildWebviewRequest,
+    ) -> Result<(), String> {
+        Err("this build has no window engine".to_owned())
+    }
+
+    #[cfg(feature = "wry-engine")]
+    fn close_child_webview(&self, child: u64) -> Result<(), String> {
+        let (Some(engine), Some(_)) = (&self.engine, self.window) else {
+            return Err("this window's engine is not running".to_owned());
+        };
+        let (reply, answers) = mpsc::channel();
+        engine
+            .send_event(HostEvent::CloseChild { child, reply })
+            .map_err(|error| error.to_string())?;
+        answers
+            .recv_timeout(ENGINE_REQUEST_TIMEOUT)
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(not(feature = "wry-engine"))]
+    fn close_child_webview(&self, _child: u64) -> Result<(), String> {
+        Err("this build has no window engine".to_owned())
+    }
+
     fn last_error(&self) -> Option<String> {
         self.last_error.lock().ok().and_then(|g| g.clone())
     }
@@ -1397,6 +2044,22 @@ impl WebViewBackend for WindowHost {
 
     fn window_theme(&self) -> Option<ncui_webview::Theme> {
         self.window_theme()
+    }
+
+    fn set_zoom(&self, factor: f64) -> bool {
+        self.set_zoom(factor)
+    }
+
+    fn open_devtools(&self) -> bool {
+        self.open_devtools()
+    }
+
+    fn close_devtools(&self) -> bool {
+        self.close_devtools()
+    }
+
+    fn is_devtools_open(&self) -> Option<bool> {
+        self.is_devtools_open()
     }
 
     fn evaluate_script(&self, script: &str) -> bool {
@@ -1462,7 +2125,7 @@ impl ncui_webview::HostFactory for WryHostFactory {
 
     fn spawn(
         &self,
-        _window: ncui_core::WindowId,
+        _window: WindowId,
         request: &ncui_webview::WindowRequest,
         seam: &Arc<HostSeam>,
     ) -> Option<Box<dyn WebViewBackend>> {
@@ -1550,6 +2213,7 @@ fn spawn_real(request: Option<ncui_webview::WindowRequest>, seam: Arc<HostSeam>)
             seam,
             engine: None,
             window: None,
+            cdp_user_data_dir: Mutex::new(None),
         };
     };
 
@@ -1577,6 +2241,7 @@ fn spawn_real(request: Option<ncui_webview::WindowRequest>, seam: Arc<HostSeam>)
             seam,
             engine: None,
             window: None,
+            cdp_user_data_dir: Mutex::new(None),
         };
     }
 
@@ -1604,6 +2269,7 @@ fn spawn_real(request: Option<ncui_webview::WindowRequest>, seam: Arc<HostSeam>)
         seam,
         engine: Some(engine.clone()),
         window,
+        cdp_user_data_dir: Mutex::new(None),
     }
 }
 
@@ -1660,11 +2326,28 @@ mod bridge_contract {
 // thread by design, because the runtime's own pump thread must not be the one blocking in
 // `run`. Until the host runs its loop on the main thread, these tests cannot pass on macOS,
 // and `docs/known-gaps.md` carries that as the macOS blocker rather than leaving a panic in
-// the suite. Everywhere else they run: Windows and Linux both accept the worker thread.
+// the suite. The tests that open a window also skip on a machine with no display server
+// (`require_display`, below): a headless Linux runner cannot create a GTK window, and the
+// display is a fact about the machine rather than a defect in the host.
 #[cfg(all(test, feature = "wry-engine", not(target_os = "macos")))]
 mod tests {
     use super::*;
     use ncui_webview::{CapabilityGrant, NavigationPolicy, Origin, Scheme};
+
+    /// Whether this machine can open a real window; `false` skips a test that opens one.
+    ///
+    /// Windows ships a window manager on every consumer build, so it is always yes. On
+    /// Linux the display server answers: no `DISPLAY` and no `WAYLAND_DISPLAY` means GTK
+    /// cannot initialise, which is what the runner's log said.
+    pub(super) fn require_display() -> bool {
+        if cfg!(target_os = "linux")
+            && std::env::var("DISPLAY").is_err()
+            && std::env::var("WAYLAND_DISPLAY").is_err()
+        {
+            return false;
+        }
+        true
+    }
 
     fn seam() -> Arc<HostSeam> {
         let policy = NavigationPolicy::new(&[Origin::new(Scheme::Https, "app.example.com", None)]);
@@ -1677,6 +2360,9 @@ mod tests {
 
     #[test]
     fn a_host_comes_up_and_reports_itself_alive() {
+        if !require_display() {
+            return;
+        }
         let host = WindowHost::new();
         assert!(
             host.is_alive(),
@@ -1724,6 +2410,9 @@ mod tests {
 
     #[test]
     fn a_message_the_page_posts_reaches_the_host() {
+        if !require_display() {
+            return;
+        }
         let host = WindowHost::new();
         assert!(
             host.is_alive(),
@@ -1770,6 +2459,9 @@ mod tests {
 
     #[test]
     fn a_window_with_an_icon_comes_up() {
+        if !require_display() {
+            return;
+        }
         // The icon is handed to the platform's own window-creation call — on Windows that sends
         // WM_SETICON to the new window — so a window that comes up has been given one.
         let request = ncui_webview::WindowRequest::new("https://app.example.com").with_icon(
@@ -1791,7 +2483,49 @@ mod tests {
     }
 
     #[test]
+    fn a_child_webview_embeds_into_a_live_parent_and_stays_live() {
+        if !require_display() {
+            return;
+        }
+        let host = WindowHost::new();
+        assert!(
+            host.is_alive(),
+            "the parent window did not come up: {:?}",
+            host.last_error()
+        );
+
+        // The backend-level child op: embeds a real child HWND inside the
+        // parent's frame (WebView2 composition on Windows).
+        let child_id = host
+            .create_child_webview(&ncui_webview_child::ChildWebviewRequest {
+                url: "https://app.example.com".to_owned(),
+                x: 10,
+                y: 10,
+                width: 320,
+                height: 240,
+            })
+            .expect("the child webview was embedded");
+
+        // The child is a live surface: moving it must succeed.
+        host.set_child_webview_bounds(
+            child_id,
+            &ncui_webview_child::ChildWebviewRequest {
+                url: "https://app.example.com".to_owned(),
+                x: 20,
+                y: 20,
+                width: 320,
+                height: 240,
+            },
+        )
+        .expect("the child webview was moved");
+        assert!(host.is_alive(), "the parent must stay alive");
+    }
+
+    #[test]
     fn a_second_window_opens_in_the_same_process() {
+        if !require_display() {
+            return;
+        }
         // The defect this test exists for: a window per event loop worked exactly once and
         // took the process down on the second. The engine owns one loop for the process,
         // so the second window is a message rather than a second loop.
@@ -1836,5 +2570,63 @@ mod tests {
 
         drop(first);
         drop(second);
+    }
+}
+
+#[cfg(all(test, feature = "wry-engine", not(target_os = "macos")))]
+mod cdp_live {
+    //! The live CDP exchange: ADR-017 Phase 2's recorded human verification, automated.
+    //! A real `WebView2` is created with remote debugging on, the transport reads the port
+    //! the engine published, and `Browser.getVersion` is sent to the endpoint and answered.
+
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn a_live_engine_answers_a_cdp_command_over_the_transport() {
+        if !tests::require_display() {
+            return;
+        }
+        let host = WindowHost::new();
+        assert!(
+            host.is_alive(),
+            "the window did not come up: {:?}",
+            host.last_error()
+        );
+
+        // The engine writes the port file while starting its browser, inside the
+        // `EBWebView` profile directory of the user-data directory the host named. It is
+        // polled rather than assumed, because "not yet" is a normal state during a cold
+        // start, which on a busy machine is tens of seconds.
+        let port_file = webview_data_root()
+            .join("EBWebView")
+            .join(crate::cdp::DEVTOOLS_PORT_FILE);
+        let deadline = Instant::now() + Duration::from_secs(90);
+        while !port_file.is_file() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(200));
+        }
+        assert!(
+            port_file.is_file(),
+            "the engine never published {} under {}",
+            crate::cdp::DEVTOOLS_PORT_FILE,
+            port_file.display()
+        );
+
+        let answer = host
+            .cdp_send(&serde_json::json!({
+                "id": 1,
+                "method": "Browser.getVersion",
+            }))
+            .expect("the live engine answered the CDP command");
+        let version = answer
+            .get("result")
+            .and_then(|result| result.get("product"))
+            .and_then(serde_json::Value::as_str)
+            .expect("Browser.getVersion answers with a product string");
+        assert!(
+            version.contains("Edg/") || version.contains("Chrome/"),
+            "the product string should name the engine: {version}"
+        );
+        // The product string is asserted below; nothing needs printing.
     }
 }

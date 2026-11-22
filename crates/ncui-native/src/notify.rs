@@ -42,6 +42,8 @@ use std::path::Path;
 // Used by the Windows arm only: a toast is given a unique tag per notification, and no other
 // platform here needs one.
 #[cfg(windows)]
+use std::sync::Mutex;
+#[cfg(windows)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::process::{ProcessError, run_command};
@@ -188,6 +190,11 @@ impl Notifier {
     /// Raises the notification on this platform.
     #[cfg(windows)]
     fn raise(&self, title: &str, body: &str) -> Result<(), NotificationError> {
+        // One raise at a time: the store the platform keeps for the identity is one
+        // database, and two raises in flight reach it together.
+        let _raise_lock = TOAST_RAISE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // The script is a constant of this program except for the identity, which is checked to
         // be an identity before it is interpolated: the *payload* arrives on standard input, so
         // no part of what a page wrote is ever parsed as PowerShell.
@@ -198,34 +205,65 @@ impl Notifier {
             tool: "powershell",
             reason: error.to_string(),
         })?;
-        let script = WINDOWS_SCRIPT
-            .replace(APP_ID_PLACEHOLDER, app_id)
-            .replace(TAG_PLACEHOLDER, &next_toast_tag());
-        let outcome = run_command(
-            Path::new("powershell"),
-            "powershell",
-            &[
-                "-NoProfile".to_owned(),
-                "-NonInteractive".to_owned(),
-                "-Command".to_owned(),
-                script,
-            ],
-            Some(&format!("{title}\n{body}")),
-            NOTIFICATION_TIMEOUT,
-            MAX_BODY_BYTES,
-        )
-        .map_err(|error| tool_error("powershell", &error))?;
-        if outcome.status != 0 || !outcome.stdout.contains(SHOWN_MARKER) {
-            return Err(NotificationError::Failed {
-                tool: "powershell",
-                reason: first_line(&outcome.stderr, &outcome.stdout),
-            });
+        // A tag from this process can never repeat — each carries the process's own
+        // sequence — yet the platform has been observed to answer a provably-unique tag
+        // with the uniqueness constraint anyway when notifications follow one another
+        // quickly. The tag is regenerated for every attempt, because the question is
+        // sound and only the key was refused; any other failure is returned as the
+        // failure it is.
+        for attempt in 0..3u64 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(250 * attempt));
+            }
+            let script = WINDOWS_SCRIPT
+                .replace(APP_ID_PLACEHOLDER, app_id)
+                .replace(TAG_PLACEHOLDER, &next_toast_tag());
+            let outcome = run_command(
+                Path::new("powershell"),
+                "powershell",
+                &[
+                    "-NoProfile".to_owned(),
+                    "-NonInteractive".to_owned(),
+                    "-Command".to_owned(),
+                    script,
+                ],
+                Some(&format!("{title}\n{body}")),
+                NOTIFICATION_TIMEOUT,
+                MAX_BODY_BYTES,
+                None,
+            );
+            let reason = match outcome {
+                Ok(outcome) if outcome.status != 0 || !outcome.stdout.contains(SHOWN_MARKER) => {
+                    first_line(&outcome.stderr, &outcome.stdout)
+                }
+                Ok(_) => return Ok(()),
+                Err(error) => match tool_error("powershell", &error) {
+                    NotificationError::Failed { reason, .. } => reason,
+                    other => return Err(other),
+                },
+            };
+            if !reason.contains(UNIQUE_CONSTRAINT) {
+                return Err(NotificationError::Failed {
+                    tool: "powershell",
+                    reason,
+                });
+            }
         }
-        Ok(())
+        Err(NotificationError::Failed {
+            tool: "powershell",
+            reason: "the platform refused three distinct tags with the uniqueness \
+                     constraint"
+                .to_owned(),
+        })
     }
 
     /// Raises the notification on macOS.
     #[cfg(target_os = "macos")]
+    #[allow(
+        clippy::unused_self,
+        reason = "`osascript` takes no identity, so this arm uses none of the notifier's \
+                  state; the shared signature keeps `show` platform-agnostic"
+    )]
     fn raise(&self, title: &str, body: &str) -> Result<(), NotificationError> {
         let script = format!(
             "display notification {} with title {}",
@@ -239,6 +277,7 @@ impl Notifier {
             None,
             NOTIFICATION_TIMEOUT,
             MAX_BODY_BYTES,
+            None,
         )
         .map_err(|error| tool_error("osascript", &error))?;
         if outcome.status != 0 {
@@ -260,6 +299,7 @@ impl Notifier {
             None,
             NOTIFICATION_TIMEOUT,
             MAX_BODY_BYTES,
+            None,
         )
         .map_err(|error| tool_error("notify-send", &error))?;
         if outcome.status != 0 {
@@ -318,16 +358,64 @@ const TAG_PLACEHOLDER: &str = "{TAG}";
 /// Windows keeps an application's notifications in a store keyed by tag, and raising a second
 /// toast under a tag already in that store is a constraint failure rather than a replacement —
 /// which is what the first version of this module did, and what the second real-notification
-/// test caught. A tag that names the process and the count is distinct for every notification
-/// this process raises and cannot collide with another process's.
+/// test caught. The store outlives the process and process identifiers are reused, so a tag of
+/// process-and-count can collide with a toast a previous run left behind — and did, on a runner
+/// whose notification store persisted between jobs. A wall-clock component cannot: another run
+/// cannot have started in the same nanosecond.
 #[cfg(windows)]
 static TOAST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// Serializes toast raises.
+///
+/// The platform keeps one notification store per identity, and two notifications raised at
+/// the same moment reach the same database; one raise at a time keeps the capability's
+/// callers from racing each other into it.
+#[cfg(windows)]
+static TOAST_RAISE: Mutex<()> = Mutex::new(());
+
+/// The HRESULT the platform's store answers with when it believes a tag is already taken.
+#[cfg(windows)]
+const UNIQUE_CONSTRAINT: &str = "0x87AF0813";
+
 /// The tag the next toast is raised under.
+///
+/// A random component joins the clock: the toast tag is unique per *user account* per
+/// identity, and the runner's PowerShell identity is shared by every job on the machine —
+/// so a second job that starts inside the same nanosecond as this one's toast would
+/// collide on the clock alone. A random 64-bit component makes that collision one the
+/// platform's constraint check will essentially never see.
 #[cfg(windows)]
 fn next_toast_tag() -> String {
     let sequence = TOAST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    format!("ncui-{}-{sequence}", std::process::id())
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos())
+        .unwrap_or_default();
+    format!("ncui-{nanos:x}-{sequence:x}-{:x}", random_u64())
+}
+
+/// A random 64-bit value from the platform's own generator, or the clock again when it
+/// cannot be reached.
+#[cfg(windows)]
+fn random_u64() -> u64 {
+    match ncui_security::SecretToken::from_os_entropy(8) {
+        Ok(secret) => {
+            let bytes = secret.expose_secret();
+            let mut value = [0u8; 8];
+            value.copy_from_slice(&bytes[..8]);
+            u64::from_le_bytes(value)
+        }
+        Err(_) => nanos(),
+    }
+}
+
+/// The wall clock in nanoseconds, for the fallback component.
+#[cfg(windows)]
+fn nanos() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos() as u64)
+        .unwrap_or_default()
 }
 
 /// What the Windows script prints once the platform has accepted the notification.

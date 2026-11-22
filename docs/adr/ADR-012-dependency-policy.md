@@ -233,6 +233,41 @@ different lineage would be a second opinion about that loop's lifetime. Its lice
 `MIT OR Apache-2.0`, both of which are on the allow-list in `deny.toml`, and the tree it adds is
 measured rather than asserted when the feature is enabled.
 
+## The eighth exception: `rfd`
+
+`ncui-native` depends on `rfd`, and nothing else in the workspace does.
+
+The reason is specific. A native file, save or folder dialog is the platform's own picker: the
+thing that puts `IFileOpenDialog` in front of a person on Windows, an `NSOpenPanel` on macOS and a
+GTK file chooser on Linux, walks the filesystem under its own rules, and returns the path the
+person chose. `std` exposes no way to ask a platform for one. Those pickers are all foreign
+functions, and `unsafe_code = "forbid"` rejects calling them. The alternatives were all worse than
+adding a dependency:
+
+* leave the dialog absent — which is what the code did before this decision, and is a capability
+  Electron's `dialog` module and Tauri's `dialog` plugin both have;
+* hand-roll the FFI behind `#[allow(unsafe_code)]` — rejected for the same reason every earlier
+  exception rejected it. A COM dialog on Windows in particular is a lifetime minefield: the
+  `IFileOpenDialog` hands back COM pointers the caller must release, and getting that wrong in a
+  process that shows one to a person is exactly the class of bug the crate-wide ban exists to
+  prevent.
+
+`rfd` performs the FFI internally, so this project's own code remains free of `unsafe` and the ban
+holds where it matters. It is confined to `crates/ncui-native` for one purpose — showing a picker
+and returning what the person chose — and it is behind the `dialogs` feature, off by default: a
+modal dialog blocks on a person, which a headless machine does not have, so gating it keeps the
+default build and the Linux gate exactly as they are. The permission rules, the request vocabulary
+and the validation of the path that comes back are plain Rust in `crates/ncui-native/src/dialog.rs`
+and are tested without the platform binding; the feature supplies only the thin adapter that shows
+the real picker.
+
+Its licence is `MIT`, which is on the allow-list in `deny.toml`. It is a synchronous, blocking API
+by design — a dialog is a question asked of a person, and the answer comes back through the return
+value — so it is called from the command handler that already runs off the page's hot path, the
+same place the notification and clipboard calls run. The one step a test cannot drive is the single
+real modal open, because a test has no person; that is recorded in `docs/known-gaps.md` as a
+one-time human verification rather than claimed as automated.
+
 ## Consequences
 - Some conveniences are reimplemented rather than imported, which is a real cost paid for a
   smaller and more auditable attack surface. This is a deliberate trade, not an oversight.

@@ -81,6 +81,20 @@ pub enum Command {
         /// somebody asked for, and dropping the link would leave the user looking at an
         /// application that does not know why it opened.
         url: Option<String>,
+        /// Pin the loopback asset server to a specific port.
+        ///
+        /// When set, the asset server binds to `127.0.0.1:<port>` instead of an
+        /// ephemeral port, giving the page a stable origin across restarts.
+        port: Option<u16>,
+    },
+    /// Scaffold a new application directory: a manifest, an entry page and a script.
+    ///
+    /// This is the first-run-to-window command: `ncui new my-app` writes the smallest
+    /// application that opens
+    /// from something that runs rather than from a blank directory and a page of docs.
+    New {
+        /// The directory to create and scaffold into. It must not already hold an application.
+        directory: String,
     },
     /// Build a shippable bundle from an application directory.
     Build {
@@ -236,6 +250,10 @@ pub const SUBCOMMANDS: &[(&str, &str)] = &[
         "Serve the agent API on a loopback socket (--role <name>)",
     ),
     (
+        "new",
+        "Scaffold a new application directory: manifest, entry page and script",
+    ),
+    (
         "run",
         "Run an application directory: serve its assets and open its window",
     ),
@@ -282,6 +300,8 @@ struct Flags {
     registry: Option<Value>,
     /// Where applications are installed, when somewhere else was named.
     root: Option<String>,
+    /// Pin the loopback asset server to a specific port.
+    port: Option<u16>,
     /// Where a bundle is written, when somewhere else was named.
     out: Option<String>,
     /// The runtime binary to bundle, when one was named.
@@ -322,6 +342,13 @@ fn parse_flags(rest: &[&String], subcommand: &str) -> Result<Flags, String> {
         match flag {
             "--deep" | "-d" => flags.deep = true,
             "--watch" => flags.watch = true,
+            "--port" => {
+                let value = take_value(rest, index, "--port", "a port number")?;
+                let port = value
+                    .parse::<u16>()
+                    .map_err(|_| "`--port` needs a number from 1 to 65535".to_owned())?;
+                flags.port = Some(port);
+            }
             "--root" => {
                 index += 1;
                 let value = rest
@@ -513,14 +540,19 @@ where
         check,
         installer,
         from,
+        port,
     } = parse_flags(&rest, subcommand)?;
 
     match subcommand.as_str() {
         "serve" => Ok(Command::Serve { role, registry }),
+        "new" => Ok(Command::New {
+            directory: positional.unwrap_or_default(),
+        }),
         "run" => Ok(Command::Run {
             directory,
             watch,
             url,
+            port,
         }),
         "build" => Ok(Command::Build {
             directory: positional.unwrap_or_default(),
@@ -775,6 +807,7 @@ mod tests {
                 directory: "examples/app".to_owned(),
                 watch: false,
                 url: None,
+                port: None,
             }
         );
         assert_eq!(
@@ -783,6 +816,7 @@ mod tests {
                 directory: "examples/app".to_owned(),
                 watch: true,
                 url: None,
+                port: None,
             }
         );
         assert_eq!(
@@ -791,6 +825,7 @@ mod tests {
                 directory: "examples/app".to_owned(),
                 watch: true,
                 url: None,
+                port: None,
             },
             "a flag before the directory must not be mistaken for the directory"
         );
@@ -800,6 +835,7 @@ mod tests {
                 directory: "examples/app".to_owned(),
                 watch: false,
                 url: Some("ncui-counter://open/notes".to_owned()),
+                port: None,
             },
             "the link a registered scheme passes must reach the command rather than be refused"
         );

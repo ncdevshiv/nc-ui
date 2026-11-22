@@ -26,6 +26,31 @@ use std::time::{Duration, Instant};
 use ncui_core::{CapabilitySet, Limits};
 use ncui_runtime::application::Application;
 
+/// Whether this machine can open a real window for these tests.
+///
+/// A headless Linux runner has no X11/Wayland server to connect to, and `AppKit` (macOS)
+/// requires the event loop to run on the main thread, which a test harness does not own
+/// (ADR-018). Both are facts about the machine rather than failures of the runtime, so the
+/// tests skip instead of panicking inside the platform's event loop — the same decision the
+/// GPU surface probe makes.
+fn real_window_available() -> bool {
+    match std::env::consts::OS {
+        "windows" => true,
+        "macos" => false,
+        _ => std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok(),
+    }
+}
+
+/// Skips the test when this machine cannot open a real window.
+macro_rules! require_real_window {
+    () => {
+        if !real_window_available() {
+            eprintln!("skipping: this machine cannot open a real window");
+            return;
+        }
+    };
+}
+
 /// A directory that is removed when the test ends.
 struct Scratch {
     path: PathBuf,
@@ -131,6 +156,7 @@ fn manifest_with_icon(icon: &str) -> String {
 
 #[test]
 fn an_application_whose_manifest_names_an_icon_opens_with_it() {
+    require_real_window!();
     // The whole path, on a real platform: the manifest names a file, the file is read and decoded
     // into pixels, and the pixels are handed to the platform's own window-creation call.
     let scratch = Scratch::application(&manifest_with_icon("icon.bmp"), PAGE);
@@ -143,6 +169,7 @@ fn an_application_whose_manifest_names_an_icon_opens_with_it() {
 
 #[test]
 fn an_icon_that_cannot_be_read_is_refused_by_name() {
+    require_real_window!();
     // A manifest that names an icon that is not there is wrong, and the person who can fix it is
     // the one reading the error — so the error names the file they named.
     let scratch = Scratch::application(&manifest_with_icon("missing.bmp"), PAGE);
@@ -155,6 +182,7 @@ fn an_icon_that_cannot_be_read_is_refused_by_name() {
 
 #[test]
 fn an_icon_in_a_format_this_runtime_cannot_read_is_refused_by_name() {
+    require_real_window!();
     let scratch = Scratch::application(&manifest_with_icon("icon.bmp"), PAGE);
     std::fs::write(scratch.path().join("icon.bmp"), b"not a bitmap").expect("the file is written");
     let error = Application::launch(scratch.path(), Limits::default())
@@ -179,6 +207,7 @@ fn manifest_with_shortcut(accelerator: &str) -> String {
 
 #[test]
 fn an_application_holds_the_shortcut_its_manifest_declares() {
+    require_real_window!();
     // The whole path, on a real platform: the manifest names a key, the platform is asked for it,
     // and the application holds it while it runs.
     let scratch = Scratch::application(&manifest_with_shortcut("Ctrl+Alt+F13"), PAGE);
@@ -208,6 +237,7 @@ fn an_application_holds_the_shortcut_its_manifest_declares() {
 
 #[test]
 fn a_shortcut_the_vocabulary_does_not_know_is_refused_at_launch() {
+    require_real_window!();
     // The accelerator's meaning is checked where it is used, because the vocabulary that reads it
     // lives with the platform binding rather than with the manifest reader.
     #[cfg(feature = "global-shortcuts")]
@@ -241,6 +271,7 @@ fn manifest_with_tray(icon: &str) -> String {
 
 #[test]
 fn an_application_shows_the_tray_icon_its_manifest_declares() {
+    require_real_window!();
     // The whole path, on a real platform: the manifest names an image, the image is decoded, and
     // the platform is asked for a tray icon. A platform that refused it would refuse the launch —
     // an application whose tray silently never appears is worse than one that says so.
@@ -267,6 +298,7 @@ fn an_application_shows_the_tray_icon_its_manifest_declares() {
 
 #[test]
 fn a_tray_icon_that_cannot_be_read_is_refused_by_name() {
+    require_real_window!();
     #[cfg(feature = "tray-icon")]
     {
         let scratch = Scratch::application(&manifest_with_tray("missing.bmp"), PAGE);
@@ -289,6 +321,7 @@ fn a_tray_icon_that_cannot_be_read_is_refused_by_name() {
 
 #[test]
 fn the_window_reports_the_platforms_theme() {
+    require_real_window!();
     // The theme is the machine's setting for every window on it, so the answer has to come from the
     // platform: a window whose engine cannot ask reports nothing, and a real window on a real
     // platform reports one of the two. Which one it is belongs to the machine this runs on.
@@ -311,6 +344,7 @@ fn the_window_reports_the_platforms_theme() {
 
 #[test]
 fn a_real_window_can_be_hidden_and_shown_again() {
+    require_real_window!();
     // Visibility is the platform's answer, the same way the theme and the geometry are: the window is
     // asked to hide and then asked whether it is hidden, so what comes back is what the platform did
     // rather than what the runtime asked for. Hiding is not closing — the page stays alive — which is
@@ -338,6 +372,7 @@ fn a_real_window_can_be_hidden_and_shown_again() {
 
 #[test]
 fn a_real_window_reports_the_frame_its_shape_asked_for() {
+    require_real_window!();
     // `ncui.window.shape` changes a window's frame and `ncui.window.state` reads it back. The two
     // agree because the read comes from the platform rather than from the runtime's memory of the
     // shape: a page that made its window float and then asked whether it floats has to be told the
@@ -393,6 +428,7 @@ const EVENT_PAGE: &str = r#"<!doctype html>
 
 #[test]
 fn a_page_hears_its_own_window_resized() {
+    require_real_window!();
     // The window is the page's own frame, and a layout built for the old size is a layout the user has
     // already left. The page is told through the same event channel the theme uses, and it reports
     // what it received through a native command — so the assertion is on what the page really heard
@@ -400,8 +436,12 @@ fn a_page_hears_its_own_window_resized() {
     let scratch = Scratch::application(MANIFEST, EVENT_PAGE);
     let recorded: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
     let recorder = Arc::clone(&recorded);
-    let mut application =
-        Application::launch_with(scratch.path(), Limits::default(), None, move |runtime| {
+    let mut application = Application::launch_with(
+        scratch.path(),
+        Limits::default(),
+        None,
+        None,
+        move |runtime| {
             let _registration = runtime
                 .register_page_command(
                     "record",
@@ -423,8 +463,9 @@ fn a_page_hears_its_own_window_resized() {
                     .operation("test::launch")
                 })?;
             Ok(())
-        })
-        .expect("the application launches");
+        },
+    )
+    .expect("the application launches");
 
     let heard = |want: &str| {
         recorded
@@ -486,6 +527,7 @@ fn a_page_hears_its_own_window_resized() {
 
 #[test]
 fn an_application_serves_its_page_and_the_page_calls_native_code() {
+    require_real_window!();
     let scratch = Scratch::application(MANIFEST, PAGE);
 
     // What the native command recorded. The command is the observation point: the page
@@ -494,7 +536,7 @@ fn an_application_serves_its_page_and_the_page_calls_native_code() {
     let recorder = Arc::clone(&recorded);
 
     let mut application =
-        Application::launch_with(scratch.path(), Limits::default(), None, |runtime| {
+        Application::launch_with(scratch.path(), Limits::default(), None, None, |runtime| {
             let _registration = runtime
                 .register_page_command(
                     "record",
@@ -631,6 +673,7 @@ const READ_PAGE: &str = r#"<!doctype html>
 
 #[test]
 fn an_application_with_the_read_capability_reads_a_file_from_the_page() {
+    require_real_window!();
     let scratch = Scratch::application(READ_MANIFEST, READ_PAGE);
     // The file lives in the application directory, not in the served assets: the page can
     // read it because the manifest grants `filesystem.read`, not because it is public.
@@ -640,7 +683,7 @@ fn an_application_with_the_read_capability_reads_a_file_from_the_page() {
     let recorded: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
     let recorder = Arc::clone(&recorded);
     let mut application =
-        Application::launch_with(scratch.path(), Limits::default(), None, |runtime| {
+        Application::launch_with(scratch.path(), Limits::default(), None, None, |runtime| {
             let _registration = runtime
                 .register_page_command(
                     "record",
@@ -738,7 +781,7 @@ fn launch_with_recorder(scratch: &Scratch) -> (Application, Arc<Mutex<Vec<serde_
     let recorded: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
     let recorder = Arc::clone(&recorded);
     let application =
-        Application::launch_with(scratch.path(), Limits::default(), None, |runtime| {
+        Application::launch_with(scratch.path(), Limits::default(), None, None, |runtime| {
             let _registration = runtime
                 .register_page_command(
                     "record",
@@ -791,6 +834,7 @@ fn pump_until(
 
 #[test]
 fn a_page_that_states_consent_runs_a_program_and_receives_its_output() {
+    require_real_window!();
     let scratch = Scratch::application(SPAWN_MANIFEST, &spawn_page(true));
     let (mut application, recorded) = launch_with_recorder(&scratch);
 
@@ -812,6 +856,7 @@ fn a_page_that_states_consent_runs_a_program_and_receives_its_output() {
 
 #[test]
 fn a_page_that_does_not_state_consent_is_refused_before_the_program_starts() {
+    require_real_window!();
     let scratch = Scratch::application(SPAWN_MANIFEST, &spawn_page(false));
     let (mut application, recorded) = launch_with_recorder(&scratch);
 
@@ -858,6 +903,7 @@ const RELOAD_PAGE: &str = r#"<!doctype html>
 
 #[test]
 fn a_file_change_reloads_the_page_in_the_window() {
+    require_real_window!();
     let scratch = Scratch::application(RELOAD_MANIFEST, RELOAD_PAGE);
     let (mut application, recorded) = launch_with_recorder(&scratch);
     application.watch().expect("the application can be watched");
@@ -937,6 +983,7 @@ const WINDOW_PAGE: &str = r#"<!doctype html>
 
 #[test]
 fn a_page_opens_a_second_window_and_closes_its_own() {
+    require_real_window!();
     let scratch = Scratch::application(WINDOW_MANIFEST, WINDOW_PAGE);
     let (mut application, recorded) = launch_with_recorder(&scratch);
     let caller = application.window();
@@ -1009,6 +1056,7 @@ const PRESENTATION_PAGE: &str = r#"<!doctype html>
 
 #[test]
 fn a_page_changes_the_presentation_of_the_window_it_is_in() {
+    require_real_window!();
     // The whole path on a real platform: the page asks, the seam injects the caller's own window,
     // the runtime asks the engine, the engine asks the platform, and the answer the page receives
     // is what the platform reported — not what the page asked for.
@@ -1063,6 +1111,7 @@ const RESHAPE_PAGE: &str = r#"<!doctype html>
 
 #[test]
 fn a_page_reshapes_the_window_it_is_in() {
+    require_real_window!();
     // The whole path on a real platform: the page asks, the seam injects its own window, the engine
     // asks the platform to resize, and the size the runtime then reports is the platform's own
     // answer rather than the number the page sent.
@@ -1124,6 +1173,7 @@ const CLIPBOARD_PAGE: &str = r#"<!doctype html>
 
 #[test]
 fn a_page_writes_and_reads_the_real_clipboard() {
+    require_real_window!();
     let scratch = Scratch::application(CLIPBOARD_MANIFEST, CLIPBOARD_PAGE);
     let (mut application, recorded) = launch_with_recorder(&scratch);
 
@@ -1178,6 +1228,7 @@ impl Drop for InstanceState {
 
 #[test]
 fn a_second_launch_reaches_the_running_application_instead_of_opening_a_twin() {
+    require_real_window!();
     // The whole point of one instance per application: a second launch hands its arguments to
     // the instance that is already serving, and that instance reloads the page it has. Nothing
     // here is simulated — the hand-off crosses a real loopback socket, and the reload is posted
@@ -1256,6 +1307,7 @@ window.ncui.invoke('app.link', {}).then(function (answer) {
 
 #[test]
 fn a_link_that_arrives_by_hand_off_becomes_the_link_the_page_reads() {
+    require_real_window!();
     // A deep link that arrives while the application is running: the second launch hands its
     // argument vector over, the instance reloads, and the page asks what it was opened with. The
     // answer has to be the *new* link — an instance that kept answering the first one would be
@@ -1325,6 +1377,7 @@ fn a_link_that_arrives_by_hand_off_becomes_the_link_the_page_reads() {
 
 #[test]
 fn a_page_reads_the_link_the_application_was_opened_with() {
+    require_real_window!();
     // A deep link reaches the process as an argument. The page is the application the link was
     // addressed to, so it can ask what it was — through the bridge, on the page's own initiative,
     // which is what makes it work whatever the page does with the answer.
@@ -1343,6 +1396,7 @@ fn a_page_reads_the_link_the_application_was_opened_with() {
 
 #[test]
 fn a_page_opened_without_a_link_is_told_so() {
+    require_real_window!();
     // The absence is an answer, not a failure: a page that has to distinguish "no link" from
     // "the runtime could not say" would otherwise be guessing.
     let scratch = Scratch::application(MANIFEST, LINK_PAGE);
@@ -1370,6 +1424,7 @@ fn write_geometry(path: &std::path::Path, x: i32, y: i32, width: u32, height: u3
 
 #[test]
 fn a_window_is_put_back_where_it_was_left() {
+    require_real_window!();
     // The behaviour every desktop application is expected to have: the user moves and resizes a
     // window, closes it, and the next run puts it back. The state file is what the *last* run
     // wrote, so this test writes one as that run would have and asserts the window is created
@@ -1383,6 +1438,7 @@ fn a_window_is_put_back_where_it_was_left() {
         scratch.path(),
         Limits::default(),
         Some(state_file.clone()),
+        None,
         |_| Ok(()),
     )
     .expect("the application launches");
@@ -1415,17 +1471,21 @@ fn a_window_is_put_back_where_it_was_left() {
 
 #[test]
 fn a_window_with_nothing_remembered_uses_the_manifest() {
+    require_real_window!();
     // A first run has no state, and that is not an error: the manifest's size is what a first run
     // gets, and the platform decides where the window goes.
     let scratch = Scratch::application(MANIFEST, PAGE);
     let state = InstanceState::new();
     let state_file = state.path.join("nothing-here.json");
 
-    let mut application =
-        Application::launch_with(scratch.path(), Limits::default(), Some(state_file), |_| {
-            Ok(())
-        })
-        .expect("the application launches");
+    let mut application = Application::launch_with(
+        scratch.path(),
+        Limits::default(),
+        Some(state_file),
+        None,
+        |_| Ok(()),
+    )
+    .expect("the application launches");
     let summary = application
         .runtime()
         .windows
@@ -1443,6 +1503,7 @@ fn a_window_with_nothing_remembered_uses_the_manifest() {
 
 #[test]
 fn a_remembered_geometry_no_window_could_have_is_ignored() {
+    require_real_window!();
     // The state file is a file an application wrote, so it is input: a size below the minimum is
     // ignored rather than handed to the platform, because a window asked for a size it cannot
     // have is a window that does not open.
@@ -1451,11 +1512,14 @@ fn a_remembered_geometry_no_window_could_have_is_ignored() {
     let state_file = state.path.join("window.json");
     write_geometry(&state_file, 10, 10, 5, 5);
 
-    let mut application =
-        Application::launch_with(scratch.path(), Limits::default(), Some(state_file), |_| {
-            Ok(())
-        })
-        .expect("the application launches");
+    let mut application = Application::launch_with(
+        scratch.path(),
+        Limits::default(),
+        Some(state_file),
+        None,
+        |_| Ok(()),
+    )
+    .expect("the application launches");
     let summary = application
         .runtime()
         .windows
@@ -1513,6 +1577,7 @@ fn launch_with_state(
         scratch.path(),
         Limits::default(),
         Some(state_file),
+        None,
         |runtime| {
             let _registration = runtime
                 .register_page_command(
@@ -1543,6 +1608,7 @@ fn launch_with_state(
 
 #[test]
 fn a_page_preference_survives_a_restart() {
+    require_real_window!();
     // The claim the capability makes, end to end: the page stores a preference through the
     // bridge, and the *next* run of the application reads it back. Nothing is simulated — the
     // first run writes a real file and the second run reads it.
@@ -1575,6 +1641,7 @@ fn a_page_preference_survives_a_restart() {
 
 #[test]
 fn a_page_cannot_store_what_the_store_will_not_hold() {
+    require_real_window!();
     // The bounds are the store's, and they reach the page as refusals rather than as silent
     // truncation: a preference that was quietly cut is worse than one that was refused.
     let scratch = Scratch::application(MANIFEST, REFUSAL_PAGE);
@@ -1608,6 +1675,7 @@ fn a_page_cannot_store_what_the_store_will_not_hold() {
 
 #[test]
 fn a_remembered_place_on_a_display_that_is_gone_lands_on_one_that_exists() {
+    require_real_window!();
     // A geometry stored while a second display was attached puts the window where that display
     // used to be: off-screen, and unreachable for a user who cannot drag what they cannot see.
     // The window is moved onto a display that exists, and keeps the size the user chose.
@@ -1616,11 +1684,14 @@ fn a_remembered_place_on_a_display_that_is_gone_lands_on_one_that_exists() {
     let state_file = state.path.join("window.json");
     write_geometry(&state_file, 100_000, 100_000, 640, 480);
 
-    let mut application =
-        Application::launch_with(scratch.path(), Limits::default(), Some(state_file), |_| {
-            Ok(())
-        })
-        .expect("the application launches");
+    let mut application = Application::launch_with(
+        scratch.path(),
+        Limits::default(),
+        Some(state_file),
+        None,
+        |_| Ok(()),
+    )
+    .expect("the application launches");
     let summary = application
         .runtime()
         .windows
@@ -1674,6 +1745,7 @@ if (!localStorage.getItem('ncui-placed-test')) {
 
 #[test]
 fn a_page_places_a_window_it_creates() {
+    require_real_window!();
     // What the page could not do is place a window it opens. A second window is the page's to
     // arrange, and a page that cannot say *where* has to open it wherever the platform puts it
     // and then move it — a visible jump the user did not ask for.
@@ -1711,6 +1783,7 @@ fn a_page_places_a_window_it_creates() {
 
 #[test]
 fn a_page_asks_for_the_window_options_it_wants() {
+    require_real_window!();
     // The options a page can ask for are the ones a window can be: floating above other windows,
     // without a frame, fixed in size, with a floor it cannot be dragged below. Each is a property
     // the platform applies when the window is created, so the window the page gets is the window
@@ -1796,6 +1869,7 @@ const OPTIONS_MANIFEST: &str = r#"{
 
 #[test]
 fn an_application_asks_for_its_own_window_options_in_its_manifest() {
+    require_real_window!();
     // The manifest is where an application says how its window should look, so the options a page
     // can ask for are the options an application can ask for. A manifest that named them and got
     // a window without them would be a manifest nobody could rely on.
@@ -1825,6 +1899,7 @@ fn an_application_asks_for_its_own_window_options_in_its_manifest() {
 
 #[test]
 fn a_floor_added_to_a_manifest_does_not_refuse_a_window_the_user_shrank() {
+    require_real_window!();
     // The edge this closes: the user shrank the window before the manifest had a floor, and the
     // remembered size is now below it. The window is raised to the floor rather than refused —
     // a preference that makes an application unlaunchable is worse than a preference that is
@@ -1834,11 +1909,14 @@ fn a_floor_added_to_a_manifest_does_not_refuse_a_window_the_user_shrank() {
     let state_file = state.path.join("window.json");
     write_geometry(&state_file, 40, 50, 250, 220);
 
-    let mut application =
-        Application::launch_with(scratch.path(), Limits::default(), Some(state_file), |_| {
-            Ok(())
-        })
-        .expect("the application launches rather than refusing");
+    let mut application = Application::launch_with(
+        scratch.path(),
+        Limits::default(),
+        Some(state_file),
+        None,
+        |_| Ok(()),
+    )
+    .expect("the application launches rather than refusing");
     let summary = application
         .runtime()
         .windows

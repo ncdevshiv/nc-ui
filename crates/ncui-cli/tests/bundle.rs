@@ -160,6 +160,55 @@ fn a_bundle_holds_the_runtime_the_application_and_a_manifest_of_itself() {
 }
 
 #[test]
+fn a_bundle_carries_the_built_output_the_manifest_names_not_the_raw_source() {
+    // An application that builds its assets points `assets` at its built-output directory, and the
+    // bundler serves what that field names. Raw source lives beside it in the tree but is not an
+    // asset, and a bundle that carried it would ship source a page never fetches and bloat the
+    // bundle with files that do nothing. So the built directory is bundled and the source directory
+    // is left out — the manifest's `assets` field is the whole story of what gets served.
+    let scratch = Scratch::new("built");
+    std::fs::write(
+        scratch.path().join("ncui.app.json"),
+        r#"{
+            "name": "built",
+            "version": "1.0.0",
+            "entry": "index.html",
+            "assets": "dist"
+        }"#,
+    )
+    .expect("the manifest");
+    // The built output the manifest names.
+    std::fs::create_dir_all(scratch.path().join("dist")).expect("the built directory");
+    std::fs::write(
+        scratch.path().join("dist").join("index.html"),
+        "<p>the built page</p>",
+    )
+    .expect("the built page");
+    // The raw source beside it, which a bundler would compile into `dist` and which must not ship.
+    std::fs::create_dir_all(scratch.path().join("src")).expect("the source directory");
+    std::fs::write(
+        scratch.path().join("src").join("app.ts"),
+        "const count: number = 0;",
+    )
+    .expect("the raw source");
+
+    let out = Scratch::new("built-out");
+    let bundle = bundle::build(scratch.path(), &scratch.binary(), out.path()).expect("it bundles");
+    let paths: Vec<&str> = bundle.files.iter().map(|file| file.path.as_str()).collect();
+
+    assert!(
+        paths.contains(&"dist/index.html"),
+        "the built output the manifest names is bundled: {paths:?}"
+    );
+    assert!(
+        !paths.iter().any(|path| path.starts_with("src/")),
+        "raw source is not an asset and must not ship: {paths:?}"
+    );
+    // The served entry is the built page, not the source.
+    assert_eq!(bundle.entry, "index.html");
+}
+
+#[test]
 fn two_builds_of_one_tree_are_byte_identical() {
     // This is what makes the digest manifest worth reading: a difference means the tree differed,
     // so a timestamp or a filesystem ordering in the bundle would make it worthless.

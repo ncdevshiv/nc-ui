@@ -25,6 +25,15 @@ use ncui_state::store::Store;
 
 const MAX_FRAME: u32 = 16 * 1024 * 1024;
 
+/// Developer feedback-loop scenarios, measured as one-shot wall-clock costs.
+///
+/// A separate module because these shell out to `cargo` and take seconds-to-minutes each,
+/// so they cannot be looped nine times the way a micro-operation is.
+mod feedback;
+
+/// Component-ABI scenarios: the cost of deciding whether a component may load.
+mod abi;
+
 /// How much a scenario's measured p99 may grow before the comparison calls it a
 /// difference worth reporting.
 ///
@@ -360,10 +369,10 @@ fn record(scenarios: &mut Vec<Repeated>) {
     application(scenarios);
     native(scenarios);
     a11y(scenarios);
-    abi(scenarios);
+    abi::record(scenarios);
     glyphs(scenarios);
+    feedback::record(scenarios);
 }
-
 /// Scenarios for the text path a GPU island draws its rows with.
 ///
 /// The workload is a real line of type: the machine's own font, shaped and rasterised at a size a
@@ -1317,6 +1326,104 @@ fn application(scenarios: &mut Vec<Repeated>) {
         )
         .unwrap_or_else(|e| fail(&e)),
     );
+
+    application_assets(scenarios);
+}
+
+/// Scenarios for the asset server's HTTP paths, measured over a real socket.
+///
+/// A page's own assets are served over loopback HTTP, and the reload loop re-fetches them.
+/// Both the cold fetch (200, body and all) and the warm one (304, validators only) are
+/// measured against a real server on a real socket, because the interesting cost is the
+/// round trip a page actually pays — not a validator computed in isolation. The two together
+/// are what a `--watch` reload costs: the first request after a change is a 200, every
+/// request for an unchanged file is a 304.
+fn application_assets(scenarios: &mut Vec<Repeated>) {
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpStream;
+
+    let served_root =
+        std::env::temp_dir().join(format!("ncui-bench-assets-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&served_root);
+    if std::fs::create_dir_all(&served_root).is_err() {
+        fail("the asset benchmark's directory could not be created");
+    }
+    let page_body = "<!doctype html><title>bench</title><script src=\"app.js\"></script>";
+    if std::fs::write(served_root.join("index.html"), page_body).is_err() {
+        fail("the asset benchmark's fixture could not be written");
+    }
+    let mut server = ncui_app::AssetServer::start(&served_root)
+        .unwrap_or_else(|error| fail(&format!("the asset benchmark could not start: {error}")));
+
+    // One full GET, to capture the validators the warm request will echo back.
+    let (etag, last_modified) = {
+        let mut stream =
+            TcpStream::connect(server.local_addr()).unwrap_or_else(|e| fail(&e.to_string()));
+        let _ = write!(
+            stream,
+            "GET /index.html HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        );
+        let mut raw = String::new();
+        let _ = stream.read_to_string(&mut raw);
+        let head = raw
+            .split_once("\r\n\r\n")
+            .map_or(raw.as_str(), |(head, _)| head);
+        let value = |name: &str| {
+            head.lines()
+                .find(|line| line.to_ascii_lowercase().starts_with(name))
+                .and_then(|line| line.split_once(':'))
+                .map(|(_, value)| value.trim().to_owned())
+                .unwrap_or_default()
+        };
+        (value("etag"), value("last-modified"))
+    };
+    if etag.is_empty() || last_modified.is_empty() {
+        fail("the asset benchmark could not read the validators a 200 carries");
+    }
+
+    let request_path = server.url_for("/index.html");
+    scenarios.push(
+        measure(
+            "app.asset_get_200",
+            "a cold fetch of a page's own asset over loopback HTTP",
+            50,
+            1_000,
+            || {
+                let mut stream = TcpStream::connect(server.local_addr())
+                    .unwrap_or_else(|e| fail(&e.to_string()));
+                let _ = write!(
+                    stream,
+                    "GET {request_path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                );
+                let mut raw = String::new();
+                let _ = stream.read_to_string(&mut raw);
+                usize::from(raw.starts_with("HTTP/1.1 200"))
+            },
+        )
+        .unwrap_or_else(|e| fail(&e)),
+    );
+    scenarios.push(
+        measure(
+            "app.asset_conditional_304",
+            "a warm reload: a conditional GET for an unchanged asset, answered with 304",
+            50,
+            1_000,
+            || {
+                let mut stream =
+                    TcpStream::connect(server.local_addr()).unwrap_or_else(|e| fail(&e.to_string()));
+                let _ = write!(
+                    stream,
+                    "GET {request_path} HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: {etag}\r\nIf-Modified-Since: {last_modified}\r\nConnection: close\r\n\r\n"
+                );
+                let mut raw = String::new();
+                let _ = stream.read_to_string(&mut raw);
+                usize::from(raw.starts_with("HTTP/1.1 304"))
+            },
+        )
+        .unwrap_or_else(|e| fail(&e)),
+    );
+    server.stop();
+    let _ = std::fs::remove_dir_all(&served_root);
 }
 
 /// Scenarios for `ncui-native`.
@@ -1711,64 +1818,6 @@ fn a11y(scenarios: &mut Vec<Repeated>) {
             1_000,
             20_000,
             || tree.unnamed_focusable().len(),
-        )
-        .unwrap_or_else(|e| fail(&e)),
-    );
-}
-
-/// Scenarios for `ncui-abi`.
-///
-/// `abi.negotiate` is the cost of deciding whether a component may load, which a host pays
-/// before instantiating anything. It is not a hot path in the way a scheduler tick is, and the
-/// scenario is here because a negotiation that got *slower* by an order of magnitude would be
-/// a structural change — the grant is computed by folding over the capability set rather than
-/// intersected, and that is the cost being watched.
-///
-/// `abi.grant_narrow` isolates the fold on its own, so a regression there is distinguishable
-/// from one in version checking or surface validation.
-fn abi(scenarios: &mut Vec<Repeated>) {
-    use ncui_abi::surface::{Import, ImportKind, Surface};
-    use ncui_abi::{ComponentManifest, HostProfile, negotiate};
-
-    let mut surface = Surface::new();
-    for (order, capability) in Capability::ALL.iter().enumerate() {
-        surface = surface.import(Import {
-            module: "ncui".to_owned(),
-            name: format!("op-{order}"),
-            kind: ImportKind::CapabilityCall,
-            requires: Some(*capability),
-        });
-    }
-
-    let manifest = ComponentManifest::new("1.0")
-        .requesting(CapabilitySet::all())
-        .with_surface(surface);
-    // A profile offering everything, so the negotiation reaches the grant rather than
-    // short-circuiting on a forbidden import — the expensive path is the interesting one.
-    let profile = HostProfile::new(&["1.0"], CapabilitySet::all());
-
-    scenarios.push(
-        measure(
-            "abi.negotiate",
-            "negotiate a component declaring every capability and importing every capability",
-            500,
-            20_000,
-            || usize::from(negotiate(&manifest, &profile).is_ok()),
-        )
-        .unwrap_or_else(|e| fail(&e)),
-    );
-
-    scenarios.push(
-        measure(
-            "abi.grant_narrow",
-            "compute the granted set for a component requesting everything",
-            1_000,
-            50_000,
-            || {
-                let granted = profile
-                    .narrow_to(&ComponentManifest::new("1.0").requesting(CapabilitySet::all()));
-                usize::from(granted.contains(Capability::Gpu))
-            },
         )
         .unwrap_or_else(|e| fail(&e)),
     );

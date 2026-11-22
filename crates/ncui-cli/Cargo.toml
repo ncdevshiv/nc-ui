@@ -15,7 +15,16 @@ workspace = true
 default = []
 # The real window host. Off by default so the CLI builds on a machine with no display;
 # a release build turns it on, and `ncui serve` then opens real windows.
+#
+# This is the **minimal** window host: it does not carry the GPU-island renderer. A
+# `ncui build --profile minimal` compiles exactly this, shipping a window host with no
+# graphics stack for applications that draw no islands. `wry-host-gpu` adds the renderer
+# for the full build.
 wry-host = ["ncui-runtime/wry-host"]
+# The full window host: the minimal one plus the GPU-island renderer. This is what a plain
+# `cargo build --release -p ncui-cli --features wry-host-gpu` (and the standard profile)
+# ships, and what the workspace built before the renderer became optional at link time.
+wry-host-gpu = ["wry-host", "ncui-runtime/gpu-islands"]
 
 [dependencies]
 ncui-core = { workspace = true }

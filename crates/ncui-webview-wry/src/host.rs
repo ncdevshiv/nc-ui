@@ -166,7 +166,7 @@ const MONITORS_RETRY_DELAY: Duration = Duration::from_millis(100);
 pub enum HostEvent {
     /// Build a window and its webview.
     #[allow(
-        clippy::type_privacy_lints,
+        private_interfaces,
         reason = "the event is the engine's internal command bus; the binding's public \
                   constructor names the type because it hands out the proxy that carries it"
     )]

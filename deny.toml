@@ -82,6 +82,7 @@ skip = [
     "ncui-security",
     "ncui-state",
     "ncui-webview",
+    "ncui-webview-child",
     "ncui-webview-wry",
     "ncui-workers",
     "bit-set",

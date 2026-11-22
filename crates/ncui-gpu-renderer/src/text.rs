@@ -1053,20 +1053,17 @@ mod tests {
         let isolated_id = isolated.glyphs[0].glyph_id;
         assert_eq!(isolated.glyphs.len(), 1, "one letter alone is one glyph");
         // Each beh in the word is joined to a neighbour, so none keeps the isolated form. A
-        // machine that cannot answer the question skips: no font, an uncovered script (the
+        // machine that cannot answer the question skips it: no font, an uncovered script (the
         // sample is `.notdef`), or a font that maps the joined sample to the isolated glyph —
         // macOS Helvetica does for this pair, because its Arabic forms live in an AAT `morx`
         // table and `rustybuzz` does not implement that state machine.
-        if isolated_id == 0
+        let joined_keeps_isolated = isolated_id == 0
             || joined
                 .glyphs
                 .iter()
-                .any(|glyph| glyph.glyph_id == isolated_id)
-        {
-            return;
-        }
+                .any(|glyph| glyph.glyph_id == isolated_id);
         assert!(
-            !joined.glyphs.iter().any(|glyph| glyph.glyph_id == isolated_id),
+            !joined_keeps_isolated,
             "a joined beh must not keep the isolated form {isolated_id}"
         );
     }

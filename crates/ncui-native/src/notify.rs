@@ -41,6 +41,7 @@
 use std::path::Path;
 // Used by the Windows arm only: a toast is given a unique tag per notification, and no other
 // platform here needs one.
+#[cfg(windows)]
 use std::sync::Mutex;
 #[cfg(windows)]
 use std::sync::atomic::{AtomicU64, Ordering};

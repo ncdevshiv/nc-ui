@@ -257,13 +257,17 @@ pub(crate) fn run_command(
     // starts — is inside a job that closes with this frame. That is the containment the
     // parent-chain walk below cannot promise, and it is what makes "the program's whole
     // tree ends" true even for a grandchild whose parent has already exited. The job is
-    // dropped when this frame ends, and `drop(job)` at the timeout is the kill switch.
+    // dropped when this frame ends, and `drop(job)` at the timeout is the kill switch. On
+    // Unix the child leads its own process group instead, and there is no job to hold.
     #[cfg(windows)]
     let job = assign_job(&mut child);
 
     let stdout = pipe_capturer(&mut child, Pipe::Stdout, max_output)?;
     let stderr = pipe_capturer(&mut child, Pipe::Stderr, max_output)?;
+    #[cfg(windows)]
     let status = await_child(&mut child, job.as_ref(), timeout, stdin)?;
+    #[cfg(unix)]
+    let status = await_child(&mut child, None, timeout, stdin)?;
 
     let (stdout, stderr) = join_capturer(stdout, stderr);
 
@@ -449,7 +453,7 @@ fn await_child(
 #[cfg(unix)]
 fn await_child(
     child: &mut Child,
-    _job: Option<&win32job::Job>,
+    _job: Option<&()>,
     timeout: Duration,
     stdin: Option<&str>,
 ) -> Result<Finished, ProcessError> {

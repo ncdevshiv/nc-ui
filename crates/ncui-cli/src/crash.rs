@@ -8,8 +8,8 @@
 //!
 //! # Where reports go
 //!
-//! `NCUI_CRASH_DIR` names the directory when set; otherwise the system temporary
-//! directory's `ncui-crash-reports` is used. The variable is read once at installation:
+//! `NCUI_CRASH_DIR` names the directory when set; otherwise the system temp directory's
+//! `ncui-crash-reports` is used. The variable is read once at installation:
 //! a crash report's destination is not something to re-decide while crashing.
 
 use std::panic;
@@ -24,7 +24,7 @@ pub const CRASH_DIR_ENV: &str = "NCUI_CRASH_DIR";
 /// The directory used when the environment does not name one.
 pub const DEFAULT_CRASH_DIRECTORY: &str = "ncui-crash-reports";
 
-/// The crash-report directory: the environment's choice, or the temporary default.
+/// The crash-report directory: the environment's choice, or the temp-directory default.
 #[must_use]
 pub fn crash_directory() -> PathBuf {
     if let Ok(directory) = std::env::var(CRASH_DIR_ENV)

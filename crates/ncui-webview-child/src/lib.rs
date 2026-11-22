@@ -217,6 +217,11 @@ pub trait ChildWebviewEngine: Send + Sync {
         parent: WindowId,
         child: u64,
     ) -> std::result::Result<(), ChildWebviewError>;
+
+    /// Every live child this engine holds, oldest first.
+    fn list_children(&self) -> Vec<ChildWebviewEntry> {
+        Vec::new()
+    }
 }
 
 /// The process-wide record of live child webviews, plus the engine that builds them.

@@ -191,7 +191,7 @@ pub(crate) enum HostEvent {
         /// The child's starting URL and rectangle.
         request: Box<ncui_webview_child::ChildWebviewRequest>,
         /// Where the child's engine identity, or the failure, is delivered.
-        reply: Sender<std::result::Result<u64, ncui_webview_child::ChildWebviewError>>,
+        reply: Sender<Result<u64, ChildWebviewError>>,
     },
     /// Move a live child webview to a new rectangle.
     ChildBounds {
@@ -200,14 +200,14 @@ pub(crate) enum HostEvent {
         /// The new rectangle.
         request: Box<ncui_webview_child::ChildWebviewRequest>,
         /// Where the acceptance is delivered.
-        reply: Sender<std::result::Result<(), ncui_webview_child::ChildWebviewError>>,
+        reply: Sender<Result<(), ChildWebviewError>>,
     },
     /// Close a live child webview.
     CloseChild {
         /// The child's engine identity.
         child: u64,
         /// Where the acceptance is delivered.
-        reply: Sender<std::result::Result<(), ncui_webview_child::ChildWebviewError>>,
+        reply: Sender<Result<(), ChildWebviewError>>,
     },
     /// Scale one window's page by a zoom factor.
     Zoom {
@@ -295,7 +295,7 @@ pub(crate) enum HostEvent {
 /// Everything needed to build one window.
 #[cfg(feature = "wry-engine")]
 #[derive(Debug)]
-struct CreateRequest {
+pub(crate) struct CreateRequest {
     /// The window's shape, or `None` for the default empty page.
     request: Option<ncui_webview::WindowRequest>,
     /// The policy the page in it obeys.
@@ -668,7 +668,7 @@ fn run_engine(
                 let parsed_parent = parent.parse::<u64>().ok();
                 let answer = match parsed_parent.as_ref().and_then(|id| windows.get(id)) {
                     Some(entry) => {
-                        let built = wry::WebViewBuilder::new()
+                        let built = WebViewBuilder::new()
                             .with_url(request.url.clone())
                             .with_bounds(child_bounds(&request))
                             .build_as_child(&entry.window);
@@ -696,17 +696,18 @@ fn run_engine(
                 request,
                 reply,
             }) => {
-                let answer = match children.get_mut(&child) {
-                    Some(surface) => surface
-                        .webview
-                        .set_bounds(child_bounds(&request))
-                        .map_err(|error| ChildWebviewError::EngineFailed {
-                            reason: error.to_string(),
+                let answer =
+                    match children.get_mut(&child) {
+                        Some(surface) => surface
+                            .webview
+                            .set_bounds(child_bounds(&request))
+                            .map_err(|error| ChildWebviewError::EngineFailed {
+                                reason: error.to_string(),
+                            }),
+                        None => Err(ChildWebviewError::EngineFailed {
+                            reason: format!("child webview {child} is not live"),
                         }),
-                    None => Err(ChildWebviewError::EngineFailed {
-                        reason: format!("child webview {child} is not live"),
-                    }),
-                };
+                    };
                 let _ = reply.send(answer);
             }
             Event::UserEvent(HostEvent::CloseChild { child, reply }) => {
@@ -1865,6 +1866,63 @@ impl WebViewBackend for WindowHost {
         }
     }
 
+    fn create_child_webview(
+        &self,
+        request: &ncui_webview_child::ChildWebviewRequest,
+    ) -> Result<u64, String> {
+        let (Some(engine), Some(window)) = (&self.engine, self.window) else {
+            return Err("this window's engine is not running".to_owned());
+        };
+        let (reply, answers) = mpsc::channel();
+        engine
+            .send_event(HostEvent::CreateChild {
+                parent: window.to_string(),
+                request: Box::new(request.clone()),
+                reply,
+            })
+            .map_err(|error| error.to_string())?;
+        answers
+            .recv_timeout(ENGINE_REQUEST_TIMEOUT)
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())
+    }
+
+    fn set_child_webview_bounds(
+        &self,
+        child: u64,
+        request: &ncui_webview_child::ChildWebviewRequest,
+    ) -> Result<(), String> {
+        let (Some(engine), Some(_)) = (&self.engine, self.window) else {
+            return Err("this window's engine is not running".to_owned());
+        };
+        let (reply, answers) = mpsc::channel();
+        engine
+            .send_event(HostEvent::ChildBounds {
+                child,
+                request: Box::new(request.clone()),
+                reply,
+            })
+            .map_err(|error| error.to_string())?;
+        answers
+            .recv_timeout(ENGINE_REQUEST_TIMEOUT)
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())
+    }
+
+    fn close_child_webview(&self, child: u64) -> Result<(), String> {
+        let (Some(engine), Some(_)) = (&self.engine, self.window) else {
+            return Err("this window's engine is not running".to_owned());
+        };
+        let (reply, answers) = mpsc::channel();
+        engine
+            .send_event(HostEvent::CloseChild { child, reply })
+            .map_err(|error| error.to_string())?;
+        answers
+            .recv_timeout(ENGINE_REQUEST_TIMEOUT)
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())
+    }
+
     fn last_error(&self) -> Option<String> {
         self.last_error.lock().ok().and_then(|g| g.clone())
     }
@@ -1993,7 +2051,7 @@ impl ncui_webview::HostFactory for WryHostFactory {
 
     fn spawn(
         &self,
-        _window: ncui_core::WindowId,
+        _window: WindowId,
         request: &ncui_webview::WindowRequest,
         seam: &Arc<HostSeam>,
     ) -> Option<Box<dyn WebViewBackend>> {

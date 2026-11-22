@@ -252,6 +252,35 @@ pub trait WebViewBackend: core::fmt::Debug + Send {
         let _ = command;
         Err("this backend has no CDP transport".to_owned())
     }
+
+    /// Builds one child webview inside the parent window's frame
+    /// (ADR-017 Phase 3), returning the engine's identity for it.
+    ///
+    /// The default refuses: a backend without the embedding capability says so by
+    /// name rather than answering a creation that never happened.
+    fn create_child_webview(
+        &self,
+        request: &ncui_webview_child::ChildWebviewRequest,
+    ) -> Result<u64, String> {
+        let _ = request;
+        Err("this backend cannot embed child webviews".to_owned())
+    }
+
+    /// Moves a live child webview to a new rectangle.
+    fn set_child_webview_bounds(
+        &self,
+        child: u64,
+        request: &ncui_webview_child::ChildWebviewRequest,
+    ) -> Result<(), String> {
+        let _ = (child, request);
+        Err("this backend cannot move child webviews".to_owned())
+    }
+
+    /// Closes a live child webview.
+    fn close_child_webview(&self, child: u64) -> Result<(), String> {
+        let _ = child;
+        Err("this backend cannot close child webviews".to_owned())
+    }
 }
 
 /// Lifts an owned backend into a boxed one, so the registry can hold heterogeneous engines.

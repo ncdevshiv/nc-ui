@@ -179,6 +179,133 @@ pub(crate) fn invoke_window_drag_region(runtime: &mut Runtime, params: &Value) -
 /// `1.0` is the platform default; the factor is applied by the platform, and the next
 /// paint shows it. A window that is not open, or an engine that cannot scale, is reported
 /// as the refusal it is rather than answered with a zoom that never happened.
+/// `ncui.window.child.create` -- embed a child webview into a window's frame.
+///
+/// The request is validated by the child crate; the engine builds the surface on
+/// its own thread and the child is recorded with its parent's identity.
+pub(crate) fn invoke_window_child_create(runtime: &mut Runtime, params: &Value) -> Result<Value> {
+    let parent = window_id_param(params)?;
+    let url = params
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let number = |field: &str| -> i32 {
+        params
+            .get(field)
+            .and_then(Value::as_i64)
+            .map(|value| value as i32)
+            .unwrap_or_default()
+    };
+    let request = ncui_webview_child::ChildWebviewRequest {
+        url,
+        x: number("x"),
+        y: number("y"),
+        width: number("width") as u32,
+        height: number("height") as u32,
+    };
+    let created = runtime
+        .create_child_webview(parent, &request)
+        .map_err(|_| {
+            NcError::new(ErrorKind::NotFound {
+                kind: "window".to_owned(),
+                id: parent.to_string(),
+            })
+            .operation("dispatch::window_child_create")
+        })?
+        .map_err(|reason| {
+            NcError::new(ErrorKind::Conflict { reason }).operation("dispatch::window_child_create")
+        })?;
+    serde_json::to_value(json!({ "child": created.to_string() })).map_err(|e| json_error(&e))
+}
+
+/// `ncui.window.child.bounds` -- move a live child webview.
+pub(crate) fn invoke_window_child_bounds(runtime: &mut Runtime, params: &Value) -> Result<Value> {
+    let parent = window_id_param(params)?;
+    let child = params
+        .get("child")
+        .and_then(Value::as_str)
+        .and_then(|text| text.trim_start_matches("child-").parse::<u64>().ok())
+        .map(ncui_webview_child::ChildWebviewId::from_raw)
+        .ok_or_else(|| {
+            validation("child", "must be a child webview id")
+                .operation("dispatch::window_child_bounds")
+        })?;
+    let number = |field: &str| -> i32 {
+        params
+            .get(field)
+            .and_then(Value::as_i64)
+            .map(|value| value as i32)
+            .unwrap_or_default()
+    };
+    let request = ncui_webview_child::ChildWebviewRequest {
+        url: String::new(),
+        x: number("x"),
+        y: number("y"),
+        width: number("width") as u32,
+        height: number("height") as u32,
+    };
+    runtime
+        .set_child_webview_bounds(parent, child, &request)
+        .map_err(|_| {
+            NcError::new(ErrorKind::NotFound {
+                kind: "window".to_owned(),
+                id: parent.to_string(),
+            })
+            .operation("dispatch::window_child_bounds")
+        })?
+        .map_err(|reason| {
+            NcError::new(ErrorKind::Conflict { reason }).operation("dispatch::window_child_bounds")
+        })?;
+    serde_json::to_value(json!({ "moved": true })).map_err(|e| json_error(&e))
+}
+
+/// `ncui.window.child.close` -- close a live child webview.
+pub(crate) fn invoke_window_child_close(runtime: &mut Runtime, params: &Value) -> Result<Value> {
+    let parent = window_id_param(params)?;
+    let child = params
+        .get("child")
+        .and_then(Value::as_str)
+        .and_then(|text| text.trim_start_matches("child-").parse::<u64>().ok())
+        .map(ncui_webview_child::ChildWebviewId::from_raw)
+        .ok_or_else(|| {
+            validation("child", "must be a child webview id")
+                .operation("dispatch::window_child_close")
+        })?;
+    runtime
+        .close_child_webview(parent, child)
+        .map_err(|_| {
+            NcError::new(ErrorKind::NotFound {
+                kind: "window".to_owned(),
+                id: parent.to_string(),
+            })
+            .operation("dispatch::window_child_close")
+        })?
+        .map_err(|reason| {
+            NcError::new(ErrorKind::Conflict { reason }).operation("dispatch::window_child_close")
+        })?;
+    serde_json::to_value(json!({ "closed": true })).map_err(|e| json_error(&e))
+}
+
+/// `ncui.window.child.list` -- every live child webview.
+pub(crate) fn invoke_window_child_list(runtime: &mut Runtime) -> Result<Value> {
+    let children = runtime.list_child_webviews();
+    let listed: Vec<Value> = children
+        .iter()
+        .map(|entry| {
+            json!({
+                "child": entry.id.to_string(),
+                "parent": entry.parent.to_string(),
+                "x": entry.bounds.x,
+                "y": entry.bounds.y,
+                "width": entry.bounds.width,
+                "height": entry.bounds.height,
+            })
+        })
+        .collect();
+    serde_json::to_value(json!({ "children": listed })).map_err(|e| json_error(&e))
+}
+
 pub(crate) fn invoke_window_zoom(runtime: &mut Runtime, params: &Value) -> Result<Value> {
     let id = window_id_param(params)?;
     let factor = params

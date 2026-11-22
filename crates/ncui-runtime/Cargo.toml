@@ -57,6 +57,7 @@ ncui-native = { workspace = true }
 ncui-abi = { workspace = true }
 ncui-component = { workspace = true }
 ncui-webview = { workspace = true }
+ncui-webview-child = { workspace = true }
 ncui-webview-wry = { workspace = true, optional = true }
 ncui-gpu = { workspace = true }
 # Optional: only the island surface draws anything.

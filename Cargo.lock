@@ -1897,6 +1897,7 @@ dependencies = [
  "ncui-security",
  "ncui-state",
  "ncui-webview",
+ "ncui-webview-child",
  "ncui-webview-wry",
  "ncui-workers",
  "serde",
@@ -1940,6 +1941,7 @@ dependencies = [
  "ncui-core",
  "ncui-ipc",
  "ncui-security",
+ "ncui-webview-child",
  "serde",
  "serde_json",
 ]

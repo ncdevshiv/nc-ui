@@ -18,8 +18,10 @@ use ncui_runtime::Runtime;
 use ncui_runtime::agent::AgentSession;
 use ncui_runtime::dispatch::dispatch;
 use ncui_runtime::rpc::{Request, Response};
+use ncui_runtime::window::ChildWebviewCapable;
 use ncui_security::authz::AgentRole;
 use ncui_webview::HostFactory;
+use ncui_webview_child::{ChildWebviewEntry, ChildWebviewId, ChildWebviewRequest};
 use serde_json::{Value, json};
 
 /// A test factory whose hosts always come up alive.
@@ -97,6 +99,35 @@ impl ncui_webview::WebViewBackend for AlwaysAlive {
     }
 }
 
+/// A child-webview engine that accepts every request and records nothing: the
+/// surface sweep only needs the calls to be answered.
+#[derive(Debug)]
+struct AlwaysCapable;
+
+impl ChildWebviewCapable for AlwaysCapable {
+    fn create_child(
+        &self,
+        _parent: WindowId,
+        _request: &ChildWebviewRequest,
+    ) -> Result<ChildWebviewId, String> {
+        Ok(ChildWebviewId::from_raw(1))
+    }
+    fn set_child_bounds(
+        &self,
+        _parent: WindowId,
+        _child: ChildWebviewId,
+        _request: &ChildWebviewRequest,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    fn close_child(&self, _parent: WindowId, _child: ChildWebviewId) -> Result<(), String> {
+        Ok(())
+    }
+    fn list_children(&self) -> Vec<ChildWebviewEntry> {
+        Vec::new()
+    }
+}
+
 fn runtime() -> Runtime {
     let mut runtime = Runtime::start(Limits::default()).expect("runtime should start");
     runtime.windows = runtime
@@ -108,7 +139,8 @@ fn runtime() -> Runtime {
                 None,
             )]),
         ))
-        .with_factory(Box::new(AlwaysReady));
+        .with_factory(Box::new(AlwaysReady))
+        .with_child_engine(std::sync::Arc::new(AlwaysCapable));
     runtime
 }
 
@@ -187,7 +219,12 @@ fn params_for(name: &str, created_window: Option<WindowId>) -> Value {
         | "ncui.window.drag.region"
         | "ncui.window.devtools.open"
         | "ncui.window.devtools.close"
-        | "ncui.window.devtools.state" => json!({ "window": named }),
+        | "ncui.window.devtools.state"
+        | "ncui.window.child.bounds"
+        | "ncui.window.child.close" => json!({ "window": named, "child": "child-1" }),
+        "ncui.window.child.create" | "ncui.window.child.list" => {
+            json!({ "window": named, "url": "https://example.com" })
+        }
         "ncui.window.zoom" => json!({ "window": named, "factor": 1.25 }),
         "ncui.window.post" => json!({ "window": named, "script": "1;" }),
         "ncui.app.emit" => json!({ "window": named, "event": "test" }),

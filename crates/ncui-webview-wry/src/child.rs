@@ -27,14 +27,14 @@ const CHILD_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// through the same event loop the parent windows use, so they are created and
 /// moved on the thread that owns the platform.
 #[derive(Debug)]
-pub struct WryChildWebviewEngine {
+pub(crate) struct WryChildWebviewEngine {
     proxy: tao::event_loop::EventLoopProxy<HostEvent>,
 }
 
 impl WryChildWebviewEngine {
     /// Creates the binding over an engine proxy.
     #[must_use]
-    pub fn new(proxy: tao::event_loop::EventLoopProxy<HostEvent>) -> Self {
+    pub(crate) fn new(proxy: tao::event_loop::EventLoopProxy<HostEvent>) -> Self {
         Self { proxy }
     }
 }
@@ -44,7 +44,7 @@ impl ChildWebviewEngine for WryChildWebviewEngine {
         &self,
         parent: ncui_core::WindowId,
         request: &ChildWebviewRequest,
-    ) -> std::result::Result<u64, ChildWebviewError> {
+    ) -> Result<u64, ChildWebviewError> {
         let (reply, answers) = mpsc::channel();
         self.proxy
             .send_event(HostEvent::CreateChild {
@@ -67,7 +67,7 @@ impl ChildWebviewEngine for WryChildWebviewEngine {
         _parent: ncui_core::WindowId,
         child: u64,
         request: &ChildWebviewRequest,
-    ) -> std::result::Result<(), ChildWebviewError> {
+    ) -> Result<(), ChildWebviewError> {
         let (reply, answers) = mpsc::channel();
         self.proxy
             .send_event(HostEvent::ChildBounds {
@@ -89,7 +89,7 @@ impl ChildWebviewEngine for WryChildWebviewEngine {
         &self,
         _parent: ncui_core::WindowId,
         child: u64,
-    ) -> std::result::Result<(), ChildWebviewError> {
+    ) -> Result<(), ChildWebviewError> {
         let (reply, answers) = mpsc::channel();
         self.proxy
             .send_event(HostEvent::CloseChild { child, reply })
@@ -111,8 +111,7 @@ impl ChildWebviewEngine for WryChildWebviewEngine {
 #[must_use]
 pub fn child_bounds(request: &ChildWebviewRequest) -> wry::Rect {
     wry::Rect {
-        position: wry::dpi::LogicalPosition::new(f64::from(request.x), f64::from(request.y))
-            .into(),
+        position: wry::dpi::LogicalPosition::new(f64::from(request.x), f64::from(request.y)).into(),
         size: wry::dpi::LogicalSize::new(f64::from(request.width), f64::from(request.height))
             .into(),
     }

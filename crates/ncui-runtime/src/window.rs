@@ -18,7 +18,6 @@ use std::time::SystemTime;
 
 use ncui_core::{Capability, CapabilitySet, CorrelationId, WindowId};
 use ncui_security::audit::{AuditEvent, AuditOutcome};
-use ncui_webview_child::{ChildWebviewId, ChildWebviewRequest};
 use ncui_webview::{
     ActionTable, HostFactory, HostSeam, MountedComponent, PageMessage, SeamError, WindowRegistry,
     WindowRejection, WindowRequest, WindowSummary,
@@ -204,6 +203,8 @@ pub fn default_page_grant(actions: &[SeamAction]) -> ncui_webview::CapabilityGra
 #[derive(Default)]
 pub struct Windows {
     registry: Mutex<Option<WindowRegistry>>,
+    /// The engine that builds and drives embedded child webviews (ADR-017 Phase 3).
+    pub(crate) child_engine: Mutex<Option<Arc<dyn ChildWebviewCapable>>>,
     factory: Mutex<Option<Box<dyn HostFactory>>>,
     manifests: Mutex<Vec<MountedComponent>>,
     /// Where the places of remembered windows are kept, when the runtime was told.
@@ -265,6 +266,14 @@ impl Windows {
     #[must_use]
     pub fn with_factory(mut self, factory: Box<dyn HostFactory>) -> Self {
         self.factory = Mutex::new(Some(factory));
+        self
+    }
+
+    /// Sets the engine that builds and drives embedded child webviews
+    /// (ADR-017 Phase 3). Without one, the child methods refuse by name.
+    #[must_use]
+    pub fn with_child_engine(mut self, engine: Arc<dyn ChildWebviewCapable>) -> Self {
+        self.child_engine = Mutex::new(Some(engine));
         self
     }
 
@@ -837,27 +846,16 @@ impl Windows {
         parent: WindowId,
         request: &ncui_webview_child::ChildWebviewRequest,
     ) -> Result<Result<ncui_webview_child::ChildWebviewId, String>, WindowRejection> {
-        self.with_registry_mut(|registry| {
-            let entry = registry
-                .get(parent)
-                .ok_or_else(|| WindowRejection::EngineUnavailable {
-                    reason: Some(format!("window {parent} is not open")),
-                })?;
-            let Some(backend) = entry.host.as_ref() else {
-                return Ok(Err("this window's engine has no child surface".to_owned()));
-            };
-            // The child surface is an engine capability; the trait keeps the runtime
-            // decoupled from the engine crate.
-            let Some(capable) = backend
-                .as_any()
-                .downcast_ref::<dyn ChildWebviewCapable>()
-            else {
-                return Ok(Err("this window's engine cannot embed child webviews".to_owned()));
-            };
-            Ok(capable
-                .create_child(parent, request)
-                .map_err(|error| error.to_string()))
-        })
+        let guard = self
+            .child_engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(engine) = guard.as_ref() else {
+            return Ok(Err("this runtime has no child-webview engine".to_owned()));
+        };
+        Ok(engine
+            .create_child(parent, request)
+            .map_err(|error| error.clone()))
     }
 
     /// Moves a live child webview to a new rectangle.
@@ -867,25 +865,16 @@ impl Windows {
         child: ncui_webview_child::ChildWebviewId,
         request: &ncui_webview_child::ChildWebviewRequest,
     ) -> Result<Result<(), String>, WindowRejection> {
-        self.with_registry_mut(|registry| {
-            let entry = registry
-                .get(parent)
-                .ok_or_else(|| WindowRejection::EngineUnavailable {
-                    reason: Some(format!("window {parent} is not open")),
-                })?;
-            let Some(backend) = entry.host.as_ref() else {
-                return Ok(Err("this window's engine has no child surface".to_owned()));
-            };
-            let Some(capable) = backend
-                .as_any()
-                .downcast_ref::<dyn ChildWebviewCapable>()
-            else {
-                return Ok(Err("this window's engine cannot move child webviews".to_owned()));
-            };
-            Ok(capable
-                .set_child_bounds(parent, child.raw(), request)
-                .map_err(|error| error.to_string()))
-        })
+        let guard = self
+            .child_engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(engine) = guard.as_ref() else {
+            return Ok(Err("this runtime has no child-webview engine".to_owned()));
+        };
+        Ok(engine
+            .set_child_bounds(parent, child, request)
+            .map_err(|error| error.clone()))
     }
 
     /// Closes a live child webview.
@@ -894,25 +883,29 @@ impl Windows {
         parent: WindowId,
         child: ncui_webview_child::ChildWebviewId,
     ) -> Result<Result<(), String>, WindowRejection> {
-        self.with_registry_mut(|registry| {
-            let entry = registry
-                .get(parent)
-                .ok_or_else(|| WindowRejection::EngineUnavailable {
-                    reason: Some(format!("window {parent} is not open")),
-                })?;
-            let Some(backend) = entry.host.as_ref() else {
-                return Ok(Err("this window's engine has no child surface".to_owned()));
-            };
-            let Some(capable) = backend
-                .as_any()
-                .downcast_ref::<dyn ChildWebviewCapable>()
-            else {
-                return Ok(Err("this window's engine cannot close child webviews".to_owned()));
-            };
-            Ok(capable
-                .close_child(parent, child.raw())
-                .map_err(|error| error.to_string()))
-        })
+        let guard = self
+            .child_engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(engine) = guard.as_ref() else {
+            return Ok(Err("this runtime has no child-webview engine".to_owned()));
+        };
+        Ok(engine
+            .close_child(parent, child)
+            .map_err(|error| error.clone()))
+    }
+
+    /// Lists every live child webview this runtime's engine holds.
+    #[must_use]
+    pub fn list_child_webviews(&self) -> Vec<ncui_webview_child::ChildWebviewEntry> {
+        let guard = self
+            .child_engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(engine) = guard.as_ref() else {
+            return Vec::new();
+        };
+        engine.list_children()
     }
 
     /// Sends one CDP command to a window's own `DevTools` endpoint (ADR-017 Phase 2).
@@ -964,7 +957,7 @@ impl Windows {
 ///
 /// Implemented by the wry host; the runtime reaches it by downcasting a window's
 /// backend, so the runtime stays decoupled from the engine crate.
-pub trait ChildWebviewCapable: Send + Sync {
+pub trait ChildWebviewCapable: Send + Sync + core::any::Any {
     /// Builds one child webview inside the parent's frame.
     fn create_child(
         &self,
@@ -986,6 +979,9 @@ pub trait ChildWebviewCapable: Send + Sync {
         parent: WindowId,
         child: ncui_webview_child::ChildWebviewId,
     ) -> Result<(), String>;
+
+    /// Lists every live child webview this engine holds.
+    fn list_children(&self) -> Vec<ncui_webview_child::ChildWebviewEntry>;
 }
 
 impl Runtime {
@@ -999,6 +995,41 @@ impl Runtime {
     /// Returns how many messages were evaluated. A message that could not be parsed is
     /// counted and answered with a refusal; it is not an error, because a page is an
     /// untrusted input source and malformed input from one is expected.
+    /// Embeds a child webview into `parent`'s frame (ADR-017 Phase 3).
+    pub fn create_child_webview(
+        &self,
+        parent: WindowId,
+        request: &ncui_webview_child::ChildWebviewRequest,
+    ) -> Result<Result<ncui_webview_child::ChildWebviewId, String>, WindowRejection> {
+        self.windows.create_child_webview(parent, request)
+    }
+
+    /// Moves a live child webview to a new rectangle.
+    pub fn set_child_webview_bounds(
+        &self,
+        parent: WindowId,
+        child: ncui_webview_child::ChildWebviewId,
+        request: &ncui_webview_child::ChildWebviewRequest,
+    ) -> Result<Result<(), String>, WindowRejection> {
+        self.windows
+            .set_child_webview_bounds(parent, child, request)
+    }
+
+    /// Closes a live child webview.
+    pub fn close_child_webview(
+        &self,
+        parent: WindowId,
+        child: ncui_webview_child::ChildWebviewId,
+    ) -> Result<Result<(), String>, WindowRejection> {
+        self.windows.close_child_webview(parent, child)
+    }
+
+    /// Lists every live child webview across open windows.
+    #[must_use]
+    pub fn list_child_webviews(&self) -> Vec<ncui_webview_child::ChildWebviewEntry> {
+        self.windows.list_child_webviews()
+    }
+
     pub fn pump_pages(&mut self, now: core::time::Duration) -> usize {
         let mut handled = 0usize;
         while let Ok(Some((window, message))) = self.windows.take_page_message() {

@@ -40,10 +40,12 @@ use self::cdp_handler::invoke_cdp_send;
 use self::params::{
     consent_token_param, deadline_param, enforce_deadline, grant_param, invoke_app_emit,
     invoke_component_inspect, invoke_consent_mint, invoke_devtools_events, invoke_devtools_profile,
-    invoke_devtools_tree, invoke_logs_query, invoke_state_inspect, invoke_window_devtools_close,
-    invoke_window_devtools_open, invoke_window_devtools_state, invoke_window_drag_region,
-    invoke_window_post, invoke_window_zoom, remembered_place, window_change_param, window_id_param,
-    window_rejection, window_request_param, window_shape_param,
+    invoke_devtools_tree, invoke_logs_query, invoke_state_inspect, invoke_window_child_bounds,
+    invoke_window_child_close, invoke_window_child_create, invoke_window_child_list,
+    invoke_window_devtools_close, invoke_window_devtools_open, invoke_window_devtools_state,
+    invoke_window_drag_region, invoke_window_post, invoke_window_zoom, remembered_place,
+    window_change_param, window_id_param, window_rejection, window_request_param,
+    window_shape_param,
 };
 
 /// The methods this runtime implements, with the authority each one needs.
@@ -147,6 +149,30 @@ pub fn method_table() -> Vec<MethodDescription> {
         entry(
             "ncui.window.zoom",
             "Scale a window's page by a factor, where 1.0 is the platform default and the accepted range is 0.25 to 5.0.",
+            CapabilitySet::empty().with(Capability::Window),
+            false,
+        ),
+        entry(
+            "ncui.window.child.create",
+            "Embed a child webview into a window's frame: a starting URL and a rectangle (logical pixels, relative to the window's client area).",
+            CapabilitySet::empty().with(Capability::Window),
+            false,
+        ),
+        entry(
+            "ncui.window.child.bounds",
+            "Move a live child webview to a new rectangle.",
+            CapabilitySet::empty().with(Capability::Window),
+            false,
+        ),
+        entry(
+            "ncui.window.child.close",
+            "Close a live child webview.",
+            CapabilitySet::empty().with(Capability::Window),
+            false,
+        ),
+        entry(
+            "ncui.window.child.list",
+            "Every live child webview across open windows, with its parent and rectangle.",
             CapabilitySet::empty().with(Capability::Window),
             false,
         ),
@@ -759,6 +785,10 @@ fn invoke(
         "ncui.window.post" => invoke_window_post(runtime, &request.params),
         "ncui.window.drag.region" => invoke_window_drag_region(runtime, &request.params),
         "ncui.window.zoom" => invoke_window_zoom(runtime, &request.params),
+        "ncui.window.child.create" => invoke_window_child_create(runtime, &request.params),
+        "ncui.window.child.bounds" => invoke_window_child_bounds(runtime, &request.params),
+        "ncui.window.child.close" => invoke_window_child_close(runtime, &request.params),
+        "ncui.window.child.list" => invoke_window_child_list(runtime),
         "ncui.window.devtools.open" => invoke_window_devtools_open(runtime, &request.params),
         "ncui.window.devtools.close" => invoke_window_devtools_close(runtime, &request.params),
         "ncui.window.devtools.state" => invoke_window_devtools_state(runtime, &request.params),

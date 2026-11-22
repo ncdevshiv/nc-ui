@@ -40,7 +40,7 @@ pub use cdp::{CdpError, DevToolsEndpoint, send_command as cdp_send_command};
 #[cfg(feature = "wry-engine")]
 pub use child::WryChildWebviewEngine;
 #[cfg(feature = "wry-engine")]
-pub use host::{WindowHost, WryHostFactory, engine_proxy};
+pub use host::{HostEvent, WindowHost, WryHostFactory, engine_proxy};
 
 /// Runs the engine's event loop on the main thread, with the application on a worker.
 /// macOS only — see [`host::run_on_main_thread`] (ADR-018).

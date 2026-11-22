@@ -47,6 +47,6 @@ pub mod watch;
 pub use assets::{AssetServer, Responder, Route, Served, content_type_for};
 pub use manifest::{
     AppManifest, MANIFEST_FILE_NAME, ManifestError, PageCommandConfig, ShortcutConfig,
-    SidecarConfig, TrayConfig, WindowConfig,
+    SidecarConfig, SidecarMode, TrayConfig, WindowConfig,
 };
 pub use watch::{DirectoryWatcher, Fingerprint};

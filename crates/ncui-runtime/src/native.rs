@@ -20,12 +20,12 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use ncui_app::SidecarConfig;
+use ncui_app::{SidecarConfig, SidecarMode};
 use ncui_core::{Capability, CapabilitySet, ErrorKind, NcError, Result};
 use ncui_native::{
     Clipboard, ClipboardError, DialogBackend, DialogError, DialogKind, DialogOptions, FileFilter,
     FileSystem, FsError, NotificationError, Notifier, OpenError, ProcessError, ProcessRunner,
-    RunOutput, RunRequest, open_with_default, validate_options,
+    RunOutput, RunRequest, SidecarError, StreamingSidecar, open_with_default, validate_options,
 };
 use ncui_webview::SeamError;
 use serde_json::Value;
@@ -101,11 +101,12 @@ pub fn register(
         )?);
         registrations.push(register_dialog(
             runtime,
-            backend,
+            backend.clone(),
             DialogKind::SaveFile,
             "dialog.save_file",
             &metrics,
         )?);
+        registrations.push(register_color_dialog(runtime, backend, &metrics)?);
     }
     if granted.contains(Capability::ProcessSpawn) {
         let runner = Arc::new(ProcessRunner::new(root).map_err(|error| {
@@ -125,6 +126,7 @@ pub fn register(
         for sidecar in sidecars {
             registrations.push(register_sidecar(runtime, &runner, sidecar, &metrics)?);
         }
+        register_editors(runtime, &runner, &metrics, &mut registrations)?;
     }
 
     if granted.contains(Capability::FilesystemRead) || granted.contains(Capability::FilesystemWrite)
@@ -284,6 +286,52 @@ fn register_sidecar(
     } else {
         sidecar.summary.clone()
     };
+    if sidecar.mode == Some(SidecarMode::Stream) {
+        // A streaming sidecar is one program kept running across calls. It starts on the
+        // first call — the call that pays the start-up cost — and every call after it is
+        // warm. The program stops when the registration is dropped with the runtime.
+        let live: Arc<std::sync::Mutex<Option<Arc<StreamingSidecar>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        return register_command(
+            runtime,
+            &sidecar.command,
+            sidecar.requires,
+            &summary,
+            move |payload| {
+                record_sidecar_call(&metrics, &name);
+                let sidecar = {
+                    let mut live = live
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if live.is_none() {
+                        let started = StreamingSidecar::spawn(&runner, &program, &args)
+                            .map_err(|error| process_error(&error))?;
+                        *live = Some(Arc::new(started));
+                    }
+                    // The arm above filled the slot; this clone is of the program every
+                    // call after the first shares.
+                    match live.as_ref() {
+                        Some(started) => Arc::clone(started),
+                        None => {
+                            return Err(SeamError::new(
+                                "sidecar_not_running",
+                                "the streaming sidecar could not be kept running",
+                            ));
+                        }
+                    }
+                };
+                let timeout = timeout_ms.map_or(
+                    ncui_native::process::DEFAULT_TIMEOUT,
+                    std::time::Duration::from_millis,
+                );
+                sidecar.call(&payload, timeout).map_err(|error| SeamError {
+                    code: error.code().to_owned(),
+                    message: error.to_string(),
+                    retryable: matches!(error, SidecarError::Timeout { .. }),
+                })
+            },
+        );
+    }
     register_command(
         runtime,
         &sidecar.command,
@@ -541,9 +589,161 @@ fn register_dialog(
     )
 }
 
-/// Reads the dialog request's options from a page's payload.
+/// Registers the colour picker command.
 ///
-/// Every field is optional and the platform's own defaults are the right answer when the page has
+/// A colour is not a path, so this is its own command rather than another [`DialogKind`]:
+/// the request is a title and a starting `#rrggbb`, and the answer is the colour the person
+/// chose. The shape is the file dialogs': the request rules run whether or not this build
+/// can show a picker, and a build without a backend reports `dialog_unavailable` rather
+/// than pretending.
+fn register_color_dialog(
+    runtime: &Runtime,
+    backend: Option<Arc<dyn DialogBackend>>,
+    metrics: &Arc<ncui_observability::metrics::MetricsRegistry>,
+) -> Result<CommandRegistration> {
+    let metrics = Arc::clone(metrics);
+    register_command(
+        runtime,
+        "dialog.pick_color",
+        CapabilitySet::empty().with(Capability::Dialog),
+        "Show a native colour picker and return the colour the user chose, as #rrggbb.",
+        move |payload| {
+            let request = color_request(&payload);
+            // The request rules are plain Rust and run whether or not this build can show a
+            // picker, exactly as the file dialogs' rules do.
+            ncui_native::validate_color_request(&request).map_err(|error| dialog_error(&error))?;
+            let Some(backend) = backend.clone() else {
+                return Err(SeamError::new(
+                    "dialog_unavailable",
+                    "this build was compiled without the `dialogs` feature, so it cannot show a \
+                     native dialog",
+                ));
+            };
+            record_color_call(&metrics);
+            backend
+                .show_color(&request)
+                .map_err(|error| dialog_error(&error))
+                .and_then(|choice| to_value(&choice))
+        },
+    )
+}
+
+/// Reads a colour picker request from a page's payload: an optional title and seed.
+fn color_request(payload: &Value) -> ncui_native::ColorRequest {
+    let title = payload
+        .get("title")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let default = payload
+        .get("default")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    ncui_native::ColorRequest { title, default }
+}
+
+/// Counts one colour picker call.
+fn record_color_call(metrics: &ncui_observability::metrics::MetricsRegistry) {
+    let Ok(labels) = ncui_observability::metrics::Labels::from_pairs([("kind", "pick.color")])
+    else {
+        return;
+    };
+    let _ = metrics.counter_inc("native.dialog_calls", &labels, 1);
+}
+
+/// Registers the editor commands: which editors this machine has, and opening a file with one.
+///
+/// Both need `process.spawn` because that is exactly the authority they use: discovery is a
+/// lookup over the platform's search path, and opening a file starts the editor with the
+/// file as its argument. A terminal editor holds the call until the editing session ends; a
+/// GUI editor returns as soon as it has launched.
+fn register_editors(
+    runtime: &Runtime,
+    runner: &Arc<ProcessRunner>,
+    metrics: &Arc<ncui_observability::metrics::MetricsRegistry>,
+    registrations: &mut Vec<CommandRegistration>,
+) -> Result<()> {
+    let _ = metrics;
+    let discovery_runner = Arc::clone(runner);
+    registrations.push(register_command(
+        runtime,
+        "app.editors",
+        CapabilitySet::empty().with(Capability::ProcessSpawn),
+        "The editors this machine has, discovered over the platform's search path.",
+        move |_payload| {
+            let paths = search_paths();
+            let editors = ncui_native::discover(&paths);
+            to_value(&editors)
+        },
+    )?);
+    registrations.push(register_command(
+        runtime,
+        "app.open_in_editor",
+        CapabilitySet::empty().with(Capability::ProcessSpawn),
+        "Open a file with an editor on this machine: the first discovered one, or one named \
+         by `editor`.",
+        move |payload| {
+            let Some(path) = payload.get("path").and_then(Value::as_str) else {
+                return Err(SeamError::new(
+                    "validation",
+                    "`path` is required: name the file to open",
+                ));
+            };
+            if path.trim().is_empty() || path.len() > ncui_native::MAX_PATH_BYTES {
+                return Err(SeamError::new(
+                    "validation",
+                    "`path` must be a non-empty path of at most 4096 bytes",
+                ));
+            }
+            let requested = payload.get("editor").and_then(Value::as_str);
+            let discovered = ncui_native::discover(&search_paths());
+            let chosen = match requested {
+                Some(name) => discovered
+                    .iter()
+                    .find(|editor| {
+                        editor.name.eq_ignore_ascii_case(name)
+                            || editor.program.eq_ignore_ascii_case(name)
+                    })
+                    .ok_or_else(|| {
+                        SeamError::new(
+                            "editor_not_found",
+                            format!("no discovered editor matches `{name}`"),
+                        )
+                    })?,
+                None => discovered.first().ok_or_else(|| {
+                    SeamError::new(
+                        "editor_not_found",
+                        "no editor this runtime knows was found on this machine's search path",
+                    )
+                })?,
+            };
+            let request = RunRequest {
+                program: chosen.program.clone(),
+                args: vec![path.to_owned()],
+                stdin: None,
+                timeout_ms: None,
+            };
+            let output = discovery_runner
+                .run(&request)
+                .map_err(|error| process_error(&error))?;
+            to_value(&serde_json::json!({
+                "opened": path,
+                "editor": chosen.name,
+                "status": output.status,
+            }))
+        },
+    )?);
+    Ok(())
+}
+
+/// The machine's own search path, as directories.
+fn search_paths() -> Vec<std::path::PathBuf> {
+    std::env::var("PATH")
+        .map(|value| ncui_native::parse_search_path(&value))
+        .unwrap_or_default()
+}
+
+/// Reads the dialog request's options from a page's payload.
+////// Every field is optional and the platform's own defaults are the right answer when the page has
 /// no opinion. A filter is read as `{ "name": ..., "extensions": [...] }`; anything else is a
 /// caller's mistake, reported as `invalid_params` before the request rules run.
 fn dialog_options(payload: &Value) -> std::result::Result<DialogOptions, SeamError> {
@@ -1324,6 +1524,7 @@ mod tests {
             )],
             requires: CapabilitySet::empty(),
             timeout_ms: Some(15_000),
+            mode: None,
             summary: "Echo a word back from another language.".to_owned(),
         }
     }
@@ -1399,6 +1600,7 @@ mod tests {
             args: vec!["refusing.py".to_owned()],
             requires: CapabilitySet::empty(),
             timeout_ms: Some(15_000),
+            mode: None,
             summary: "Always refuse, through its exit code.".to_owned(),
         };
         let runtime = runtime_with(&[Capability::ProcessSpawn]);
@@ -1437,6 +1639,7 @@ mod tests {
             args: vec!["plain.py".to_owned()],
             requires: CapabilitySet::empty(),
             timeout_ms: Some(15_000),
+            mode: None,
             summary: "Answer with text that is not JSON.".to_owned(),
         };
         let runtime = runtime_with(&[Capability::ProcessSpawn]);
@@ -1451,6 +1654,34 @@ mod tests {
             .expect_err("a non-JSON answer is reported rather than handed to the page");
         assert_eq!(error.code, "sidecar_response", "got: {}", error.message);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_colour_dialog_registers_and_answers_by_name_without_a_backend() {
+        // The colour picker rides the same seam as the file dialogs: the command registers
+        // for a page holding `dialog`, the request rules run whether or not this build can
+        // show a picker, and a build without the `dialogs` feature reports
+        // `dialog_unavailable` rather than pretending. The validation fires first, so a
+        // malformed seed is refused even on a build that could not show anything.
+        let root = canonical_scratch();
+        let runtime = runtime_with(&[Capability::Dialog]);
+        let _registrations = register(&runtime, &root, None, &[]).expect("registration succeeds");
+
+        let command = runtime
+            .page_commands
+            .get("dialog.pick_color")
+            .expect("the colour dialog is registered as a command the page can call");
+        let crate::commands::CommandTarget::Native(handler) = command.target else {
+            panic!("expected a native command");
+        };
+
+        let error = handler(serde_json::json!({ "default": "not-a-colour" }))
+            .expect_err("a seed that is not a colour is refused");
+        assert_eq!(error.code, "dialog_request_refused", "{}", error.message);
+
+        let error = handler(serde_json::json!({ "default": "#1a2b3c" }))
+            .expect_err("this build has no dialog backend");
+        assert_eq!(error.code, "dialog_unavailable", "{}", error.message);
     }
 
     #[test]

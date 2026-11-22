@@ -506,7 +506,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d045de693cb712d0b22c6a64be5b953f67b3ce00ab5ad3dd5d8b441886ab8e1a"
 dependencies = [
  "quote",
- "syn 2.0.119",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -1799,6 +1799,7 @@ dependencies = [
  "ncui-app",
  "ncui-core",
  "ncui-native",
+ "ncui-observability",
  "ncui-runtime",
  "ncui-security",
  "ncui-webview",
@@ -1866,6 +1867,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "win32job",
 ]
 
 [[package]]
@@ -4066,6 +4068,16 @@ dependencies = [
  "log",
  "raw-window-handle",
  "web-sys",
+]
+
+[[package]]
+name = "win32job"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "21b25acac91041257d64f5625690b626133e0ca9e4e17814552b5803b1a82f7c"
+dependencies = [
+ "thiserror 1.0.69",
+ "windows 0.62.0",
 ]
 
 [[package]]

@@ -180,6 +180,9 @@ pub struct Bundle {
     /// The URL scheme it handles, when it handles one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheme: Option<String>,
+    /// The file extensions this application is associated with, normalised.
+    #[serde(default)]
+    pub associations: Vec<String>,
     /// The page the application opens.
     pub entry: String,
     /// The runtime binary's name within the bundle.
@@ -265,11 +268,7 @@ pub fn build(app: &Path, binary: &Path, out: &Path) -> Result<Bundle, BundleErro
     let manifest = AppManifest::load(app).map_err(|error| BundleError::Application {
         reason: error.to_string(),
     })?;
-    if !binary.is_file() {
-        return Err(BundleError::MissingBinary {
-            path: binary.to_path_buf(),
-        });
-    }
+    check_bundle_inputs(&manifest, binary)?;
     let identity = identity_for(&manifest);
     ncui_native::identity::check(&identity)
         .map_err(|_| BundleError::Unscriptable { what: "identity" })?;
@@ -291,42 +290,14 @@ pub fn build(app: &Path, binary: &Path, out: &Path) -> Result<Bundle, BundleErro
         reason: error.to_string(),
     })?;
 
-    // The binary keeps its own name, so a user can see which runtime they are running, and the
-    // application's manifest sits beside it rather than being copied into an assets directory.
-    let binary_name = binary.file_name().map_or_else(
-        || "ncui".to_owned(),
-        |name| name.to_string_lossy().into_owned(),
-    );
+    let binary_name = binary_name(binary);
     copy_file(binary, &out.join(&binary_name))?;
     copy_file(&app.join(MANIFEST_NAME), &out.join(MANIFEST_NAME))?;
     let mut written: BTreeSet<String> = BTreeSet::new();
     written.insert(binary_name.clone());
     written.insert(MANIFEST_NAME.to_owned());
-
-    // The assets the application serves to a page.
-    let assets = app.join(&manifest.assets);
-    if assets.is_dir() {
-        copy_tree(
-            &assets,
-            &out.join(&manifest.assets),
-            &manifest.assets,
-            &mut written,
-        )?;
-    }
-
-    // Everything else the application directory holds that is not an asset: notes, fixtures, a
-    // licence. They are part of the application whether or not they are served to a page.
-    let entries = read_dir(app)?;
-    for path in entries {
-        if path.is_file() && path.file_name().is_some_and(|name| name != MANIFEST_NAME) {
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            copy_file(&path, &out.join(&name))?;
-            written.insert(name);
-        }
-    }
+    copy_assets(app, &manifest.assets, out, &mut written)?;
+    copy_loose_files(app, out, &mut written)?;
 
     write_registrations(
         out,
@@ -337,8 +308,84 @@ pub fn build(app: &Path, binary: &Path, out: &Path) -> Result<Bundle, BundleErro
         &mut written,
     )?;
 
+    let files = describe_files(out, &written)?;
+    let bundle = Bundle {
+        name: display_name,
+        version: manifest.version.clone(),
+        identity,
+        scheme: manifest.scheme.clone().filter(|scheme| !scheme.is_empty()),
+        associations: normalized_associations(&manifest.associations)?,
+        entry: manifest.entry.clone(),
+        runtime: binary_name,
+        files,
+    };
+    let encoded = serde_json::to_vec_pretty(&bundle).map_err(|error| BundleError::Io {
+        path: out.join(BUNDLE_MANIFEST_NAME),
+        reason: error.to_string(),
+    })?;
+    write_bytes(&out.join(BUNDLE_MANIFEST_NAME), &encoded)?;
+    Ok(bundle)
+}
+
+/// Checks that the application and the runtime are what a bundle can be built from.
+fn check_bundle_inputs(manifest: &AppManifest, binary: &Path) -> Result<(), BundleError> {
+    if !binary.is_file() {
+        return Err(BundleError::MissingBinary {
+            path: binary.to_path_buf(),
+        });
+    }
+    if carries_a_script_character(&manifest.name) {
+        return Err(BundleError::Unscriptable { what: "name" });
+    }
+    Ok(())
+}
+
+/// The name the bundled runtime keeps, so a user can see which runtime they run.
+fn binary_name(binary: &Path) -> String {
+    binary.file_name().map_or_else(
+        || "ncui".to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+/// Copies the assets the application serves to a page.
+fn copy_assets(
+    app: &Path,
+    assets: &str,
+    out: &Path,
+    written: &mut BTreeSet<String>,
+) -> Result<(), BundleError> {
+    let source = app.join(assets);
+    if source.is_dir() {
+        copy_tree(&source, &out.join(assets), assets, written)?;
+    }
+    Ok(())
+}
+
+/// Copies the application directory's other files: notes, fixtures, a licence. They are
+/// part of the application whether or not they are served to a page.
+fn copy_loose_files(
+    app: &Path,
+    out: &Path,
+    written: &mut BTreeSet<String>,
+) -> Result<(), BundleError> {
+    for path in read_dir(app)? {
+        if path.is_file() && path.file_name().is_some_and(|name| name != MANIFEST_NAME) {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            copy_file(&path, &out.join(&name))?;
+            written.insert(name);
+        }
+    }
+    Ok(())
+}
+
+/// Describes the files a bundle holds: their size and their digest.
+fn describe_files(out: &Path, written: &BTreeSet<String>) -> Result<Vec<BundledFile>, BundleError> {
     let mut files = Vec::with_capacity(written.len());
-    for path in &written {
+    for path in written {
         let full = out.join(path);
         let bytes = std::fs::metadata(&full).map_err(|error| BundleError::Io {
             path: full.clone(),
@@ -350,22 +397,19 @@ pub fn build(app: &Path, binary: &Path, out: &Path) -> Result<Bundle, BundleErro
             sha256: digest(&full)?,
         });
     }
+    Ok(files)
+}
 
-    let bundle = Bundle {
-        name: display_name,
-        version: manifest.version.clone(),
-        identity,
-        scheme: manifest.scheme.clone().filter(|scheme| !scheme.is_empty()),
-        entry: manifest.entry.clone(),
-        runtime: binary_name,
-        files,
-    };
-    let encoded = serde_json::to_vec_pretty(&bundle).map_err(|error| BundleError::Io {
-        path: out.join(BUNDLE_MANIFEST_NAME),
-        reason: error.to_string(),
-    })?;
-    write_bytes(&out.join(BUNDLE_MANIFEST_NAME), &encoded)?;
-    Ok(bundle)
+/// The bundle's associations, normalised once, in the manifest's order.
+fn normalized_associations(associations: &[String]) -> Result<Vec<String>, BundleError> {
+    associations
+        .iter()
+        .map(|extension| {
+            ncui_native::normalize_extension(extension).map_err(|error| BundleError::Application {
+                reason: error.to_string(),
+            })
+        })
+        .collect()
 }
 
 /// Writes the scripts that register what this platform needs registered.

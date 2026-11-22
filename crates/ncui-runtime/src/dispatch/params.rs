@@ -8,7 +8,8 @@
 //!
 //! They live apart from the pipeline in `dispatch` so the pipeline reads as the
 //! security property it is — rate limit, authorize, dispatch, audit — rather than as
-//! several hundred lines of field validation.
+//! several hundred lines of field validation. The parameter readers are pure; the
+//! `invoke_*` handlers that answer a call carry it to the runtime's window registry.
 
 use core::time::Duration;
 use std::time::Instant;
@@ -331,6 +332,167 @@ pub(crate) fn invoke_window_zoom(runtime: &mut Runtime, params: &Value) -> Resul
             reason: format!("the engine could not scale window {id}"),
         })
         .operation("dispatch::window_zoom"))
+    }
+}
+
+/// `ncui.window.print_to_pdf` — render a window's page to PDF.
+///
+/// The engine is the printer: the webview is a Chromium engine, and its own `DevTools`
+/// protocol (`Page.printToPDF`) renders the live page exactly as the browser's print
+/// preview would. The command rides the same loopback transport `ncui.cdp.send` uses —
+/// no FFI, no new dependency, no second path to keep in step — and returns the PDF as
+/// base64 rather than writing a file nobody asked for. A caller that wants it on disk
+/// writes the bytes it is given, under the authority it already holds.
+pub(crate) fn invoke_window_print_to_pdf(runtime: &mut Runtime, params: &Value) -> Result<Value> {
+    const OPERATION: &str = "dispatch::window_print_to_pdf";
+    let id = window_id_param(params)?;
+    let mut cdp_params = serde_json::Map::new();
+    if let Some(landscape) = optional_bool(params, "landscape")? {
+        cdp_params.insert("landscape".to_owned(), json!(landscape));
+    }
+    if let Some(print_background) = optional_bool(params, "print_background")? {
+        cdp_params.insert("printBackground".to_owned(), json!(print_background));
+    }
+    if let Some(scale) = optional_number(params, "scale")? {
+        if !(0.1..=2.0).contains(&scale) {
+            return Err(
+                validation("scale", "must be a number between 0.1 and 2.0").operation(OPERATION)
+            );
+        }
+        cdp_params.insert("scale".to_owned(), json!(scale));
+    }
+    for (field, cdp_field) in [
+        ("paper_width", "paperWidth"),
+        ("paper_height", "paperHeight"),
+    ] {
+        if let Some(inches) = optional_number(params, field)? {
+            if !(1.0..=100.0).contains(&inches) {
+                return Err(
+                    validation(field, "must be a number between 1 and 100 inches")
+                        .operation(OPERATION),
+                );
+            }
+            cdp_params.insert(cdp_field.to_owned(), json!(inches));
+        }
+    }
+    let data = cdp_capture_data(
+        runtime,
+        id,
+        "Page.printToPDF",
+        &Value::Object(cdp_params),
+        OPERATION,
+    )?;
+    capture_answer(id, "pdf", &data)
+}
+
+/// `ncui.window.screenshot` — capture a window's page as an image.
+///
+/// The same engine transport carries Chromium's `Page.captureScreenshot`, which is how
+/// the browser's own inspector photographs a page. The image is returned as base64 in
+/// the requested format; what is captured is the page's content, and the platform's
+/// window frame around it is not part of the picture.
+pub(crate) fn invoke_window_screenshot(runtime: &mut Runtime, params: &Value) -> Result<Value> {
+    const OPERATION: &str = "dispatch::window_screenshot";
+    let id = window_id_param(params)?;
+    let mut cdp_params = serde_json::Map::new();
+    let mut format = "png";
+    if let Some(requested) = params.get("format").and_then(Value::as_str) {
+        if requested != "png" && requested != "jpeg" {
+            return Err(validation("format", "must be \"png\" or \"jpeg\"").operation(OPERATION));
+        }
+        format = requested;
+        cdp_params.insert("format".to_owned(), json!(requested));
+    }
+    if let Some(quality) = optional_number(params, "quality")? {
+        if !(0.0..=100.0).contains(&quality) {
+            return Err(
+                validation("quality", "must be a number between 0 and 100").operation(OPERATION)
+            );
+        }
+        cdp_params.insert("quality".to_owned(), json!(quality));
+    }
+    let data = cdp_capture_data(
+        runtime,
+        id,
+        "Page.captureScreenshot",
+        &Value::Object(cdp_params),
+        OPERATION,
+    )?;
+    capture_answer(id, format, &data)
+}
+
+/// Sends one CDP capture command to a window's engine and returns the base64 payload.
+///
+/// The mapping matches `ncui.cdp.send`'s: a window that is not open is `not_found`, an
+/// engine without the transport or an endpoint that refuses is `conflict`, and an answer
+/// without the promised payload is a conflict rather than an empty success.
+fn cdp_capture_data(
+    runtime: &mut Runtime,
+    id: WindowId,
+    method: &str,
+    cdp_params: &Value,
+    operation: &'static str,
+) -> Result<String> {
+    let command = json!({ "id": 1, "method": method, "params": cdp_params });
+    let answer = runtime
+        .windows
+        .cdp_send(id, &command)
+        .map_err(|_| {
+            NcError::new(ErrorKind::NotFound {
+                kind: "window".to_owned(),
+                id: id.to_string(),
+            })
+            .operation(operation)
+        })?
+        .map_err(|reason| NcError::new(ErrorKind::Conflict { reason }).operation(operation))?;
+    answer
+        .get("result")
+        .and_then(|result| result.get("data"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            NcError::new(ErrorKind::Conflict {
+                reason: format!("the engine answered {method} without capture data"),
+            })
+            .operation(operation)
+        })
+}
+
+/// The capture answer: the payload, and the byte length it decodes to.
+fn capture_answer(id: WindowId, format: &str, data: &str) -> Result<Value> {
+    let bytes = base64_decoded_len(data);
+    serde_json::to_value(json!({
+        "window": id.to_string(),
+        "format": format,
+        "bytes": bytes,
+        "data": data,
+    }))
+    .map_err(|e| json_error(&e))
+}
+
+/// The byte length a canonical base64 string decodes to, from its length and padding.
+fn base64_decoded_len(encoded: &str) -> usize {
+    let padding = encoded.matches('=').count();
+    encoded.len() * 3 / 4 - padding
+}
+
+/// An optional boolean parameter: absent or `null` means "the engine's default".
+fn optional_bool(params: &Value, field: &str) -> Result<Option<bool>> {
+    match params.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value.as_bool().map(Some).ok_or_else(|| {
+            validation(field, "must be a boolean").operation("dispatch::optional_param")
+        }),
+    }
+}
+
+/// An optional number parameter: absent or `null` means "the engine's default".
+fn optional_number(params: &Value, field: &str) -> Result<Option<f64>> {
+    match params.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value.as_f64().map(Some).ok_or_else(|| {
+            validation(field, "must be a number").operation("dispatch::optional_param")
+        }),
     }
 }
 
@@ -1148,4 +1310,102 @@ pub(crate) fn invoke_logs_query(runtime: &mut Runtime, params: &Value) -> Result
         "next_cursor": next_cursor,
     }))
     .map_err(|e| json_error(&e))
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::{base64_decoded_len, invoke_window_print_to_pdf, invoke_window_screenshot};
+    use crate::Runtime;
+    use ncui_core::{ErrorKind, Limits};
+    use serde_json::json;
+
+    fn runtime() -> Runtime {
+        Runtime::start(Limits::default()).expect("runtime")
+    }
+
+    /// A well-formed window identity no runtime has open.
+    const NO_WINDOW: &str = "00000000000000000000000000000009";
+
+    #[test]
+    fn base64_length_matches_the_bytes_the_payload_decodes_to() {
+        assert_eq!(base64_decoded_len(""), 0);
+        assert_eq!(base64_decoded_len("QQ=="), 1);
+        assert_eq!(base64_decoded_len("QUI="), 2);
+        assert_eq!(base64_decoded_len("QUJD"), 3);
+        assert_eq!(base64_decoded_len("QUJDRA=="), 4);
+    }
+
+    #[test]
+    fn print_to_pdf_refuses_a_scale_outside_the_engine_range() {
+        let mut rt = runtime();
+        let error =
+            invoke_window_print_to_pdf(&mut rt, &json!({ "window": NO_WINDOW, "scale": 5.0 }))
+                .expect_err("scale is refused");
+        assert!(
+            matches!(error.kind(), ErrorKind::Validation { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn print_to_pdf_refuses_an_out_of_range_paper_size() {
+        let mut rt = runtime();
+        let error = invoke_window_print_to_pdf(
+            &mut rt,
+            &json!({ "window": NO_WINDOW, "paper_width": 500.0 }),
+        )
+        .expect_err("paper width is refused");
+        assert!(
+            matches!(error.kind(), ErrorKind::Validation { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn print_to_pdf_names_a_window_that_is_not_open() {
+        let mut rt = runtime();
+        let error = invoke_window_print_to_pdf(&mut rt, &json!({ "window": NO_WINDOW }))
+            .expect_err("no window is open");
+        assert!(
+            matches!(error.kind(), ErrorKind::NotFound { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn screenshot_refuses_a_format_the_engine_does_not_offer() {
+        let mut rt = runtime();
+        let error =
+            invoke_window_screenshot(&mut rt, &json!({ "window": NO_WINDOW, "format": "webp" }))
+                .expect_err("webp is refused");
+        assert!(
+            matches!(error.kind(), ErrorKind::Validation { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn screenshot_refuses_a_quality_outside_the_engine_range() {
+        let mut rt = runtime();
+        let error = invoke_window_screenshot(
+            &mut rt,
+            &json!({ "window": NO_WINDOW, "format": "jpeg", "quality": 101 }),
+        )
+        .expect_err("quality is refused");
+        assert!(
+            matches!(error.kind(), ErrorKind::Validation { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn screenshot_names_a_window_that_is_not_open() {
+        let mut rt = runtime();
+        let error = invoke_window_screenshot(&mut rt, &json!({ "window": NO_WINDOW }))
+            .expect_err("no window is open");
+        assert!(
+            matches!(error.kind(), ErrorKind::NotFound { .. }),
+            "{error:?}"
+        );
+    }
 }

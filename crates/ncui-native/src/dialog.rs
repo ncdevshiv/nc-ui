@@ -208,6 +208,70 @@ impl DialogOutcome {
     }
 }
 
+/// A colour picker request: what the dialog is called and where it starts.
+///
+/// A colour is not a path, so this is its own request rather than another
+/// [`DialogKind`]: the file-dialog rules (filters, extensions, chosen-path validation) do
+/// not apply, and the platform picker is a different dialog entirely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColorRequest {
+    /// The dialog's title, when the application names one. Bounded like a dialog title.
+    /// The platform's colour picker does not take a title on every platform, so this is
+    /// honoured where the platform can and validated everywhere.
+    pub title: Option<String>,
+    /// The colour the picker starts on, as `#rrggbb`, when the application names one.
+    pub default: Option<String>,
+}
+
+/// The colour the person chose, as lowercase `#rrggbb`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ColorChoice {
+    /// The chosen colour, e.g. `#1a2b3c`.
+    pub hex: String,
+}
+
+/// Validates a colour picker request before anything is shown.
+///
+/// The same rules whether or not this build can show a picker: a title is bounded like a
+/// dialog title, and a starting colour must be a `#rrggbb` value — a picker seeded with
+/// anything else would be seeded with a platform error.
+///
+/// # Errors
+///
+/// [`DialogError::RefusedRequest`] naming the field and the rule it broke.
+pub fn validate_color_request(request: &ColorRequest) -> Result<(), DialogError> {
+    if let Some(title) = &request.title {
+        if title.trim().is_empty() {
+            return Err(DialogError::RefusedRequest {
+                field: "title",
+                reason: "it is empty".to_owned(),
+            });
+        }
+        if title.len() > MAX_DIALOG_TITLE_BYTES {
+            return Err(DialogError::RefusedRequest {
+                field: "title",
+                reason: format!("it is longer than {MAX_DIALOG_TITLE_BYTES} bytes"),
+            });
+        }
+    }
+    if let Some(default) = &request.default
+        && !is_hex_color(default)
+    {
+        return Err(DialogError::RefusedRequest {
+            field: "default",
+            reason: "it must be a `#rrggbb` colour, such as `#1a2b3c`".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Whether `text` is a `#rrggbb` colour, with or without the leading `#`.
+#[must_use]
+pub fn is_hex_color(text: &str) -> bool {
+    let body = text.strip_prefix('#').unwrap_or(text);
+    body.len() == 6 && body.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 /// Shows a native dialog and returns what the person chose.
 ///
 /// This is the seam the rest of the capability is written against: everything that decides
@@ -225,6 +289,24 @@ pub trait DialogBackend: core::fmt::Debug + Send + Sync {
     /// cannot complete it.
     fn show(&self, kind: DialogKind, options: &DialogOptions)
     -> Result<DialogOutcome, DialogError>;
+
+    /// Shows a native colour picker and returns the colour the person chose.
+    ///
+    /// The default is a refusal by name: a backend that shows file dialogs does not
+    /// necessarily show a colour picker, and a page that asks for one is owed the named
+    /// refusal rather than a silence.
+    ///
+    /// # Errors
+    ///
+    /// [`DialogError::Cancelled`] when the person cancels,
+    /// [`DialogError::Unavailable`] when this backend cannot show a colour picker, and
+    /// [`DialogError::Failed`] when the picker fails.
+    fn show_color(&self, request: &ColorRequest) -> Result<ColorChoice, DialogError> {
+        let _ = request;
+        Err(DialogError::Unavailable {
+            reason: "this backend does not show a colour dialog".to_owned(),
+        })
+    }
 }
 
 /// The options an application may set on a dialog.
@@ -475,6 +557,51 @@ mod platform {
                 }
             }
         }
+
+        /// Shows the platform's colour picker through the tool the platform ships.
+        ///
+        /// `rfd` has no colour picker, so this is the clipboard's shape rather than the
+        /// file dialog's: the picker is the .NET `ColorDialog` every Windows machine
+        /// already has, reached through PowerShell, which prints the chosen colour as
+        /// `#rrggbb` or nothing when the person cancels. Like the file dialog, the modal
+        /// itself blocks on a person and is the one step a test cannot drive; the script,
+        /// the parsing and the refusals are tested without a display.
+        fn show_color(
+            &self,
+            request: &super::ColorRequest,
+        ) -> Result<super::ColorChoice, super::DialogError> {
+            #[cfg(windows)]
+            {
+                let outcome = crate::process::run_command(
+                    std::path::Path::new("powershell"),
+                    "powershell",
+                    &[
+                        "-NoProfile".to_owned(),
+                        "-ExecutionPolicy".to_owned(),
+                        "Bypass".to_owned(),
+                        "-Command".to_owned(),
+                        color_dialog_script(request),
+                    ],
+                    None,
+                    COLOR_DIALOG_TIMEOUT,
+                    4096,
+                    None,
+                )
+                .map_err(|error| super::DialogError::Failed {
+                    reason: error.to_string(),
+                })?;
+                parse_color_output(&outcome.stdout)
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = request;
+                Err(super::DialogError::Unavailable {
+                    reason: "the colour picker is shown through the platform's own tool, \
+                            which this platform's adapter does not carry"
+                        .to_owned(),
+                })
+            }
+        }
     }
 
     /// Wraps one chosen path, treating the platform's `None` as the person cancelling.
@@ -525,6 +652,112 @@ mod platform {
     pub const fn dialogs_available() -> bool {
         true
     }
+
+    /// How long the colour picker may stay open.
+    ///
+    /// A person choosing a colour is not on a clock, but a tool call is: five minutes is
+    /// longer than a person takes and short enough that a picker left open overnight does
+    /// not hold the call forever.
+    #[cfg(windows)]
+    const COLOR_DIALOG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+    /// The PowerShell that shows the colour picker and prints the answer.
+    ///
+    /// The seed and the answer go through the same colour translator, so what comes back
+    /// is the same `#rrggbb` shape the request was validated against; nothing is printed
+    /// when the person cancels, which [`parse_color_output`] reads as a cancellation.
+    #[cfg(windows)]
+    fn color_dialog_script(request: &super::ColorRequest) -> String {
+        let default = request
+            .default
+            .clone()
+            .unwrap_or_else(|| "#ffffff".to_owned());
+        format!(
+            "Add-Type -AssemblyName System.Windows.Forms | Out-Null\n\
+             Add-Type -AssemblyName System.Drawing | Out-Null\n\
+             $dialog = New-Object System.Windows.Forms.ColorDialog\n\
+             $dialog.FullOpen = $true\n\
+             $dialog.AnyColor = $true\n\
+             $dialog.Color = [System.Drawing.ColorTranslator]::FromHtml('{default}')\n\
+             if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{\n\
+                 [System.Drawing.ColorTranslator]::ToHtml($dialog.Color)\n\
+             }} else {{\n\
+                 ''\n\
+             }}\n"
+        )
+    }
+
+    /// Reads the picker's answer: a colour, a cancellation, or a failure naming what came
+    /// back instead.
+    #[cfg(windows)]
+    fn parse_color_output(stdout: &str) -> Result<super::ColorChoice, super::DialogError> {
+        let text = stdout.trim();
+        if text.is_empty() {
+            return Err(super::DialogError::Cancelled);
+        }
+        if super::is_hex_color(text) {
+            let hex = if text.starts_with('#') {
+                text.to_lowercase()
+            } else {
+                format!("#{text}").to_lowercase()
+            };
+            return Ok(super::ColorChoice { hex });
+        }
+        Err(super::DialogError::Failed {
+            reason: format!(
+                "the colour picker answered {:?}, which is not a colour",
+                text.chars().take(64).collect::<String>()
+            ),
+        })
+    }
+
+    #[cfg(all(test, windows))]
+    mod color_tests {
+        use super::{color_dialog_script, parse_color_output};
+        use crate::dialog::{ColorRequest, DialogError};
+
+        #[test]
+        fn the_script_carries_the_seed_and_the_full_palette() {
+            let request = ColorRequest {
+                title: Some("Choose a colour".to_owned()),
+                default: Some("#1A2b3C".to_owned()),
+            };
+            let script = color_dialog_script(&request);
+            assert!(
+                script.contains("#1A2b3C"),
+                "the seed is in the script: {script}"
+            );
+            assert!(script.contains("FullOpen"), "the whole palette is shown");
+            assert!(
+                script.contains("ToHtml"),
+                "the answer is rendered as #rrggbb"
+            );
+        }
+
+        #[test]
+        fn a_script_without_a_seed_starts_on_white() {
+            let request = ColorRequest {
+                title: None,
+                default: None,
+            };
+            assert!(
+                color_dialog_script(&request).contains("'#ffffff'"),
+                "the default seed is white"
+            );
+        }
+
+        #[test]
+        fn an_answer_is_a_choice_and_silence_is_a_cancellation() {
+            let chosen = parse_color_output("#ff0000\r\n").expect("a colour");
+            assert_eq!(chosen.hex, "#ff0000");
+            let bare = parse_color_output("ff0000").expect("a colour without the hash");
+            assert_eq!(bare.hex, "#ff0000");
+            let cancelled = parse_color_output("  \r\n").expect_err("silence is a cancel");
+            assert!(matches!(cancelled, DialogError::Cancelled));
+            let garbage = parse_color_output("cannot open that").expect_err("not a colour");
+            assert!(matches!(garbage, DialogError::Failed { .. }), "{garbage}");
+        }
+    }
 }
 
 #[cfg(feature = "dialogs")]
@@ -549,6 +782,55 @@ pub const fn dialogs_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_colour_request_is_validated_before_anything_is_shown() {
+        let good = ColorRequest {
+            title: Some("Pick a highlight".to_owned()),
+            default: Some("#1A2b3C".to_owned()),
+        };
+        assert!(validate_color_request(&good).is_ok());
+        // A seed without the hash is the same colour; the answer is always normalised.
+        assert!(is_hex_color("1a2b3c") && is_hex_color("#1a2b3c"));
+        assert!(!is_hex_color("#1a2b"));
+        assert!(!is_hex_color("#1a2b3g"));
+
+        let bad_seed = ColorRequest {
+            title: None,
+            default: Some("purple".to_owned()),
+        };
+        let error = validate_color_request(&bad_seed).expect_err("a seed that is not a colour");
+        assert!(
+            matches!(
+                error,
+                DialogError::RefusedRequest {
+                    field: "default",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+
+        let empty_title = ColorRequest {
+            title: Some("   ".to_owned()),
+            default: None,
+        };
+        let error = validate_color_request(&empty_title).expect_err("an empty title");
+        assert!(
+            matches!(error, DialogError::RefusedRequest { field: "title", .. }),
+            "{error}"
+        );
+
+        let long_title = ColorRequest {
+            title: Some("t".repeat(MAX_DIALOG_TITLE_BYTES + 1)),
+            default: None,
+        };
+        let error = validate_color_request(&long_title).expect_err("an over-long title");
+        assert!(
+            matches!(error, DialogError::RefusedRequest { field: "title", .. }),
+            "{error}"
+        );
+    }
 
     #[test]
     fn a_well_formed_request_is_accepted() {

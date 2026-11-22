@@ -28,9 +28,11 @@
 
 pub mod bundle;
 pub mod commands;
+pub mod crash;
 pub mod installer;
 pub mod release;
 pub mod render;
+pub mod updater;
 pub mod usage;
 
 use core::fmt;
@@ -127,6 +129,17 @@ pub enum Command {
         from: Option<String>,
         /// Where applications are installed. Defaults to this user's own directory.
         root: Option<String>,
+        /// Whether to only check for an update, reporting it, instead of applying one.
+        ///
+        /// A check fetches the release document and compares versions; it downloads no
+        /// bundle and changes nothing. This is the seam an application's own schedule
+        /// uses — see `ncui_cli::updater` for the periodic form.
+        check: bool,
+    },
+    /// Import the bookmarks Chrome holds for this user, as machine-readable JSON.
+    ImportChrome {
+        /// The Chrome profile directory to read. Defaults to this user's own.
+        profile: Option<String>,
     },
     /// Remove an installed application, with the registrations it made.
     Uninstall {
@@ -238,6 +251,10 @@ pub const SUBCOMMANDS: &[(&str, &str)] = &[
         "Replace an installed application with another version of itself (--root for somewhere else, --from to fetch a release)",
     ),
     (
+        "import-chrome",
+        "Import the bookmarks Chrome holds for this user, as JSON (--profile for another profile)",
+    ),
+    (
         "uninstall",
         "Remove an installed application, with its registrations",
     ),
@@ -276,7 +293,8 @@ const FLAG_SCOPES: &[(&str, &[&str])] = &[
     ("run", &["--watch"]),
     ("build", &["--out", "--binary", "--check", "--installer"]),
     ("install", &["--root"]),
-    ("update", &["--root", "--from"]),
+    ("update", &["--root", "--from", "--check"]),
+    ("import-chrome", &["--profile"]),
     ("uninstall", &["--root"]),
     ("installed", &["--root"]),
     ("launch", &["--root"]),
@@ -312,6 +330,8 @@ struct Flags {
     installer: bool,
     /// The URL of a release document to update from, when one was named.
     from: Option<String>,
+    /// The browser profile directory an import reads from, when one was named.
+    profile: Option<String>,
 }
 
 /// Reads a command line's flags, refusing any the subcommand does not accept.
@@ -363,6 +383,11 @@ fn parse_flags(rest: &[&String], subcommand: &str) -> Result<Flags, String> {
                 index += 1;
             }
             "--installer" => flags.installer = true,
+            "--profile" => {
+                let value = take_value(rest, index, "--profile", "a browser profile directory")?;
+                flags.profile = Some(value.to_owned());
+                index += 1;
+            }
             "--out" => {
                 let value = take_value(rest, index, "--out", "a directory")?;
                 flags.out = Some(value.to_owned());
@@ -442,10 +467,14 @@ fn take_positional(rest: &mut Vec<&String>, subcommand: &str) -> Result<Option<S
         return Ok(None);
     }
     // An update can name a URL instead of a directory, so the positional is not required when
-    // `--from` is given. It is still taken when it comes *before* the first flag, because
-    // `update <dir> --from <url>` names two sources and the command refuses that with a message
-    // saying so rather than silently choosing one.
-    if subcommand == "update" && rest.iter().any(|argument| *argument == "--from") {
+    // `--from` is given, and a `--check` names nothing but that URL. A positional is still taken
+    // when it comes *before* the first flag, because `update <dir> --from <url>` names two sources
+    // and the command refuses that with a message saying so rather than silently choosing one.
+    if subcommand == "update"
+        && rest
+            .iter()
+            .any(|argument| *argument == "--from" || *argument == "--check")
+    {
         let first_flag = rest
             .iter()
             .position(|argument| argument.starts_with('-'))
@@ -541,6 +570,7 @@ where
         installer,
         from,
         port,
+        profile,
     } = parse_flags(&rest, subcommand)?;
 
     match subcommand.as_str() {
@@ -569,7 +599,9 @@ where
             bundle: positional,
             from,
             root,
+            check,
         }),
+        "import-chrome" => Ok(Command::ImportChrome { profile }),
         "uninstall" => Ok(Command::Uninstall {
             name: positional.unwrap_or_default(),
             root,
@@ -1035,6 +1067,12 @@ mod tests {
                     ]
                 } else if *flag == "--registry" {
                     vec![(*name).to_owned(), (*flag).to_owned(), registry_arg.clone()]
+                } else if *flag == "--profile" {
+                    vec![
+                        (*name).to_owned(),
+                        (*flag).to_owned(),
+                        "C:/profile".to_owned(),
+                    ]
                 } else if matches!(*flag, "--root" | "--out" | "--binary" | "--from") {
                     // These take a value, and every command that accepts one also takes a
                     // positional: the bundle to install, the name to remove, or the application to

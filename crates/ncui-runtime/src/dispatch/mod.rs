@@ -43,9 +43,9 @@ use self::params::{
     invoke_devtools_tree, invoke_logs_query, invoke_state_inspect, invoke_window_child_bounds,
     invoke_window_child_close, invoke_window_child_create, invoke_window_child_list,
     invoke_window_devtools_close, invoke_window_devtools_open, invoke_window_devtools_state,
-    invoke_window_drag_region, invoke_window_post, invoke_window_zoom, remembered_place,
-    window_change_param, window_id_param, window_rejection, window_request_param,
-    window_shape_param,
+    invoke_window_drag_region, invoke_window_post, invoke_window_print_to_pdf,
+    invoke_window_screenshot, invoke_window_zoom, remembered_place, window_change_param,
+    window_id_param, window_rejection, window_request_param, window_shape_param,
 };
 
 /// The methods this runtime implements, with the authority each one needs.
@@ -149,6 +149,18 @@ pub fn method_table() -> Vec<MethodDescription> {
         entry(
             "ncui.window.zoom",
             "Scale a window's page by a factor, where 1.0 is the platform default and the accepted range is 0.25 to 5.0.",
+            CapabilitySet::empty().with(Capability::Window),
+            false,
+        ),
+        entry(
+            "ncui.window.print.pdf",
+            "Render a window's page to PDF through the engine's own DevTools protocol; the answer carries the PDF as base64.",
+            CapabilitySet::empty().with(Capability::Window),
+            false,
+        ),
+        entry(
+            "ncui.window.screenshot",
+            "Capture a window's page as a PNG or JPEG through the engine's own DevTools protocol; the answer carries the image as base64.",
             CapabilitySet::empty().with(Capability::Window),
             false,
         ),
@@ -785,6 +797,8 @@ fn invoke(
         "ncui.window.post" => invoke_window_post(runtime, &request.params),
         "ncui.window.drag.region" => invoke_window_drag_region(runtime, &request.params),
         "ncui.window.zoom" => invoke_window_zoom(runtime, &request.params),
+        "ncui.window.print.pdf" => invoke_window_print_to_pdf(runtime, &request.params),
+        "ncui.window.screenshot" => invoke_window_screenshot(runtime, &request.params),
         "ncui.window.child.create" => invoke_window_child_create(runtime, &request.params),
         "ncui.window.child.bounds" => invoke_window_child_bounds(runtime, &request.params),
         "ncui.window.child.close" => invoke_window_child_close(runtime, &request.params),
@@ -1157,15 +1171,18 @@ mod tests {
                         "ncui.window.create" | "ncui.window.create.child" => {
                             json!({ "url": "https://example.com" })
                         }
-                        // Closing a window, asking about its theme, driving the inspector
-                        // and starting a drag take the same parameter and nothing else, so
-                        // they are one arm.
+                        // Closing a window, asking about its theme, driving the inspector,
+                        // starting a drag, printing it to PDF and photographing it take the
+                        // same parameter — the window — and nothing else, so they are one
+                        // arm.
                         "ncui.window.close"
                         | "ncui.window.theme"
                         | "ncui.window.drag.region"
                         | "ncui.window.devtools.open"
                         | "ncui.window.devtools.close"
-                        | "ncui.window.devtools.state" => match created_window {
+                        | "ncui.window.devtools.state"
+                        | "ncui.window.print.pdf"
+                        | "ncui.window.screenshot" => match created_window {
                             Some(id) => json!({ "window": id.to_string() }),
                             None => json!({ "window": "00000000000000000000000000000001" }),
                         },
@@ -1248,6 +1265,8 @@ mod tests {
                                 | "ncui.window.list"
                                 | "ncui.cdp.send"
                                 | "ncui.app.emit"
+                                | "ncui.window.print.pdf"
+                                | "ncui.window.screenshot"
                         ) && response.error.as_ref().map(|e| e.data.ncui_code.as_str())
                             == Some("not_found");
                     assert!(
@@ -1623,6 +1642,16 @@ mod tests {
                             .to_string(),
                         "factor": 1.25,
                     }),
+                    "ncui.window.print.pdf" => json!({
+                        "window": created_window
+                            .expect("create is listed before print.pdf")
+                            .to_string(),
+                    }),
+                    "ncui.window.screenshot" => json!({
+                        "window": created_window
+                            .expect("create is listed before screenshot")
+                            .to_string(),
+                    }),
                     "ncui.window.devtools.open"
                     | "ncui.window.devtools.close"
                     | "ncui.window.devtools.state" => json!({
@@ -1861,7 +1890,9 @@ mod tests {
         }
 
         fn cdp_send(&self, _command: &Value) -> Result<Value, String> {
-            Ok(serde_json::json!({ "result": {} }))
+            // A capture answer carries the payload the method promises, so the window
+            // methods that ride this transport see an honest engine answer.
+            Ok(serde_json::json!({ "result": { "data": "QUJD" } }))
         }
 
         fn window_theme(&self) -> Option<ncui_webview::Theme> {

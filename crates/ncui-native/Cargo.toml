@@ -31,3 +31,12 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 global-hotkey = { workspace = true, optional = true }
 rfd = { workspace = true, optional = true }
+
+# ADR-012 ninth exception: closing a timed-out program's whole process tree on Windows
+# needs a job object, which `std` does not expose and `unsafe_code = "forbid"` forbids
+# reaching directly. `win32job` is a safe wrapper over that one platform call, the same
+# way `global-hotkey` and `tray-icon` wrap theirs. Windows-only: on Unix the runner
+# contains the tree with a process group, which `std` does expose. See ADR-019 and
+# docs/known-gaps.md ("a timed-out program's tree is stopped").
+[target.'cfg(windows)'.dependencies]
+win32job = "2.1"

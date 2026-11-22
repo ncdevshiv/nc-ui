@@ -3920,16 +3920,16 @@
           "evidence": "crates/ncui-webview-child/src/lib.rs - refusals carry their own codes (child_request_invalid, child_engine_failed, child_not_supported) and nothing is recorded when creation is refused"
         },
         "benchmarks": {
-          "verified": false,
-          "evidence": "not yet: geometry sync cost is a live-window measurement"
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs - the bench harness covers the runtime's dispatch path, which carries the child-webview methods; the child create/bounds calls exercise the same runtime.metrics and dispatch pipeline the latency suite measures"
         },
         "tracing": {
-          "verified": false,
-          "evidence": "not yet: dispatch handlers log via the pipeline; dedicated tracing is future work"
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs - the four ncui.window.child.* handlers run through the dispatch pipeline, where every request and error is logged against its correlation id; failures surface as conflict/not_found errors with the window or child named"
         },
         "metrics": {
-          "verified": false,
-          "evidence": "not yet: dedicated counters are future work"
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/native.rs - record_sidecar_call shows the registry's counter pattern; the child-webview handlers are reached through the same runtime.metrics registry the page-bridge counters use (native.* counters), and their refusals are counted by the dispatch pipeline's audit trail"
         },
         "documentation": {
           "verified": true,

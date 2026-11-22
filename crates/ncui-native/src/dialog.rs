@@ -587,7 +587,7 @@ mod platform {
                     4096,
                     None,
                 )
-                .map_err(|error| super::DialogError::Failed {
+                .map_err(|error| DialogError::Failed {
                     reason: error.to_string(),
                 })?;
                 parse_color_output(&outcome.stdout)
@@ -690,10 +690,10 @@ mod platform {
     /// Reads the picker's answer: a colour, a cancellation, or a failure naming what came
     /// back instead.
     #[cfg(windows)]
-    fn parse_color_output(stdout: &str) -> Result<super::ColorChoice, super::DialogError> {
+    fn parse_color_output(stdout: &str) -> Result<super::ColorChoice, DialogError> {
         let text = stdout.trim();
         if text.is_empty() {
-            return Err(super::DialogError::Cancelled);
+            return Err(DialogError::Cancelled);
         }
         if super::is_hex_color(text) {
             let hex = if text.starts_with('#') {
@@ -703,7 +703,7 @@ mod platform {
             };
             return Ok(super::ColorChoice { hex });
         }
-        Err(super::DialogError::Failed {
+        Err(DialogError::Failed {
             reason: format!(
                 "the colour picker answered {:?}, which is not a colour",
                 text.chars().take(64).collect::<String>()

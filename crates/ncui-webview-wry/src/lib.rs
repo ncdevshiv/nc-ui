@@ -55,10 +55,18 @@ pub use host::run_on_main_thread;
 )]
 pub mod placeholder_types {
     /// The window host. Only present in a build with the `wry-engine` feature.
-    #[allow(missing_docs)]
+    #[derive(Debug)]
+    #[allow(
+        missing_docs,
+        reason = "documented at the type site above; the inner attribute cannot carry it"
+    )]
     pub struct WindowHost;
     /// The adapter from NC-UI's host port to `wry`.
-    #[allow(missing_docs)]
+    #[derive(Debug)]
+    #[allow(
+        missing_docs,
+        reason = "documented at the type site above; the inner attribute cannot carry it"
+    )]
     pub struct WryHostFactory;
 }
 

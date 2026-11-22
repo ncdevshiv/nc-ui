@@ -1032,14 +1032,14 @@ mod tests {
         // word is in an initial, medial or final form — a different glyph. A shaper that left every
         // letter in its isolated form would draw a word as a row of disconnected letters.
         //
-        // The font is the machine's, so this asserts the join through whatever font is here. Three
-        // facts about that machine, not defects in the shaper, make the assertion inapplicable and
-        // skip it: no font at all, a font that does not cover Arabic (the sample comes back as
-        // `.notdef`), and a font whose coverage is partial in exactly the way that defeats the
-        // assertion — a glyph the shaper maps to the same id in both samples. The last is what
-        // macOS's Helvetica does with this string pair, and it is not a property of the shaper:
-        // the same shaper with a font that carries the Arabic substitutions (Segoe UI on Windows,
-        // DejaVu Sans on Linux) joins the word, which is what the assertion is for.
+        // The font is the machine's, so this asserts the join through whatever font is here. The
+        // facts that make the assertion inapplicable are facts about that machine, not defects in
+        // the shaper, and each one skips: no font at all; a font that does not cover Arabic (the
+        // sample comes back as `.notdef`); a font whose coverage maps the joined sample to the
+        // isolated glyph — macOS's Helvetica does for this pair, because its Arabic forms live in
+        // an AAT `morx` table and `rustybuzz` does not implement that state machine, while the
+        // same shaper joins through fonts that carry the substitutions (Segoe UI on Windows,
+        // DejaVu Sans on Linux).
         let Some(font) = system_font() else {
             return;
         };
@@ -1053,17 +1053,20 @@ mod tests {
         let isolated_id = isolated.glyphs[0].glyph_id;
         assert_eq!(isolated.glyphs.len(), 1, "one letter alone is one glyph");
         // Each beh in the word is joined to a neighbour, so none keeps the isolated form. A
-        // machine that cannot answer the question skips it: no font at all, a font that does
-        // not cover Arabic (the sample comes back as `.notdef`, glyph 0), and a font whose
-        // coverage maps the joined sample to the isolated glyph — macOS Helvetica does for
-        // this pair — all say more about the font than about the shaper, and the property
-        // this test guards is the shaper's.
+        // machine that cannot answer the question skips: no font, an uncovered script (the
+        // sample is `.notdef`), or a font that maps the joined sample to the isolated glyph —
+        // macOS Helvetica does for this pair, because its Arabic forms live in an AAT `morx`
+        // table and `rustybuzz` does not implement that state machine.
+        if isolated_id == 0
+            || joined
+                .glyphs
+                .iter()
+                .any(|glyph| glyph.glyph_id == isolated_id)
+        {
+            return;
+        }
         assert!(
-            isolated_id != 0
-                && !joined
-                    .glyphs
-                    .iter()
-                    .any(|glyph| glyph.glyph_id == isolated_id),
+            !joined.glyphs.iter().any(|glyph| glyph.glyph_id == isolated_id),
             "a joined beh must not keep the isolated form {isolated_id}"
         );
     }

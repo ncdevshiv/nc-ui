@@ -125,6 +125,26 @@ fn read_response(stream: &mut TcpStream) -> Option<Response> {
     read_frame(stream).map(|bytes| serde_json::from_slice(&bytes).expect("valid JSON-RPC"))
 }
 
+fn call_on_stream(stream: &mut TcpStream, method: &str, params: Value) -> Response {
+    let request = Request::new(json!(1), method, params);
+    write_frame(stream, &serde_json::to_vec(&request).expect("serialise"));
+    read_response(stream).expect("a response")
+}
+
+fn audited_connection_subject(runtime: &Runtime, action: &str) -> String {
+    let event = runtime.audit.newest().expect("a request must be audited");
+    assert_eq!(
+        event.action, action,
+        "the newest audit event must be the request"
+    );
+    assert!(
+        event.agent_id.starts_with("tcp-"),
+        "the audited subject must name a transport connection: {}",
+        event.agent_id
+    );
+    event.agent_id.clone()
+}
+
 #[test]
 fn an_authenticated_peer_can_describe_the_runtime_over_a_socket() {
     let harness = Harness::start(AgentRole::Observer);
@@ -394,25 +414,101 @@ fn an_observer_may_list_windows_and_a_host_is_needed() {
 }
 
 #[test]
-fn a_destructive_call_with_consent_is_served() {
+fn a_destructive_call_with_consent_is_served_on_the_same_connection() {
     let harness = Harness::start(AgentRole::Administrator);
-    // The legacy `consent: true` authorizes nothing destructive; the token is the consent.
-    // It is minted by the runtime the server shares, bound to the method and its capability.
-    let mut runtime = harness.runtime.lock().expect("runtime lock");
+    let mut stream = harness.connect();
+
+    let harmless = call_on_stream(&mut stream, "ncui.health", json!({}));
+    assert!(
+        harmless.error.is_none(),
+        "setup call failed: {:?}",
+        harmless.error
+    );
+    let subject = {
+        let runtime = harness.runtime.lock().expect("runtime lock");
+        audited_connection_subject(&runtime, "ncui.health")
+    };
     let correlation = ncui_core::CorrelationId::new();
-    let token = runtime
-        .mint_consent(
-            correlation,
-            "ncui.logs.purge",
-            CapabilitySet::empty().with(Capability::ReadLogs),
-        )
-        .expect("mint");
-    drop(runtime);
-    let response = harness.call(
+    let token = {
+        let mut runtime = harness.runtime.lock().expect("runtime lock");
+        runtime
+            .mint_consent(
+                correlation,
+                &subject,
+                "ncui.logs.purge",
+                CapabilitySet::empty().with(Capability::ReadLogs),
+                &json!({}),
+            )
+            .expect("mint")
+    };
+
+    let response = call_on_stream(
+        &mut stream,
         "ncui.logs.purge",
         json!({ "consent_token": token.to_value() }),
     );
     assert!(response.error.is_none(), "got: {:?}", response.error);
+}
+
+#[test]
+fn a_token_for_one_connection_is_refused_on_another_without_being_spent() {
+    let harness = Harness::start(AgentRole::Administrator);
+    let mut original = harness.connect();
+    let harmless = call_on_stream(&mut original, "ncui.health", json!({}));
+    assert!(
+        harmless.error.is_none(),
+        "original connection setup failed: {:?}",
+        harmless.error
+    );
+    let subject = {
+        let runtime = harness.runtime.lock().expect("runtime lock");
+        audited_connection_subject(&runtime, "ncui.health")
+    };
+
+    let mut other = harness.connect();
+    let harmless = call_on_stream(&mut other, "ncui.health", json!({}));
+    assert!(
+        harmless.error.is_none(),
+        "other connection setup failed: {:?}",
+        harmless.error
+    );
+    let other_subject = {
+        let runtime = harness.runtime.lock().expect("runtime lock");
+        audited_connection_subject(&runtime, "ncui.health")
+    };
+    assert_ne!(
+        subject, other_subject,
+        "separate connections must have distinct audited subjects"
+    );
+
+    let correlation = ncui_core::CorrelationId::new();
+    let token = {
+        let mut runtime = harness.runtime.lock().expect("runtime lock");
+        runtime
+            .mint_consent(
+                correlation,
+                &subject,
+                "ncui.logs.purge",
+                CapabilitySet::empty().with(Capability::ReadLogs),
+                &json!({}),
+            )
+            .expect("mint")
+    };
+    let params = json!({ "consent_token": token.to_value() });
+
+    // A subject mismatch must refuse before the nonce is spent.
+    let refused = call_on_stream(&mut other, "ncui.logs.purge", params.clone());
+    let error = refused
+        .error
+        .expect("another connection must not use this token");
+    assert_eq!(error.data.ncui_code, "capability_denied");
+
+    let allowed = call_on_stream(&mut original, "ncui.logs.purge", params);
+    assert!(
+        allowed.error.is_none(),
+        "the refused cross-connection attempt spent the token: {:?}",
+        allowed.error
+    );
 }
 
 #[test]

@@ -56,8 +56,7 @@ function runBench(config) {
       .then(() => {
         completed += 1;
         return step(index + 1);
-      })
-      .catch(() => step(index + 1));
+      });
   };
 
   return step(0).then((result) => {
@@ -67,7 +66,7 @@ function runBench(config) {
     const text = JSON.stringify(result);
     benchElement.textContent = text;
     return window.ncui
-      .invoke("fs.write_text", { path: output, text, consent: true })
+      .invoke("fs.write_text", { path: output, text })
       .then(() => result)
       .catch((error) => {
         benchElement.textContent = `${text}\n(write refused: ${error.message})`;

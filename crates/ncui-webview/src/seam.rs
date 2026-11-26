@@ -510,6 +510,22 @@ impl HostSeam {
         self
     }
 
+    /// Creates a child seam with its own lifecycle and no capabilities.
+    ///
+    /// Navigation, actions, locale and text direction are copied from the parent. The empty grant
+    /// intentionally prevents the child from inheriting parent authority.
+    #[must_use]
+    pub fn isolated_child(&self, lifecycle: WindowLifecycle) -> Self {
+        Self {
+            lifecycle,
+            grant: CapabilityGrant::none(),
+            navigation: self.navigation.clone(),
+            actions: self.actions.clone(),
+            locale: self.locale.clone(),
+            text_direction: self.text_direction.clone(),
+        }
+    }
+
     /// A seam that refuses everything.
     ///
     /// Used where a host exists without a window behind it — an engine created outside the
@@ -727,6 +743,50 @@ mod tests {
             "describe_metrics",
             CapabilitySet::empty().with(Capability::InspectRuntime),
         )
+    }
+
+    #[test]
+    fn isolated_child_copies_policy_without_inheriting_authority() {
+        let parent = running_seam().with_locale("fr-FR", "ltr");
+        let child_lifecycle = WindowLifecycle::new();
+        child_lifecycle
+            .transition(HostState::Created)
+            .expect("created");
+        child_lifecycle
+            .transition(HostState::Attaching)
+            .expect("attaching");
+        child_lifecycle
+            .transition(HostState::Running)
+            .expect("running");
+        let child = parent.isolated_child(child_lifecycle.clone());
+
+        assert_eq!(child.lifecycle.state(), Some(HostState::Running));
+        assert!(child.grant().granted().is_empty());
+        assert!(!parent.grant().granted().is_empty());
+        assert_eq!(child.actions().entries(), parent.actions().entries());
+        assert!(child.authorize_perform("describe_metrics").is_err());
+
+        for url in ["https://app.example.com/next", "https://evil.test/steal"] {
+            let request = NavigationRequest::from_url(url, true).expect("a valid url");
+            assert_eq!(
+                child.evaluate_navigation(&request),
+                parent.evaluate_navigation(&request)
+            );
+        }
+
+        let response = child.handle(&SeamMessage::Describe, &mut |_, _| Ok(Value::Null));
+        assert!(response.ok, "{}", response.outcome);
+        let payload = response.payload.expect("a payload");
+        assert_eq!(payload["locale"], json!("fr-FR"));
+        assert_eq!(payload["text_direction"], json!("ltr"));
+        assert_eq!(payload["capabilities"], json!([]));
+
+        child_lifecycle
+            .transition(HostState::Suspended)
+            .expect("suspend");
+        assert_eq!(parent.lifecycle.state(), Some(HostState::Running));
+        let response = child.handle(&SeamMessage::Describe, &mut |_, _| Ok(Value::Null));
+        assert!(!response.ok, "a suspended child must not serve");
     }
 
     #[test]

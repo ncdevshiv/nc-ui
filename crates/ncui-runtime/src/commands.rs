@@ -14,8 +14,8 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
-use ncui_core::{Capability, CapabilitySet, WindowId};
-use ncui_webview::{ActionTable, ActionTableError, SeamError};
+use ncui_core::{Capability, CapabilitySet};
+use ncui_webview::{ActionTable, ActionTableError, PageTarget, SeamError};
 use serde_json::Value;
 
 /// Why a command registration was refused.
@@ -97,8 +97,8 @@ struct Inner {
 /// answer arrives under the reply id, the runtime can settle the call that produced it.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingReply {
-    /// The window the call came from, which is where the answer is delivered.
-    pub window: WindowId,
+    /// The page the call came from, which is where the answer is delivered.
+    pub target: PageTarget,
     /// The correlation id of the original `invoke`, echoed when the answer settles it.
     pub original_id: String,
 }
@@ -315,7 +315,7 @@ impl PageCommands {
     /// Returns `None` when [`MAX_PENDING_PAGE_CALLS`] are already outstanding, which the caller
     /// turns into a busy refusal for the original `invoke` rather than queueing without bound.
     #[must_use]
-    pub(crate) fn begin_page_call(&self, window: WindowId, original_id: &str) -> Option<String> {
+    pub(crate) fn begin_page_call(&self, target: PageTarget, original_id: &str) -> Option<String> {
         let mut pending = self
             .pending
             .lock()
@@ -330,7 +330,7 @@ impl PageCommands {
         pending.insert(
             reply_id.clone(),
             PendingReply {
-                window,
+                target,
                 original_id: original_id.to_owned(),
             },
         );
@@ -338,12 +338,23 @@ impl PageCommands {
     }
 
     /// Takes a page-handler call that has been answered, removing it so it cannot settle twice.
+    ///
+    /// A reply is accepted only from the page that started the call. A page that guesses another
+    /// call's reply id cannot settle it or consume it.
     #[must_use]
-    pub(crate) fn take_page_call(&self, reply_id: &str) -> Option<PendingReply> {
-        self.pending
+    pub(crate) fn take_page_call(
+        &self,
+        reply_id: &str,
+        expected: PageTarget,
+    ) -> Option<PendingReply> {
+        let mut pending = self
+            .pending
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(reply_id)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending.get(reply_id)?.target != expected {
+            return None;
+        }
+        pending.remove(reply_id)
     }
 
     fn insert(
@@ -567,21 +578,21 @@ mod tests {
         // reply id and remembers the call it will settle, and the answer removes that record so
         // it cannot settle twice or answer a call nobody started.
         let commands = PageCommands::new();
-        let window = WindowId::new();
+        let target = PageTarget::Window(ncui_core::WindowId::new());
         let reply_id = commands
-            .begin_page_call(window, "p1-original")
+            .begin_page_call(target, "p1-original")
             .expect("a call is started");
         let pending = commands
-            .take_page_call(&reply_id)
+            .take_page_call(&reply_id, target)
             .expect("the call is awaiting its answer");
-        assert_eq!(pending.window, window);
+        assert_eq!(pending.target, target);
         assert_eq!(pending.original_id, "p1-original");
         assert!(
-            commands.take_page_call(&reply_id).is_none(),
+            commands.take_page_call(&reply_id, target).is_none(),
             "a call that has been settled is gone, so it cannot settle twice"
         );
         assert!(
-            commands.take_page_call("page-reply-nope").is_none(),
+            commands.take_page_call("page-reply-nope", target).is_none(),
             "an answer for a call nobody started is dropped"
         );
     }
@@ -589,13 +600,37 @@ mod tests {
     #[test]
     fn page_handler_reply_ids_are_distinct_per_call() {
         let commands = PageCommands::new();
-        let window = WindowId::new();
+        let target = PageTarget::Window(ncui_core::WindowId::new());
         let first = commands
-            .begin_page_call(window, "a")
+            .begin_page_call(target, "a")
             .expect("the first call");
         let second = commands
-            .begin_page_call(window, "b")
+            .begin_page_call(target, "b")
             .expect("the second call");
         assert_ne!(first, second, "each call mints its own reply id");
+    }
+
+    #[test]
+    fn a_page_cannot_settle_another_pages_handler_call() {
+        let commands = PageCommands::new();
+        let parent = ncui_core::WindowId::new();
+        let window = PageTarget::Window(parent);
+        let child = PageTarget::Child {
+            parent,
+            child: ncui_webview_child::ChildWebviewId::from_raw(7),
+        };
+        let reply_id = commands
+            .begin_page_call(window, "original")
+            .expect("the parent call starts");
+
+        assert!(
+            commands.take_page_call(&reply_id, child).is_none(),
+            "a child cannot consume a parent's pending call"
+        );
+        let pending = commands
+            .take_page_call(&reply_id, window)
+            .expect("the originating page can still settle it");
+        assert_eq!(pending.target, window);
+        assert_eq!(pending.original_id, "original");
     }
 }

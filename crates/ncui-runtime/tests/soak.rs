@@ -142,14 +142,15 @@ fn a_runtime_returns_to_baseline_after_repeated_cycles() {
             "ncui.metrics.query",
         ] {
             let params = if method == "ncui.logs.purge" {
-                // The destructive method needs a minted token; the legacy `consent: true`
-                // authorizes nothing and would leave the ring unpurged.
+                // Mint for this round's session and the purge operation's empty parameters.
                 let correlation = ncui_core::CorrelationId::new();
                 let token = runtime
                     .mint_consent(
                         correlation,
+                        "soak-runtime",
                         method,
                         CapabilitySet::empty().with(Capability::ReadLogs),
+                        &json!({}),
                     )
                     .expect("mint");
                 json!({ "consent_token": token.to_value() })

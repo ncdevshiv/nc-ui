@@ -22,6 +22,7 @@ ncui-a11y = { workspace = true }
 ncui-ipc = { workspace = true }
 ncui-runtime = { workspace = true }
 ncui-webview = { workspace = true }
+ncui-webview-child = { workspace = true }
 ncui-observability = { workspace = true }
 ncui-scheduler = { workspace = true }
 ncui-security = { workspace = true }

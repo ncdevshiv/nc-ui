@@ -168,7 +168,10 @@ pub const fn json_rpc_code(kind: &ErrorKind) -> i32 {
         ErrorKind::NotFound { .. } => -32005,
         ErrorKind::Conflict { .. } => -32006,
         ErrorKind::Backpressure { .. } => -32008,
-        ErrorKind::Internal { .. } | ErrorKind::Io { .. } | ErrorKind::Codec { .. } => SERVER_ERROR,
+        ErrorKind::Internal { .. }
+        | ErrorKind::Io { .. }
+        | ErrorKind::Codec { .. }
+        | ErrorKind::Cdp { .. } => SERVER_ERROR,
         _ => {
             // A failure class added to `ncui_core` after this mapping was written. Reported
             // as an internal error until it is given a deliberate code of its own.
@@ -243,6 +246,19 @@ mod tests {
     }
 
     #[test]
+    fn a_cdp_error_preserves_its_stable_code_on_the_rpc_surface() {
+        let error = NcError::new(ErrorKind::Cdp {
+            code: "cdp_target_bind_failed",
+            reason: "two new page targets".to_owned(),
+        })
+        .operation("dispatch::cdp_send");
+        let rpc = RpcError::from_nc(&error);
+        assert_eq!(rpc.code, SERVER_ERROR);
+        assert_eq!(rpc.data.ncui_code, "cdp_target_bind_failed");
+        assert!(!rpc.data.retryable);
+    }
+
+    #[test]
     fn every_known_kind_maps_to_its_documented_code() {
         // One entry per `ErrorKind` variant. Adding a variant to `ncui_core` should add an
         // entry here, which is what turns the wildcard arm from a silent gap into a
@@ -281,6 +297,13 @@ mod tests {
                 -32005,
             ),
             (ErrorKind::Conflict { reason: "r".into() }, -32006),
+            (
+                ErrorKind::Cdp {
+                    code: "cdp_command_failed",
+                    reason: "r".into(),
+                },
+                -32603,
+            ),
             (ErrorKind::Protocol { reason: "r".into() }, -32600),
             (
                 ErrorKind::Backpressure {
@@ -341,6 +364,10 @@ mod tests {
                 id: "i".into(),
             },
             ErrorKind::Conflict { reason: "r".into() },
+            ErrorKind::Cdp {
+                code: "cdp_platform_unsupported",
+                reason: "r".into(),
+            },
             ErrorKind::Protocol { reason: "r".into() },
             ErrorKind::Backpressure {
                 channel: "c".into(),

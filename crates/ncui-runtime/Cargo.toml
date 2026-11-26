@@ -23,6 +23,8 @@ global-shortcuts = ["ncui-native/global-hotkeys"]
 # reports on a host with no notifier. The permission, option and path rules are plain Rust and
 # run either way.
 dialogs = ["ncui-native/dialogs"]
+# Enables manifest-declared native menu bars in the real window host.
+native-menu = ["ncui-webview-wry/native-menu"]
 
 default = []
 # The real window host. Off by default so the runtime compiles and its whole test suite
@@ -37,6 +39,8 @@ wry-host = [
     "dep:ncui-webview-wry",
     "ncui-webview-wry/wry-engine",
     "global-shortcuts",
+    "native-menu",
+    "dialogs",
 ]
 # Enables the application tray icon. Implies the window host, because a tray icon belongs
 # to the engine's event loop and there is no tray without one.

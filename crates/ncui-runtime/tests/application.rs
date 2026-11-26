@@ -20,11 +20,13 @@
 )]
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ncui_core::{CapabilitySet, Limits};
 use ncui_runtime::application::Application;
+use ncui_runtime::consent::{ConsentPrompter, ConsentRequest};
 
 /// Whether this machine can open a real window for these tests.
 ///
@@ -505,20 +507,38 @@ fn a_page_hears_its_own_window_resized() {
             .expect("a real engine can resize a window");
     }
 
-    wait_for(&mut application, "resized");
-    let reported = recorded
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .iter()
-        .find(|record| record.get("name").and_then(serde_json::Value::as_str) == Some("resized"))
-        .cloned()
-        .expect("the page must hear its window resized");
-    let width = reported
-        .pointer("/value/width")
-        .and_then(serde_json::Value::as_f64)
-        .expect("the event carries the new width");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let reported = loop {
+        application.pump();
+        let reported = recorded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|record| {
+                record.get("name").and_then(serde_json::Value::as_str) == Some("resized")
+                    && record
+                        .pointer("/value/width")
+                        .and_then(serde_json::Value::as_f64)
+                        .is_some_and(|width| (width - 940.0).abs() < 1.0)
+            })
+            .cloned();
+        if reported.is_some() || Instant::now() >= deadline {
+            break reported.expect("the page must hear its window resized");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
     assert!(
-        (width - 940.0).abs() < 1.0,
+        recorded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|record| {
+                record.get("name").and_then(serde_json::Value::as_str) == Some("resized")
+                    && record
+                        .pointer("/value/width")
+                        .and_then(serde_json::Value::as_f64)
+                        .is_some_and(|width| (width - 940.0).abs() < 1.0)
+            }),
         "the page must hear the size the platform gave the window, got {reported}"
     );
 
@@ -749,14 +769,10 @@ const SPAWN_MANIFEST: &str = r#"{
 }"#;
 
 /// A page that runs a program and reports what came back.
-///
-/// `CONSENT` is replaced by the test: a destructive capability requires the page to state
-/// its consent, and the two tests below are the two answers to that question.
-fn spawn_page(consent: bool) -> String {
-    let consent = if consent { ", \"consent\": true" } else { "" };
+fn spawn_page() -> String {
     let header = "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>runner</title></head>\n<body>\n<script>\n";
     let body = r"
-  window.ncui.invoke('process.run', { program: 'PROGRAM', args: ARGS, stdin: 'ignored when the program does not read' CONSENT })
+  window.ncui.invoke('process.run', { program: 'PROGRAM', args: ARGS, stdin: 'ignored when the program does not read' })
     .then(function (result) {
       return window.ncui.invoke('record', { value: result.stdout.trim(), status: result.status, timed_out: result.timed_out });
     })
@@ -769,19 +785,46 @@ fn spawn_page(consent: bool) -> String {
     } else {
         ("sh", r#"["-c", "echo from the page"]"#)
     };
-    let script = body
-        .replace("PROGRAM", program)
-        .replace("ARGS", args)
-        .replace("CONSENT", consent);
+    let script = body.replace("PROGRAM", program).replace("ARGS", args);
     format!("{header}{script}</script>\n</body></html>\n")
+}
+
+#[derive(Debug)]
+struct ApprovingPrompter {
+    calls: AtomicUsize,
+}
+
+impl ApprovingPrompter {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl ConsentPrompter for ApprovingPrompter {
+    fn confirm(&self, _request: &ConsentRequest) -> ncui_core::Result<bool> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(true)
+    }
 }
 
 /// Launches an application that records what its page sends.
 fn launch_with_recorder(scratch: &Scratch) -> (Application, Arc<Mutex<Vec<serde_json::Value>>>) {
+    launch_with_recorder_and_prompter(scratch, None)
+}
+
+fn launch_with_recorder_and_prompter(
+    scratch: &Scratch,
+    prompter: Option<Arc<dyn ConsentPrompter>>,
+) -> (Application, Arc<Mutex<Vec<serde_json::Value>>>) {
     let recorded: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
     let recorder = Arc::clone(&recorded);
     let application =
         Application::launch_with(scratch.path(), Limits::default(), None, None, |runtime| {
+            if let Some(prompter) = prompter {
+                runtime.set_consent_prompter(prompter);
+            }
             let _registration = runtime
                 .register_page_command(
                     "record",
@@ -833,10 +876,13 @@ fn pump_until(
 }
 
 #[test]
-fn a_page_that_states_consent_runs_a_program_and_receives_its_output() {
+fn a_page_runs_a_program_after_the_host_approves_the_exact_operation() {
     require_real_window!();
-    let scratch = Scratch::application(SPAWN_MANIFEST, &spawn_page(true));
-    let (mut application, recorded) = launch_with_recorder(&scratch);
+    let scratch = Scratch::application(SPAWN_MANIFEST, &spawn_page());
+    let prompter = Arc::new(ApprovingPrompter::new());
+    let approval_surface = prompter.clone() as Arc<dyn ConsentPrompter>;
+    let (mut application, recorded) =
+        launch_with_recorder_and_prompter(&scratch, Some(approval_surface));
 
     let entries = pump_until(&mut application, &recorded, 1);
     assert_eq!(
@@ -850,14 +896,15 @@ fn a_page_that_states_consent_runs_a_program_and_receives_its_output() {
     );
     assert_eq!(entries[0]["status"], 0, "the program exits zero");
     assert_eq!(entries[0]["timed_out"], false);
+    assert_eq!(prompter.calls.load(Ordering::SeqCst), 1);
 
     application.shutdown();
 }
 
 #[test]
-fn a_page_that_does_not_state_consent_is_refused_before_the_program_starts() {
+fn a_page_without_host_approval_is_refused_before_the_program_starts() {
     require_real_window!();
-    let scratch = Scratch::application(SPAWN_MANIFEST, &spawn_page(false));
+    let scratch = Scratch::application(SPAWN_MANIFEST, &spawn_page());
     let (mut application, recorded) = launch_with_recorder(&scratch);
 
     let entries = pump_until(&mut application, &recorded, 1);
@@ -868,7 +915,7 @@ fn a_page_that_does_not_state_consent_is_refused_before_the_program_starts() {
     );
     assert_eq!(
         entries[0]["value"], "REFUSED",
-        "a destructive capability without consent must be refused; got: {entries:?}"
+        "a destructive capability without host approval must be refused; got: {entries:?}"
     );
     assert_eq!(
         entries[0]["code"], "capability_denied",

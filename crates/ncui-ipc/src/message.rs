@@ -631,6 +631,10 @@ enum ErrorKindJson {
         operation: String,
         reason: String,
     },
+    Cdp {
+        code: String,
+        reason: String,
+    },
 }
 
 impl From<&ErrorKindJson> for ErrorKind {
@@ -696,6 +700,20 @@ impl From<&ErrorKindJson> for ErrorKind {
                 operation: operation.clone(),
                 reason: reason.clone(),
             },
+            ErrorKindJson::Cdp { code, reason } => {
+                // The core type's code is static. A peer cannot manufacture that lifetime;
+                // only the finite known set is accepted, and other values degrade explicitly.
+                crate::error_codec::cdp_code_from_name(code).map_or_else(
+                    || Self::Codec {
+                        operation: "ipc::json::decode".to_owned(),
+                        reason: format!("unknown CDP error code {code}"),
+                    },
+                    |code| Self::Cdp {
+                        code,
+                        reason: reason.clone(),
+                    },
+                )
+            }
         }
     }
 }
@@ -761,6 +779,14 @@ impl From<&ErrorKind> for ErrorKindJson {
                 operation: operation.clone(),
                 reason: reason.clone(),
             },
+            ErrorKind::Cdp { code, reason }
+                if crate::error_codec::cdp_code_from_name(code).is_some() =>
+            {
+                Self::Cdp {
+                    code: (*code).to_owned(),
+                    reason: reason.clone(),
+                }
+            }
             other => Self::Internal {
                 // The non_exhaustive fallback, mirroring the binary codec: preserve the text
                 // rather than inventing a variant we do not know.

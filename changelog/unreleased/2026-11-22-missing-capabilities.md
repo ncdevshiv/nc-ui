@@ -121,9 +121,9 @@ Tested (full gate, this workspace, Windows host):
   decoder.
 
 Honest absences (unchanged, recorded in docs/known-gaps.md):
-- Native menus: still absent — every safe seam is missing (`tao` has no menu module in
-  the pinned versions, `muda`'s Windows entry is `unsafe`, which the workspace forbids
-  outside a dependency; ADR-012 lists no exception for this).
+- Native menus: subsequently delivered on Windows and Linux through muda; ADR-012's ninth
+  exception confines the one first-party unsafe block to Windows attachment, and a duplicate
+  command is refused before the attached menu is disturbed.
 - Mobile: still absent — there is no iOS/Android host for this runtime to run in.
 - The updater checks when asked (`ncui update --check`); an automatic schedule inside the
   runtime remains out of scope by design.

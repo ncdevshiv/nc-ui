@@ -42,14 +42,20 @@
 
 pub mod capability;
 pub mod lifecycle;
+pub mod menu;
 pub mod navigation;
 pub mod request;
 pub mod seam;
 pub mod tray;
 pub mod windows;
 
+use std::sync::Arc;
+
+use ncui_core::WindowId;
+
 pub use capability::{CapabilityGrant, CapabilityRequest};
 pub use lifecycle::{HostState, IllegalTransition, WindowLifecycle};
+pub use menu::{MenuEntry, MenuEvent, MenuRequest, MenuSubmenu};
 pub use navigation::{
     NavigationPolicy, NavigationRequest, Origin, Scheme, Verdict, is_loopback_host,
 };
@@ -69,6 +75,60 @@ pub use windows::{
     WindowSummary,
 };
 
+/// A typed failure from an engine's Chrome `DevTools` Protocol transport.
+///
+/// The stable [`code`](Self::code) is part of the runtime and agent-facing wire contract. Keeping
+/// the type engine-neutral lets runtime policy preserve it without depending on a native backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CdpError {
+    /// The engine's debugging endpoint file is missing, unreadable, or malformed.
+    PortUnavailable { reason: String },
+    /// The endpoint refused the connection or WebSocket upgrade.
+    ConnectFailed { reason: String },
+    /// The command was malformed or the transport stopped answering safely.
+    TransportFailed { reason: String },
+    /// The engine received the command but reported a protocol error for it.
+    CommandFailed { reason: String },
+    /// This window could not be bound unambiguously to one page target.
+    TargetBindFailed { reason: String },
+    /// The platform's embedded engine does not expose a Chromium CDP endpoint.
+    UnsupportedPlatform { reason: String },
+    /// A caller supplied a command without a valid CDP request identity.
+    InvalidCommand { reason: String },
+}
+
+impl CdpError {
+    /// The stable machine-readable failure name.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::PortUnavailable { .. } => "cdp_port_unavailable",
+            Self::ConnectFailed { .. } => "cdp_connect_failed",
+            Self::TransportFailed { .. } => "cdp_transport_failed",
+            Self::CommandFailed { .. } => "cdp_command_failed",
+            Self::TargetBindFailed { .. } => "cdp_target_bind_failed",
+            Self::UnsupportedPlatform { .. } => "cdp_platform_unsupported",
+            Self::InvalidCommand { .. } => "cdp_invalid_command",
+        }
+    }
+}
+
+impl core::fmt::Display for CdpError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::PortUnavailable { reason } => write!(f, "CDP port unavailable: {reason}"),
+            Self::ConnectFailed { reason } => write!(f, "CDP connect failed: {reason}"),
+            Self::TransportFailed { reason } => write!(f, "CDP transport failed: {reason}"),
+            Self::CommandFailed { reason } => write!(f, "CDP command failed: {reason}"),
+            Self::TargetBindFailed { reason } => write!(f, "CDP target bind failed: {reason}"),
+            Self::UnsupportedPlatform { reason } => write!(f, "CDP unsupported: {reason}"),
+            Self::InvalidCommand { reason } => write!(f, "CDP invalid command: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for CdpError {}
+
 /// A message a page sent to its host.
 ///
 /// Carries the raw body rather than a parsed value: the body is untrusted input, and the
@@ -86,6 +146,72 @@ impl PageMessage {
     #[must_use]
     pub fn new(body: impl Into<String>) -> Self {
         Self { body: body.into() }
+    }
+}
+
+/// The maximum number of queued messages on one child IPC channel.
+///
+/// This matches the page bridge's maximum pending calls. A full channel applies backpressure
+/// instead of allowing a page to grow host memory without bound.
+pub const MAX_CHILD_IPC_MESSAGES: usize = 1024;
+
+/// A message a child page sent to its host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildPageMessage {
+    /// The engine-issued identity of the child that sent the message.
+    pub child: u64,
+    /// The body the child page posted, exactly as the engine received it.
+    pub body: String,
+}
+
+impl ChildPageMessage {
+    /// Wraps a child identity and body.
+    #[must_use]
+    pub fn new(child: u64, body: impl Into<String>) -> Self {
+        Self {
+            child,
+            body: body.into(),
+        }
+    }
+}
+
+/// The page a host operation addresses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageTarget {
+    /// The parent window's own page.
+    Window(WindowId),
+    /// A child embedded in a parent window.
+    Child {
+        /// The window that owns the child.
+        parent: WindowId,
+        /// The child's engine-issued identity.
+        child: ncui_webview_child::ChildWebviewId,
+    },
+}
+
+impl PageTarget {
+    /// The window that owns the target page.
+    #[must_use]
+    pub const fn parent(&self) -> WindowId {
+        match self {
+            Self::Window(window) => *window,
+            Self::Child { parent, .. } => *parent,
+        }
+    }
+
+    /// Whether the target is an embedded child rather than the window's own page.
+    #[must_use]
+    pub const fn is_child(&self) -> bool {
+        matches!(self, Self::Child { .. })
+    }
+}
+
+impl core::fmt::Display for PageTarget {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Window(window) => write!(f, "{window}"),
+            Self::Child { parent, child } => write!(f, "child:{parent}:{child}"),
+        }
     }
 }
 
@@ -206,6 +332,19 @@ pub trait WebViewBackend: core::fmt::Debug + Send {
         false
     }
 
+    /// Attaches `menu` to this window, or removes it when `menu` is `None`.
+    ///
+    /// `false` when this backend has no native menu support or the platform refused the request.
+    fn set_menu(&self, menu: Option<MenuRequest>) -> bool {
+        let _ = menu;
+        false
+    }
+
+    /// Takes the next native menu selection, if one has arrived.
+    fn poll_menu_event(&self) -> Option<MenuEvent> {
+        None
+    }
+
     /// Scales the window's page by `factor`, where `1.0` is the platform default.
     ///
     /// `false` when this backend cannot scale — an engine without the call, or a window
@@ -243,14 +382,16 @@ pub trait WebViewBackend: core::fmt::Debug + Send {
     /// no such capability returns a value that downcasts to nothing.
     fn as_any(&self) -> &dyn core::any::Any;
 
-    /// Sends one CDP command to this window's own `DevTools` endpoint (ADR-017 Phase 2).
+    /// Sends one CDP command to this window's own page target (ADR-017 Phase 2).
     ///
-    /// The default refuses: a backend without the transport says so by name rather than
-    /// answering a delivery that never happened. The error string is the backend's own
-    /// named reason, ready for the caller's report.
-    fn cdp_send(&self, command: &serde_json::Value) -> Result<serde_json::Value, String> {
+    /// The default refuses with a typed, stable error code. Runtime policy can therefore
+    /// distinguish an unsupported platform, a malformed command, and an engine failure
+    /// without depending on a native backend or parsing a diagnostic string.
+    fn cdp_send(&self, command: &serde_json::Value) -> Result<serde_json::Value, CdpError> {
         let _ = command;
-        Err("this backend has no CDP transport".to_owned())
+        Err(CdpError::UnsupportedPlatform {
+            reason: "this backend has no CDP transport".to_owned(),
+        })
     }
 
     /// Builds one child webview inside the parent window's frame
@@ -261,9 +402,42 @@ pub trait WebViewBackend: core::fmt::Debug + Send {
     fn create_child_webview(
         &self,
         request: &ncui_webview_child::ChildWebviewRequest,
+        seam: &Arc<HostSeam>,
+        ipc_tx: std::sync::mpsc::SyncSender<ChildPageMessage>,
     ) -> Result<u64, String> {
-        let _ = request;
+        let _ = (request, seam, ipc_tx);
         Err("this backend cannot embed child webviews".to_owned())
+    }
+
+    /// Takes the next message from a child page, if there is one.
+    fn poll_child_webview_message(&self, child: u64) -> Option<ChildPageMessage> {
+        let _ = child;
+        None
+    }
+
+    /// Waits for the next message from a child page, up to `timeout`.
+    fn wait_child_webview_message(
+        &self,
+        child: u64,
+        timeout: std::time::Duration,
+    ) -> Option<ChildPageMessage> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(message) = self.poll_child_webview_message(child) {
+                return Some(message);
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1).min(remaining));
+        }
+    }
+
+    /// Evaluates a script in a child page, returning whether it was accepted.
+    fn evaluate_child_script(&self, child: u64, script: &str) -> bool {
+        let _ = (child, script);
+        false
     }
 
     /// Moves a live child webview to a new rectangle.
@@ -280,39 +454,6 @@ pub trait WebViewBackend: core::fmt::Debug + Send {
     fn close_child_webview(&self, child: u64) -> Result<(), String> {
         let _ = child;
         Err("this backend cannot close child webviews".to_owned())
-    }
-}
-
-/// A backend whose engine can embed and drive child webviews (ADR-017 Phase 3).
-///
-/// Implemented by the wry host; the runtime reaches it by downcasting a window's
-/// backend, so the runtime stays decoupled from the engine crate.
-pub trait ChildWebviewCapable: core::fmt::Debug + Send + Sync + core::any::Any {
-    /// Builds one child webview inside the parent's frame.
-    fn create_child(
-        &self,
-        parent: ncui_core::WindowId,
-        request: &ncui_webview_child::ChildWebviewRequest,
-    ) -> Result<ncui_webview_child::ChildWebviewId, String>;
-
-    /// Moves a live child webview to a new rectangle.
-    fn set_child_bounds(
-        &self,
-        parent: ncui_core::WindowId,
-        child: ncui_webview_child::ChildWebviewId,
-        request: &ncui_webview_child::ChildWebviewRequest,
-    ) -> Result<(), String>;
-
-    /// Closes a live child webview.
-    fn close_child(
-        &self,
-        parent: ncui_core::WindowId,
-        child: ncui_webview_child::ChildWebviewId,
-    ) -> Result<(), String>;
-
-    /// Lists every live child this engine holds.
-    fn list_children(&self) -> Vec<ncui_webview_child::ChildWebviewEntry> {
-        Vec::new()
     }
 }
 
@@ -336,6 +477,10 @@ impl<T: WebViewBackend + ?Sized> WebViewBackend for Box<T> {
 
     fn poll_page_message(&self) -> Option<PageMessage> {
         T::poll_page_message(self)
+    }
+
+    fn wait_page_message(&self, timeout: std::time::Duration) -> Option<PageMessage> {
+        T::wait_page_message(self, timeout)
     }
 
     fn evaluate_script(&self, script: &str) -> bool {
@@ -366,7 +511,224 @@ impl<T: WebViewBackend + ?Sized> WebViewBackend for Box<T> {
         T::set_tray(self, tray)
     }
 
+    fn set_menu(&self, menu: Option<MenuRequest>) -> bool {
+        T::set_menu(self, menu)
+    }
+
+    fn poll_menu_event(&self) -> Option<MenuEvent> {
+        T::poll_menu_event(self)
+    }
+
     fn window_theme(&self) -> Option<Theme> {
         T::window_theme(self)
+    }
+
+    fn set_zoom(&self, factor: f64) -> bool {
+        T::set_zoom(self, factor)
+    }
+
+    fn open_devtools(&self) -> bool {
+        T::open_devtools(self)
+    }
+
+    fn close_devtools(&self) -> bool {
+        T::close_devtools(self)
+    }
+
+    fn is_devtools_open(&self) -> Option<bool> {
+        T::is_devtools_open(self)
+    }
+
+    fn cdp_send(&self, command: &serde_json::Value) -> Result<serde_json::Value, CdpError> {
+        T::cdp_send(self, command)
+    }
+
+    fn create_child_webview(
+        &self,
+        request: &ncui_webview_child::ChildWebviewRequest,
+        seam: &Arc<HostSeam>,
+        ipc_tx: std::sync::mpsc::SyncSender<ChildPageMessage>,
+    ) -> Result<u64, String> {
+        T::create_child_webview(self, request, seam, ipc_tx)
+    }
+
+    fn poll_child_webview_message(&self, child: u64) -> Option<ChildPageMessage> {
+        T::poll_child_webview_message(self, child)
+    }
+
+    fn wait_child_webview_message(
+        &self,
+        child: u64,
+        timeout: std::time::Duration,
+    ) -> Option<ChildPageMessage> {
+        T::wait_child_webview_message(self, child, timeout)
+    }
+
+    fn evaluate_child_script(&self, child: u64, script: &str) -> bool {
+        T::evaluate_child_script(self, child, script)
+    }
+
+    fn set_child_webview_bounds(
+        &self,
+        child: u64,
+        request: &ncui_webview_child::ChildWebviewRequest,
+    ) -> Result<(), String> {
+        T::set_child_webview_bounds(self, child, request)
+    }
+
+    fn close_child_webview(&self, child: u64) -> Result<(), String> {
+        T::close_child_webview(self, child)
+    }
+}
+
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "test assertions must abort loudly on failure"
+)]
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use super::*;
+
+    #[derive(Debug, Default)]
+    struct ForwardingBackend {
+        zoom: Mutex<Option<u64>>,
+        devtools_open: Mutex<bool>,
+        cdp_commands: Mutex<Vec<serde_json::Value>>,
+        page_wait: Mutex<Option<Duration>>,
+    }
+
+    impl WebViewBackend for ForwardingBackend {
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+
+        fn last_error(&self) -> Option<String> {
+            None
+        }
+
+        fn is_alive(&self) -> bool {
+            true
+        }
+
+        fn poll_page_message(&self) -> Option<PageMessage> {
+            None
+        }
+
+        fn wait_page_message(&self, timeout: Duration) -> Option<PageMessage> {
+            *self.page_wait.lock().expect("the wait recorder is usable") = Some(timeout);
+            Some(PageMessage::new("blocking wait"))
+        }
+
+        fn evaluate_script(&self, _script: &str) -> bool {
+            true
+        }
+
+        fn set_zoom(&self, factor: f64) -> bool {
+            *self.zoom.lock().expect("the zoom recorder is usable") = Some(factor.to_bits());
+            true
+        }
+
+        fn open_devtools(&self) -> bool {
+            *self
+                .devtools_open
+                .lock()
+                .expect("the inspector recorder is usable") = true;
+            true
+        }
+
+        fn close_devtools(&self) -> bool {
+            *self
+                .devtools_open
+                .lock()
+                .expect("the inspector recorder is usable") = false;
+            true
+        }
+
+        fn is_devtools_open(&self) -> Option<bool> {
+            Some(
+                *self
+                    .devtools_open
+                    .lock()
+                    .expect("the inspector recorder is usable"),
+            )
+        }
+
+        fn cdp_send(&self, command: &serde_json::Value) -> Result<serde_json::Value, CdpError> {
+            self.cdp_commands
+                .lock()
+                .expect("the CDP recorder is usable")
+                .push(command.clone());
+            Ok(serde_json::json!({"forwarded": true}))
+        }
+    }
+
+    #[test]
+    fn a_boxed_backend_forwards_optional_window_capabilities() {
+        let backend: Box<dyn WebViewBackend> = Box::new(ForwardingBackend::default());
+        assert!(backend.set_zoom(1.25));
+        assert!(backend.open_devtools());
+        assert_eq!(backend.is_devtools_open(), Some(true));
+        assert!(backend.close_devtools());
+        assert_eq!(backend.is_devtools_open(), Some(false));
+
+        let command = serde_json::json!({"id": 7, "method": "Runtime.evaluate"});
+        assert_eq!(
+            backend.cdp_send(&command),
+            Ok(serde_json::json!({"forwarded": true}))
+        );
+        assert_eq!(
+            backend.wait_page_message(Duration::from_millis(25)),
+            Some(PageMessage::new("blocking wait"))
+        );
+
+        let recording = backend
+            .as_any()
+            .downcast_ref::<ForwardingBackend>()
+            .expect("the boxed backend retains its concrete type");
+        assert_eq!(
+            *recording.zoom.lock().expect("the zoom recorder is usable"),
+            Some(1.25_f64.to_bits())
+        );
+        assert!(
+            !*recording
+                .devtools_open
+                .lock()
+                .expect("the inspector recorder is usable")
+        );
+        assert_eq!(
+            recording
+                .cdp_commands
+                .lock()
+                .expect("the CDP recorder is usable")
+                .as_slice(),
+            &[command]
+        );
+        assert_eq!(
+            *recording
+                .page_wait
+                .lock()
+                .expect("the wait recorder is usable"),
+            Some(Duration::from_millis(25))
+        );
+    }
+
+    #[test]
+    fn page_target_identifies_and_formats_windows_and_children() {
+        let parent = WindowId::from_raw(0x1234).expect("a nonzero window id");
+        let child = ncui_webview_child::ChildWebviewId::from_raw(7);
+        let window = PageTarget::Window(parent);
+        assert_eq!(window.parent(), parent);
+        assert!(!window.is_child());
+        assert_eq!(window.to_string(), parent.to_string());
+
+        let target = PageTarget::Child { parent, child };
+        assert_eq!(target.parent(), parent);
+        assert!(target.is_child());
+        assert_eq!(target.to_string(), format!("child:{parent}:{child}"));
     }
 }

@@ -1,40 +1,50 @@
-"""Marks Linux verification for every completed feature.
+#!/usr/bin/env python3
+"""Audit Linux verification gaps without changing the feature registry.
 
-Written after the full gate suite was run under WSL2 (Ubuntu 26.04, rustc 1.98.1) and passed
-every gate in `tools/linux_gate.py` with 954 tests. Every entry records the environment the run happened in rather than
-booting "verified", because a bare flag cannot be checked later.
+A full workspace gate is not evidence that every feature was exercised on Linux: window,
+browser, GPU and platform integrations can be feature-gated or return early. Verification
+flags therefore require an explicit review of the evidence for each feature. This tool only
+reports the outstanding reviews; it never rewrites the registry.
 
-macOS stays `unverified`: no macOS host is reachable from this machine, so a macOS run would
-be a claim with nothing behind it — which is the exact failure this registry exists to prevent.
+    python tools/record_linux_verification.py
+    python tools/record_linux_verification.py --fail-on-gap
 """
 
+from __future__ import annotations
+
+import argparse
 import json
+from pathlib import Path
 
-PATH = "protocols/feature-registry.json"
-ENVIRONMENT = "wsl2-ubuntu-26.04-rust-1.98.1"
+REGISTRY = Path(__file__).resolve().parent.parent / "protocols" / "feature-registry.json"
 
-with open(PATH, encoding="utf-8") as handle:
-    registry = json.load(handle)
 
-changed = 0
-for feature in registry["features"]:
-    platforms = feature.get("platforms")
-    if not platforms or platforms.get("linux") == "verified":
-        continue
-    platforms["linux"] = "verified"
-    # Kept beside the flag so a reader can tell *which* run made the claim.
-    platforms.setdefault("verified_on", {})
-    platforms["verified_on"]["linux"] = ENVIRONMENT
-    changed += 1
+def linux_gaps(registry: dict) -> list[str]:
+    """Completed features whose Linux platform state is still unverified."""
+    return [
+        feature["id"]
+        for feature in registry["features"]
+        if feature.get("status") == "complete"
+        and feature.get("platforms", {}).get("linux") == "unverified"
+    ]
 
-with open(PATH, "w", encoding="utf-8") as handle:
-    json.dump(registry, handle, indent=2)
-    handle.write("\n")
 
-macos_unverified = sum(
-    1
-    for feature in registry["features"]
-    if feature.get("platforms", {}).get("macos") == "unverified"
-)
-print(f"marked linux verified on {changed} features (environment: {ENVIRONMENT})")
-print(f"macos still unverified on {macos_unverified} features")
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--fail-on-gap",
+        action="store_true",
+        help="exit 1 when a completed feature still lacks Linux verification",
+    )
+    args = parser.parse_args()
+    registry = json.loads(REGISTRY.read_text(encoding="utf-8"))
+    gaps = linux_gaps(registry)
+    print(f"linux verification audit: {len(gaps)} completed feature(s) unverified")
+    for feature_id in gaps:
+        print(f"  {feature_id}")
+    print("audit only: the registry was not changed")
+    return 1 if args.fail_on_gap and gaps else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

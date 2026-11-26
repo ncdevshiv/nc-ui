@@ -61,6 +61,13 @@ pub struct AppManifest {
     /// program is using. What a page can do is *hear* about a shortcut this application declared.
     #[serde(default)]
     pub shortcuts: Vec<ShortcutConfig>,
+    /// The native menu bar the application declares.
+    ///
+    /// A menu is authored here rather than registered by a page for the same reason a global
+    /// shortcut is: it is application chrome, and the commands it emits are choices the author
+    /// exposes to the user. Selecting one delivers its command name to the page as a `menu` event.
+    #[serde(default)]
+    pub menus: Vec<MenuConfig>,
     /// The sidecar commands the application declares.
     ///
     /// A sidecar is a command a page can call that is answered by *any* executable the
@@ -146,6 +153,169 @@ pub struct ShortcutConfig {
     /// A name rather than an action: what a shortcut *does* is the application's decision, and the
     /// page is the part of the application that knows. The runtime's job is to deliver the press.
     pub command: String,
+}
+
+/// One top-level native menu.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MenuConfig {
+    /// The label shown in the menu bar.
+    pub label: String,
+    /// Whether the menu is enabled. Defaults to `true`.
+    #[serde(default = "default_menu_enabled")]
+    pub enabled: bool,
+    /// The menu's entries, in display order.
+    pub items: Vec<MenuEntryConfig>,
+}
+
+/// One nested native submenu.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MenuSubmenuConfig {
+    /// The label shown to the user.
+    pub label: String,
+    /// Whether the submenu is enabled. Defaults to `true`.
+    #[serde(default = "default_menu_enabled")]
+    pub enabled: bool,
+    /// The submenu's entries, in display order.
+    pub items: Vec<MenuEntryConfig>,
+}
+
+/// One entry inside a native menu.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MenuEntryConfig {
+    /// A command delivered to the page when selected.
+    Item {
+        /// The label shown to the user.
+        label: String,
+        /// The command name delivered in the `menu` event.
+        command: String,
+        /// Whether the item is enabled. Defaults to `true`.
+        #[serde(default = "default_menu_enabled")]
+        enabled: bool,
+    },
+    /// A nested menu.
+    Submenu(MenuSubmenuConfig),
+    /// A visual separator.
+    Separator,
+}
+
+const fn default_menu_enabled() -> bool {
+    true
+}
+
+#[derive(Default)]
+struct MenuValidator<'a> {
+    entries: usize,
+    claimed: Vec<&'a str>,
+}
+
+impl<'a> MenuValidator<'a> {
+    const MAX_ENTRIES: usize = 256;
+    const MAX_DEPTH: usize = 8;
+    const MAX_LABEL_BYTES: usize = 128;
+    const MAX_COMMAND_BYTES: usize = 64;
+
+    fn check_submenu(
+        &mut self,
+        label: &str,
+        items: &'a [MenuEntryConfig],
+        field: &str,
+        depth: usize,
+    ) -> Result<(), ManifestError> {
+        check_menu_label(label, &format!("{field}.label"), Self::MAX_LABEL_BYTES)?;
+        if items.is_empty() {
+            return Err(ManifestError::Invalid {
+                field: format!("{field}.items"),
+                reason: "must contain at least one entry".to_owned(),
+            });
+        }
+        self.check_items(items, field, depth)
+    }
+
+    fn check_items(
+        &mut self,
+        items: &'a [MenuEntryConfig],
+        field: &str,
+        depth: usize,
+    ) -> Result<(), ManifestError> {
+        for (index, entry) in items.iter().enumerate() {
+            self.entries += 1;
+            if self.entries > Self::MAX_ENTRIES {
+                return Err(ManifestError::Invalid {
+                    field: field.to_owned(),
+                    reason: format!(
+                        "menu trees may contain at most {} entries",
+                        Self::MAX_ENTRIES
+                    ),
+                });
+            }
+            let field = format!("{field}.items[{index}]");
+            match entry {
+                MenuEntryConfig::Item {
+                    label,
+                    command,
+                    enabled: _,
+                } => {
+                    check_menu_label(label, &format!("{field}.label"), Self::MAX_LABEL_BYTES)?;
+                    if !is_menu_command(command) {
+                        return Err(ManifestError::Invalid {
+                            field: format!("{field}.command"),
+                            reason: format!(
+                                "must start with a lowercase letter and contain only lowercase \
+                                 letters, digits, `.`, `_` or `-`, without the reserved `ncui.` \
+                                 prefix (max {} bytes); got `{command}`",
+                                Self::MAX_COMMAND_BYTES
+                            ),
+                        });
+                    }
+                    if let Some(duplicate) = self.claimed.iter().find(|name| **name == command) {
+                        return Err(ManifestError::Invalid {
+                            field: format!("{field}.command"),
+                            reason: format!(
+                                "duplicate command `{duplicate}`: a menu selection must have one \
+                                 meaning regardless of which submenu contains it"
+                            ),
+                        });
+                    }
+                    self.claimed.push(command);
+                }
+                MenuEntryConfig::Submenu(submenu) => {
+                    if depth >= Self::MAX_DEPTH {
+                        return Err(ManifestError::Invalid {
+                            field,
+                            reason: format!("menus may be at most {} levels deep", Self::MAX_DEPTH),
+                        });
+                    }
+                    self.check_submenu(&submenu.label, &submenu.items, &field, depth + 1)?;
+                }
+                MenuEntryConfig::Separator => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+fn check_menu_label(label: &str, field: &str, max_bytes: usize) -> Result<(), ManifestError> {
+    if label.trim().is_empty() || label.len() > max_bytes || label.chars().any(char::is_control) {
+        return Err(ManifestError::Invalid {
+            field: field.to_owned(),
+            reason: format!(
+                "must be visible text without control characters, at most {max_bytes} bytes; got \
+                 `{label}`"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn is_menu_command(command: &str) -> bool {
+    let mut bytes = command.bytes();
+    bytes.next().is_some_and(|first| first.is_ascii_lowercase())
+        && !command.starts_with("ncui.")
+        && command.len() <= MenuValidator::MAX_COMMAND_BYTES
+        && bytes.all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
 }
 
 /// One sidecar command an application declares.
@@ -499,6 +669,7 @@ impl AppManifest {
         self.check_associations()?;
         self.check_tray()?;
         self.check_shortcuts()?;
+        self.check_menus()?;
         self.check_sidecars()?;
         self.check_page_commands()?;
         if self.version.trim().is_empty() {
@@ -635,6 +806,31 @@ impl AppManifest {
                     reason: "must not be empty".to_owned(),
                 });
             }
+        }
+        Ok(())
+    }
+
+    /// Checks the native menus the application declares.
+    ///
+    /// Labels, depth and total entry count are bounded before a platform sees them, and command
+    /// names use the bridge's action-name shape. Names are unique across the whole menu tree so a
+    /// selection has exactly one meaning regardless of which submenu contains it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManifestError::Invalid`] for an unusable label, command, or menu tree.
+    fn check_menus(&self) -> Result<(), ManifestError> {
+        const MAX_MENUS: usize = 32;
+
+        if self.menus.len() > MAX_MENUS {
+            return Err(ManifestError::Invalid {
+                field: "menus".to_owned(),
+                reason: format!("must contain at most {MAX_MENUS} top-level menus"),
+            });
+        }
+        let mut validation = MenuValidator::default();
+        for (index, menu) in self.menus.iter().enumerate() {
+            validation.check_submenu(&menu.label, &menu.items, &format!("menus[{index}]"), 1)?;
         }
         Ok(())
     }
@@ -991,6 +1187,98 @@ mod tests {
                 "{raw} produced {error}"
             );
         }
+    }
+
+    #[test]
+    fn native_menus_are_parsed_with_nested_entries_and_enabled_defaults() {
+        let parsed = manifest(
+            r#"{
+                "name":"a","version":"1.0.0","menus":[
+                    {"label":"File","items":[
+                        {"type":"item","label":"Increment","command":"increment"},
+                        {"type":"separator"},
+                        {"type":"submenu","label":"More","enabled":false,"items":[
+                            {"type":"item","label":"Summary","command":"counter.summary","enabled":false}
+                        ]}
+                    ]}
+                ]
+            }"#,
+        )
+        .expect("a manifest with native menus");
+        assert_eq!(parsed.menus.len(), 1);
+        assert!(parsed.menus[0].enabled);
+        let MenuEntryConfig::Submenu(submenu) = &parsed.menus[0].items[2] else {
+            panic!("the third entry is a submenu");
+        };
+        assert!(!submenu.enabled);
+        let MenuEntryConfig::Item { enabled, .. } = &submenu.items[0] else {
+            panic!("the submenu contains an item");
+        };
+        assert!(!enabled);
+
+        let plain = manifest(r#"{"name":"a","version":"1.0.0"}"#).expect("a minimal manifest");
+        assert!(plain.menus.is_empty());
+    }
+
+    #[test]
+    fn malformed_native_menus_are_refused() {
+        for raw in [
+            r#"{"name":"a","version":"1.0.0","menus":[{"label":"","items":[{"type":"separator"}]}]}"#,
+            r#"{"name":"a","version":"1.0.0","menus":[{"label":"File","items":[]}]}"#,
+            r#"{"name":"a","version":"1.0.0","menus":[{"label":"File","items":[{"type":"item","label":"Bad\nLabel","command":"go"}]}]}"#,
+            r#"{"name":"a","version":"1.0.0","menus":[{"label":"File","items":[{"type":"item","label":"Bad","command":"ncui.method"}]}]}"#,
+            r#"{"name":"a","version":"1.0.0","menus":[{"label":"File","items":[{"type":"item","label":"Bad","command":"Upper"}]}]}"#,
+            r#"{"name":"a","version":"1.0.0","menus":[{"label":"File","items":[{"type":"unknown"}]}]}"#,
+        ] {
+            let error = manifest(raw).expect_err("a malformed menu is refused");
+            assert!(
+                matches!(
+                    error,
+                    ManifestError::Invalid { .. } | ManifestError::Malformed { .. }
+                ),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_native_menu_command_has_one_meaning_across_the_whole_tree() {
+        let error = manifest(
+            r#"{"name":"a","version":"1.0.0","menus":[
+                {"label":"File","items":[{"type":"item","label":"One","command":"dup"}]},
+                {"label":"Edit","items":[{"type":"item","label":"Two","command":"dup"}]}
+            ]}"#,
+        )
+        .expect_err("duplicate menu commands are refused");
+        assert!(error.to_string().contains("dup"), "{error}");
+    }
+
+    #[test]
+    fn native_menu_depth_and_size_are_bounded() {
+        let mut entry = serde_json::json!({"type":"item","label":"Leaf","command":"leaf"});
+        for _ in 0..8 {
+            entry = serde_json::json!({"type":"submenu","label":"Nested","items":[entry]});
+        }
+        let raw = serde_json::json!({
+            "name":"a","version":"1.0.0","menus":[{"label":"File","items":[entry]}]
+        });
+        let error = AppManifest::parse(&raw.to_string(), Path::new("ncui.app.json"))
+            .expect_err("an over-deep menu is refused");
+        assert!(error.to_string().contains("deep"), "{error}");
+
+        let items: Vec<_> = (0..257)
+            .map(|index| {
+                serde_json::json!({
+                    "type":"item","label":format!("Item {index}"),"command":format!("command_{index}")
+                })
+            })
+            .collect();
+        let raw = serde_json::json!({
+            "name":"a","version":"1.0.0","menus":[{"label":"File","items":items}]
+        });
+        let error = AppManifest::parse(&raw.to_string(), Path::new("ncui.app.json"))
+            .expect_err("an oversized menu is refused");
+        assert!(error.to_string().contains("256"), "{error}");
     }
 
     #[test]

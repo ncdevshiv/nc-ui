@@ -23,6 +23,7 @@
 //! same seam. The engine holds no copy of the rules, so the rules it obeys and the rules
 //! the runtime enforces are the same rules.
 
+#![deny(unsafe_code)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -32,15 +33,20 @@
 
 pub mod cdp;
 #[cfg(feature = "wry-engine")]
+mod cdp_target;
+#[cfg(feature = "wry-engine")]
 pub mod child;
+#[cfg(feature = "wry-engine")]
+mod geometry;
 pub mod host;
 mod host_scripts;
+#[cfg(feature = "native-menu")]
+mod menu;
 
-pub use cdp::{CdpError, DevToolsEndpoint, send_command as cdp_send_command};
-#[cfg(feature = "wry-engine")]
-pub use child::WryChildWebviewEngine;
+pub use cdp::{DevToolsEndpoint, send_command as cdp_send_command};
 #[cfg(feature = "wry-engine")]
 pub use host::{HostEvent, WindowHost, WryHostFactory, engine_proxy};
+pub use ncui_webview::CdpError;
 
 /// Runs the engine's event loop on the main thread, with the application on a worker.
 /// macOS only — see [`host::run_on_main_thread`] (ADR-018).

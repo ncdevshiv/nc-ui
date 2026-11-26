@@ -28,10 +28,11 @@ nc-ui (target):
   `scan.rs` assembles banned tokens at runtime, first-component exemption,
   `ALWAYS_SKIPPED`/`POLICY_EXEMPT`. Python helpers live in `tools/*.py`
   (`correct_test_counts.py`, `build_release.py`, `linux_gate.py`).
-- `G:\nc-ui\crates` — 19 crates: `ncui-a11y, ncui-abi, ncui-app, ncui-bench,
+- `G:\nc-ui\crates` — 20 crates: `ncui-a11y, ncui-abi, ncui-app, ncui-bench,
   ncui-cli, ncui-component, ncui-core, ncui-gpu-renderer, ncui-gpu, ncui-ipc,
   ncui-native, ncui-observability, ncui-runtime, ncui-scheduler,
-  ncui-security, ncui-state, ncui-webview-wry, ncui-webview, ncui-workers`.
+  ncui-security, ncui-state, ncui-webview-child, ncui-webview-wry, ncui-webview,
+  ncui-workers`.
 - `G:\nc-ui\docs\known-gaps.md`, `G:\nc-ui\docs\remaining-work.md` —
   prior art for recording deliberate gates vs. gaps.
 - `G:\nc-ui\crates\ncui-core\Cargo.toml` — `[lints] workspace = true` pattern.
@@ -567,7 +568,7 @@ Review checklist for any Tier 1 PR (zero-trust, mirrors `make gate`):
   `C:\…`; mitigated by inline `ncui-allow-hygiene:` with reason.
 - `policy` job runtime increase is one Python invocation (≈1–2 s) + fold
   `--check` (no-op when empty).
-- Folder-shape breadth (40/60) is uncalibrated against the 19 crates'
+- Folder-shape breadth (40/60) is uncalibrated against the 20 crates'
   current `src/` sizes; first `--warn-only` run may need a threshold note
   in `docs/known-gaps.md` if a crate legitimately exceeds it.
 

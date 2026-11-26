@@ -79,8 +79,9 @@ pub use clipboard::{
 pub use dialog::RfdDialogs;
 pub use dialog::{
     ColorChoice, ColorRequest, DialogBackend, DialogError, DialogKind, DialogOptions,
-    DialogOutcome, FileFilter, MAX_DIALOG_TITLE_BYTES, MAX_EXTENSION_BYTES, MAX_PATH_BYTES,
-    is_hex_color, validate_chosen_path, validate_color_request, validate_options,
+    DialogOutcome, FileFilter, MAX_CONFIRM_MESSAGE_BYTES, MAX_DIALOG_TITLE_BYTES,
+    MAX_EXTENSION_BYTES, MAX_PATH_BYTES, is_hex_color, validate_chosen_path,
+    validate_color_request, validate_options,
 };
 pub use editor::{DiscoveredEditor, EDITORS, Editor, discover, parse_search_path};
 pub use fs::{

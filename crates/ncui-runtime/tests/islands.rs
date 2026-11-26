@@ -74,7 +74,16 @@ fn block_on<F: Future>(future: F) -> F::Output {
 
 /// Whether this machine has a graphics adapter, and so can answer an island request at all.
 fn has_gpu() -> bool {
-    block_on(WgpuDeviceFactory.create()).is_ok()
+    match block_on(WgpuDeviceFactory.create()) {
+        Ok(_) => true,
+        Err(error) => {
+            assert!(
+                std::env::var_os("NCUI_REQUIRE_GPU").is_none(),
+                "GPU evidence was required, but no graphics adapter is available: {error}"
+            );
+            false
+        }
+    }
 }
 
 /// The status, content type and body of a GET.

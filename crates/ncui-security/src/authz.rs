@@ -9,22 +9,22 @@
 //!
 //! 1. **Standing authority** — [`Authorizer::authorize`] answers "does the subject hold
 //!    the capability?". This is a set comparison and nothing more.
-//! 2. **Per-call consent** — [`Authorizer::require_destructive`] answers "even though the
-//!    subject holds the capability, has the *user* approved this specific invocation?".
+//! 2. **Per-call consent** — [`Authorizer::require_destructive_with_token`] answers "even
+//!    though the subject holds the capability, did the host approve this exact invocation?".
 //!
 //! Spec 88 requires the second gate. The reason is that a capability grant is a *standing*
 //! authorization: it stays valid for the whole session, including for code paths, agent
 //! plans and tool invocations that did not exist when the grant was made. Destructive
 //! operations are precisely the ones where that gap is unacceptable — a grant of
 //! `delete.data` obtained for "clean up stale build output" would otherwise silently
-//! authorize deleting the user's source. Requiring an explicit per-call flag means a
+//! authorize deleting the user's source. Requiring an exact, consume-once token means a
 //! destructive call fails *closed* when the surrounding consent plumbing is missing,
 //! broken, or bypassed. It converts "we forgot to ask" from silent data loss into a
 //! denial.
 //!
 //! The [`Authorizer`] is a zero-sized, stateless decision function. It holds no policy
-//! store and no clock: the caller supplies the granted set and the consent flag, so the
-//! decision is reproducible from its arguments alone and can be replayed in an audit.
+//! store, ledger or clock: the caller supplies the granted set and the token binding, so
+//! the decision is reproducible from its arguments alone and can be replayed in an audit.
 
 use core::fmt;
 use ncui_core::capability::CapabilityScope;
@@ -39,50 +39,47 @@ const OP_REQUIRE_TOKEN: &str = "security::authz::require_destructive_with_token"
 /// The operation name recorded when a consent token fails to parse.
 const OP_CONSENT_PARSE: &str = "security::authz::ConsentToken::from_value";
 
-/// An opaque, consume-once proof that the user approved one destructive invocation.
+/// The longest subject identifier carried by a consent token.
+pub const MAX_CONSENT_SUBJECT_BYTES: usize = 256;
+/// The longest method name carried by a consent token.
+pub const MAX_CONSENT_METHOD_BYTES: usize = 256;
+
+/// An opaque, consume-once proof that the host approved one destructive invocation.
 ///
-/// Minted **only by the runtime** — never by a client, never by a test in another
-/// crate that pretends to be one — at the moment the user confirms the action. The
-/// token is bound to the [`CorrelationId`] of the logical operation, the method
-/// name, and the capability set it authorizes, and carries a fresh 128-bit
-/// `nonce`. The runtime keeps a ledger of minted nonces and marks each spent on
-/// first use, so a token can authorize exactly one call, for exactly one method,
-/// exactly once.
+/// The runtime ledger is the authority. A token binds the authenticated subject,
+/// logical-operation correlation, method, capabilities and operation-parameter digest;
+/// the ledger records the same binding and spends the nonce on first use. Runtime
+/// issuance alone is not evidence of human approval: embedders must mint only after
+/// their host has actually approved the displayed operation.
 ///
-/// The wire form is a JSON object (`correlation`, `method`, `capability`, `nonce`
-/// as hex). The wire form alone proves nothing: a client can fabricate any JSON,
-/// but a fabricated nonce is in no ledger and is refused. The ledger is the
-/// authority; the token is the claim.
-///
-/// There is deliberately no `Clone`, no `Serialize`/`Deserialize` derive, and no
-/// public constructor apart from [`ConsentToken::mint`]: a consent that can be
-/// copied, printed, or stored is a consent that can be replayed.
+/// The wire form alone proves nothing because a client can fabricate any JSON. A
+/// fabricated nonce is absent from the ledger and is refused.
 pub struct ConsentToken {
     correlation: CorrelationId,
+    subject: String,
     method: String,
     capability: CapabilitySet,
+    payload_digest: [u8; 32],
     nonce: u128,
 }
 
 impl ConsentToken {
-    /// Mints a token. Called **only by the runtime** at user-confirmation time.
-    ///
-    /// `nonce` must be 128 bits of OS entropy supplied by the caller (the runtime
-    /// draws it via [`crate::token::SecretToken::from_os_entropy`]); a predictable
-    /// nonce is guessable and therefore forgeable. The binding is exact: a token
-    /// minted for one method, one correlation, or a narrower capability does not
-    /// authorize another.
+    /// Mints a token from a complete binding and 128 bits of OS entropy.
     #[must_use]
     pub fn mint(
         correlation: CorrelationId,
+        subject: impl Into<String>,
         method: impl Into<String>,
         capability: CapabilitySet,
+        payload_digest: [u8; 32],
         nonce: u128,
     ) -> Self {
         Self {
             correlation,
+            subject: subject.into(),
             method: method.into(),
             capability,
+            payload_digest,
             nonce,
         }
     }
@@ -91,6 +88,12 @@ impl ConsentToken {
     #[must_use]
     pub const fn correlation(&self) -> CorrelationId {
         self.correlation
+    }
+
+    /// The authenticated subject this token was minted for.
+    #[must_use]
+    pub fn subject(&self) -> &str {
+        &self.subject
     }
 
     /// The method this token was minted for.
@@ -105,29 +108,33 @@ impl ConsentToken {
         self.capability
     }
 
+    /// The SHA-256 digest of the operation parameters, excluding consent fields.
+    #[must_use]
+    pub const fn payload_digest(&self) -> [u8; 32] {
+        self.payload_digest
+    }
+
     /// The 128-bit nonce identifying this token in the runtime's ledger.
     #[must_use]
     pub const fn nonce(&self) -> u128 {
         self.nonce
     }
 
-    /// Whether this token authorizes `method`, invoked under `correlation`,
-    /// requiring `required`.
-    ///
-    /// The method and correlation must match exactly, and `required` must be a
-    /// subset of the token's capability. A token for `ncui.logs.purge` does not
-    /// authorize `ncui.data.purge`, and a token for one correlation does not
-    /// authorize a different operation.
+    /// Whether this token authorizes the exact subject, operation and requirements.
     #[must_use]
     pub fn matches(
         &self,
+        subject: &str,
         correlation: CorrelationId,
         method: &str,
         required: CapabilitySet,
+        payload_digest: [u8; 32],
     ) -> bool {
-        self.correlation == correlation
+        self.subject == subject
+            && self.correlation == correlation
             && self.method == method
             && required.is_subset_of(self.capability)
+            && self.payload_digest == payload_digest
     }
 
     /// Serializes the token to its wire JSON object.
@@ -136,8 +143,10 @@ impl ConsentToken {
         let capabilities: Vec<&str> = self.capability.iter().map(Capability::as_str).collect();
         serde_json::json!({
             "correlation": self.correlation.to_string(),
+            "subject": self.subject,
             "method": self.method,
             "capability": capabilities,
+            "payload_sha256": hex_digest(&self.payload_digest),
             "nonce": format!("{:#034x}", self.nonce),
         })
     }
@@ -151,102 +160,166 @@ impl ConsentToken {
         let correlation_text = value
             .get("correlation")
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                NcError::new(ErrorKind::Validation {
-                    field: "consent_token.correlation".to_owned(),
-                    reason: "must be a correlation id string".to_owned(),
-                })
-                .operation(OP_CONSENT_PARSE)
-            })?;
-        let correlation = correlation_text.parse::<CorrelationId>().map_err(|error| {
-            NcError::new(ErrorKind::Validation {
-                field: "consent_token.correlation".to_owned(),
-                reason: error.to_string(),
-            })
-            .operation(OP_CONSENT_PARSE)
-        })?;
+            .ok_or_else(|| consent_validation("correlation", "must be a correlation id string"))?;
+        let correlation = correlation_text
+            .parse::<CorrelationId>()
+            .map_err(|error| consent_validation("correlation", error.to_string()))?;
+        let subject = value
+            .get("subject")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| consent_validation("subject", "must be a subject string"))?;
         let method = value
             .get("method")
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                NcError::new(ErrorKind::Validation {
-                    field: "consent_token.method".to_owned(),
-                    reason: "must be a method name string".to_owned(),
-                })
-                .operation(OP_CONSENT_PARSE)
-            })?
-            .to_owned();
-        if method.trim().is_empty() {
-            return Err(NcError::new(ErrorKind::Validation {
-                field: "consent_token.method".to_owned(),
-                reason: "must not be empty".to_owned(),
-            })
-            .operation(OP_CONSENT_PARSE));
-        }
+            .ok_or_else(|| consent_validation("method", "must be a method name string"))?;
+        validate_consent_binding(subject, method)?;
         let capability_value = value.get("capability").ok_or_else(|| {
-            NcError::new(ErrorKind::Validation {
-                field: "consent_token.capability".to_owned(),
-                reason: "must be an array of capability strings".to_owned(),
-            })
-            .operation(OP_CONSENT_PARSE)
+            consent_validation("capability", "must be an array of capability strings")
         })?;
         let names = capability_value.as_array().ok_or_else(|| {
-            NcError::new(ErrorKind::Validation {
-                field: "consent_token.capability".to_owned(),
-                reason: "must be an array of capability strings".to_owned(),
-            })
-            .operation(OP_CONSENT_PARSE)
+            consent_validation("capability", "must be an array of capability strings")
         })?;
         let mut capability = CapabilitySet::empty();
         for name in names {
             let text = name.as_str().ok_or_else(|| {
-                NcError::new(ErrorKind::Validation {
-                    field: "consent_token.capability".to_owned(),
-                    reason: "each entry must be a capability string".to_owned(),
-                })
-                .operation(OP_CONSENT_PARSE)
+                consent_validation("capability", "each entry must be a capability string")
             })?;
             let parsed = text.parse::<Capability>().map_err(|error| {
-                NcError::new(ErrorKind::Validation {
-                    field: "consent_token.capability".to_owned(),
-                    reason: format!("unknown capability `{text}`: {error}"),
-                })
-                .operation(OP_CONSENT_PARSE)
+                consent_validation(
+                    "capability",
+                    format!("unknown capability `{text}`: {error}"),
+                )
             })?;
             capability = capability.with(parsed);
         }
+        let digest_text = value
+            .get("payload_sha256")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                consent_validation("payload_sha256", "must be a 64-digit SHA-256 hex string")
+            })?;
+        let payload_digest = parse_digest(digest_text)?;
         let nonce_text = value
             .get("nonce")
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                NcError::new(ErrorKind::Validation {
-                    field: "consent_token.nonce".to_owned(),
-                    reason: "must be a hex nonce string".to_owned(),
-                })
-                .operation(OP_CONSENT_PARSE)
-            })?;
+            .ok_or_else(|| consent_validation("nonce", "must be a hex nonce string"))?;
         let stripped = nonce_text
             .strip_prefix("0x")
             .or_else(|| nonce_text.strip_prefix("0X"))
             .unwrap_or(nonce_text);
         let padded = format!("{stripped:0>32}");
-        let nonce = u128::from_str_radix(&padded, 16).map_err(|_| {
-            NcError::new(ErrorKind::Validation {
-                field: "consent_token.nonce".to_owned(),
-                reason: "must be 32 hex digits".to_owned(),
-            })
-            .operation(OP_CONSENT_PARSE)
-        })?;
-        Ok(Self::mint(correlation, method, capability, nonce))
+        let nonce = u128::from_str_radix(&padded, 16)
+            .map_err(|_| consent_validation("nonce", "must be 32 hex digits"))?;
+        Ok(Self::mint(
+            correlation,
+            subject,
+            method,
+            capability,
+            payload_digest,
+            nonce,
+        ))
     }
+}
+
+/// Computes the digest of the operation parameters, excluding consent transport fields.
+///
+/// # Errors
+///
+/// Returns [`ErrorKind::Validation`] when `params` is neither an object nor `null`, and
+/// [`ErrorKind::Codec`] when the normalized value cannot be encoded.
+pub fn consent_payload_digest(params: &serde_json::Value) -> Result<[u8; 32]> {
+    use std::collections::BTreeMap;
+
+    use sha2::{Digest, Sha256};
+
+    let operation: BTreeMap<String, serde_json::Value> = match params {
+        serde_json::Value::Null => BTreeMap::new(),
+        serde_json::Value::Object(object) => object
+            .iter()
+            .filter(|(name, _)| name.as_str() != "consent_token" && name.as_str() != "consent")
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect(),
+        _ => {
+            return Err(consent_validation("params", "must be an object, or absent"));
+        }
+    };
+    let encoded = serde_json::to_vec(&operation).map_err(|error| {
+        NcError::new(ErrorKind::Codec {
+            operation: "security::authz::consent_payload_digest".to_owned(),
+            reason: error.to_string(),
+        })
+    })?;
+    Ok(Sha256::digest(encoded).into())
+}
+
+/// Validates the bounded identity fields recorded by a consent token.
+///
+/// # Errors
+///
+/// Returns [`ErrorKind::Validation`] when the subject or method is blank or too long.
+pub fn validate_consent_binding(subject: &str, method: &str) -> Result<()> {
+    if subject.trim().is_empty() || subject.len() > MAX_CONSENT_SUBJECT_BYTES {
+        return Err(consent_validation(
+            "subject",
+            format!("must be non-empty and at most {MAX_CONSENT_SUBJECT_BYTES} bytes"),
+        ));
+    }
+    if method.trim().is_empty() || method.len() > MAX_CONSENT_METHOD_BYTES {
+        return Err(consent_validation(
+            "method",
+            format!("must be non-empty and at most {MAX_CONSENT_METHOD_BYTES} bytes"),
+        ));
+    }
+    Ok(())
+}
+
+fn consent_validation(field: &str, reason: impl Into<String>) -> NcError {
+    NcError::new(ErrorKind::Validation {
+        field: format!("consent_token.{field}"),
+        reason: reason.into(),
+    })
+    .operation(OP_CONSENT_PARSE)
+}
+
+fn hex_digest(digest: &[u8; 32]) -> String {
+    use core::fmt::Write as _;
+
+    digest.iter().fold(String::new(), |mut encoded, byte| {
+        let _ = write!(encoded, "{byte:02x}");
+        encoded
+    })
+}
+
+fn parse_digest(text: &str) -> Result<[u8; 32]> {
+    let stripped = text
+        .strip_prefix("0x")
+        .or_else(|| text.strip_prefix("0X"))
+        .unwrap_or(text);
+    if stripped.len() != 64 || !stripped.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(consent_validation(
+            "payload_sha256",
+            "must be a 64-digit SHA-256 hex string",
+        ));
+    }
+    let mut digest = [0u8; 32];
+    let (pairs, _) = stripped.as_bytes().as_chunks::<2>();
+    for (byte, pair) in digest.iter_mut().zip(pairs) {
+        let text = core::str::from_utf8(pair)
+            .map_err(|error| consent_validation("payload_sha256", error.to_string()))?;
+        *byte = u8::from_str_radix(text, 16)
+            .map_err(|error| consent_validation("payload_sha256", error.to_string()))?;
+    }
+    Ok(digest)
 }
 
 impl fmt::Debug for ConsentToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ConsentToken")
             .field("correlation", &self.correlation)
+            .field("subject", &self.subject)
             .field("method", &self.method)
             .field("capability", &self.capability)
+            .field("payload_digest", &hex_digest(&self.payload_digest))
             .field("nonce", &" <redacted>")
             .finish()
     }
@@ -512,13 +585,11 @@ impl Authorizer {
     /// regardless of `authorized`, so a bug that hardcodes `authorized = true` cannot
     /// manufacture authority that was never granted.
     ///
-    /// `authorized` is a plain `bool` and that is a deliberate weakness of the signature:
-    /// a caller who writes `true` unconditionally has opted out. Prefer
+    /// `authorized` is a plain `bool` and is safe only for low-level callers that already
+    /// hold a real approval signal. Runtime request paths use
     /// [`Authorizer::require_destructive_with_token`], which takes the runtime-minted
-    /// [`ConsentToken`] and fails closed whenever the token is absent or mismatched.
-    /// This bool form fails closed on `false` and is kept for callers that cannot yet
-    /// produce a token; the runtime path always consumes the token form, so a bare
-    /// `consent: true` in a JSON-RPC request is refused there.
+    /// [`ConsentToken`] and fails closed whenever the token is absent or mismatched. A bare
+    /// `consent: true` in a JSON-RPC request authorizes nothing.
     ///
     /// # Errors
     ///
@@ -548,10 +619,11 @@ impl Authorizer {
     /// Authorizes `required` for `subject`, requiring a minted [`ConsentToken`]
     /// whenever any part of `required` is destructive.
     ///
-    /// The token must match `correlation`, `method`, and `required`. When it does
-    /// not — or when no token is supplied at all — the call is denied with a
-    /// migration message pointing at `consent_token`. A bare `consent: true`
-    /// therefore authorizes nothing destructive.
+    /// The token must match the authenticated `subject`, logical-operation
+    /// `correlation`, `method`, `required` capabilities and exact parameter digest.
+    /// When it does not — or when no token is supplied for a destructive capability —
+    /// the call is denied. The runtime ledger remains responsible for proving that the
+    /// nonce was minted here and has not already been spent.
     ///
     /// # Errors
     ///
@@ -559,6 +631,10 @@ impl Authorizer {
     /// * [`ErrorKind::CapabilityDenied`] if `required` is not a subset of
     ///   `granted`, or if `required` is destructive and `token` is `None` or does
     ///   not match.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the authorization boundary takes the complete consent binding explicitly"
+    )]
     pub fn require_destructive_with_token(
         &self,
         subject: &str,
@@ -567,10 +643,13 @@ impl Authorizer {
         token: Option<&ConsentToken>,
         correlation: CorrelationId,
         method: &str,
+        payload_digest: [u8; 32],
     ) -> Result<()> {
         self.authorize(subject, required, granted)?;
         if let Some(destructive) = first_destructive(required) {
-            let valid = token.is_some_and(|t| t.matches(correlation, method, required));
+            let valid = token.is_some_and(|token| {
+                token.matches(subject, correlation, method, required, payload_digest)
+            });
             if !valid {
                 return Err(NcError::new(ErrorKind::CapabilityDenied {
                     capability: destructive.as_str().to_owned(),
@@ -995,13 +1074,16 @@ mod tests {
         let granted = AgentRole::Administrator.capabilities();
         let required = CapabilitySet::empty().with(Capability::DeleteData);
         let correlation = CorrelationId::new();
+        let digest = consent_payload_digest(&serde_json::json!({ "path": "source" }))
+            .expect("operation digest");
         let token = ConsentToken::mint(
             correlation,
+            "admin-1",
             "ncui.data.purge",
             required,
+            digest,
             0x1234_5678_9abc_def0_1234_5678_9abc_def0,
         );
-        // Correct method + correlation succeeds.
         assert!(
             authorizer
                 .require_destructive_with_token(
@@ -1010,11 +1092,11 @@ mod tests {
                     granted,
                     Some(&token),
                     correlation,
-                    "ncui.data.purge"
+                    "ncui.data.purge",
+                    digest,
                 )
                 .is_ok()
         );
-        // Replaying the same token for a different method is refused.
         let err = authorizer
             .require_destructive_with_token(
                 "admin-1",
@@ -1023,6 +1105,7 @@ mod tests {
                 Some(&token),
                 correlation,
                 "ncui.logs.purge",
+                digest,
             )
             .expect_err("a token must not authorize a different method");
         assert_eq!(err.operation_name(), OP_REQUIRE_TOKEN);
@@ -1035,7 +1118,8 @@ mod tests {
         let required = CapabilitySet::empty().with(Capability::DeleteData);
         let minted = CorrelationId::new();
         let other = CorrelationId::new();
-        let token = ConsentToken::mint(minted, "ncui.data.purge", required, 1);
+        let digest = consent_payload_digest(&serde_json::json!({})).expect("operation digest");
+        let token = ConsentToken::mint(minted, "admin-1", "ncui.data.purge", required, digest, 1);
         assert!(
             authorizer
                 .require_destructive_with_token(
@@ -1044,7 +1128,8 @@ mod tests {
                     granted,
                     Some(&token),
                     other,
-                    "ncui.data.purge"
+                    "ncui.data.purge",
+                    digest,
                 )
                 .is_err(),
             "a token must not authorize a different correlation"
@@ -1064,9 +1149,78 @@ mod tests {
                 None,
                 CorrelationId::new(),
                 "ncui.data.purge",
+                [0; 32],
             )
             .expect_err("a destructive call without a token must be refused");
         assert_eq!(err.operation_name(), OP_REQUIRE_TOKEN);
+    }
+
+    #[test]
+    fn a_token_cannot_transfer_to_another_subject_or_altered_arguments() {
+        let authorizer = Authorizer::new();
+        let granted = AgentRole::Administrator.capabilities();
+        let required = CapabilitySet::empty().with(Capability::DeleteData);
+        let correlation = CorrelationId::new();
+        let digest = consent_payload_digest(&serde_json::json!({ "path": "source" }))
+            .expect("operation digest");
+        let altered = consent_payload_digest(&serde_json::json!({ "path": "home" }))
+            .expect("altered operation digest");
+        let token = ConsentToken::mint(
+            correlation,
+            "admin-1",
+            "ncui.data.purge",
+            required,
+            digest,
+            7,
+        );
+        assert!(
+            authorizer
+                .require_destructive_with_token(
+                    "admin-2",
+                    required,
+                    granted,
+                    Some(&token),
+                    correlation,
+                    "ncui.data.purge",
+                    digest,
+                )
+                .is_err()
+        );
+        assert!(
+            authorizer
+                .require_destructive_with_token(
+                    "admin-1",
+                    required,
+                    granted,
+                    Some(&token),
+                    correlation,
+                    "ncui.data.purge",
+                    altered,
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn operation_digests_are_canonical_and_ignore_consent_transport_fields() {
+        let first = consent_payload_digest(&serde_json::json!({
+            "b": 2,
+            "a": 1,
+            "consent": true,
+            "consent_token": { "nonce": "ignored" }
+        }))
+        .expect("first digest");
+        let second = consent_payload_digest(&serde_json::json!({
+            "a": 1,
+            "b": 2
+        }))
+        .expect("second digest");
+        assert_eq!(first, second);
+        assert_ne!(
+            first,
+            consent_payload_digest(&serde_json::json!({ "a": 1, "b": 3 })).expect("altered digest")
+        );
+        assert!(consent_payload_digest(&serde_json::json!([1, 2])).is_err());
     }
 
     #[test]
@@ -1075,12 +1229,23 @@ mod tests {
         let required = CapabilitySet::empty()
             .with(Capability::DeleteData)
             .with(Capability::ReadLogs);
-        let token = ConsentToken::mint(correlation, "ncui.data.purge", required, 0xbeef);
+        let digest = consent_payload_digest(&serde_json::json!({ "scope": "all" }))
+            .expect("operation digest");
+        let token = ConsentToken::mint(
+            correlation,
+            "admin-1",
+            "ncui.data.purge",
+            required,
+            digest,
+            0xbeef,
+        );
         let value = token.to_value();
         let back = ConsentToken::from_value(&value).expect("a minted token parses back");
         assert_eq!(back.correlation(), correlation);
+        assert_eq!(back.subject(), "admin-1");
         assert_eq!(back.method(), "ncui.data.purge");
         assert_eq!(back.capability(), required);
+        assert_eq!(back.payload_digest(), digest);
         assert_eq!(back.nonce(), 0xbeef);
     }
 }

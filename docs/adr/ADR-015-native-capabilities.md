@@ -130,8 +130,8 @@ the capability and the user's grant are the boundary.
 ## Consequences
 
 - An application that grants `filesystem.read` gets three commands; one that grants
-  `filesystem.write` gets a fourth, which is destructive and therefore asks the page to
-  state its consent.
+  `filesystem.write` gets a fourth, which is destructive and therefore needs host approval
+  for the exact call rather than a page-supplied consent boolean.
 - The filesystem root is the application's own directory. An application that needs a
   wider root needs a different arrangement, and that is deliberate: the default should not
   be the user's home directory.

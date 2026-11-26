@@ -84,6 +84,7 @@ the registry disagree, the registry is right and this table is the bug.
 | Accessibility: semantic tree, focus order, keyboard routing | Implemented |
 | Global shortcuts: the manifest declares them, the runtime holds the key, the page hears the press | Implemented |
 | Tray icon: the manifest declares an image and tooltip; a click brings the window forward | Implemented |
+| Native menus: the manifest declares nested commands and the page receives selections | Implemented on Windows and Linux; macOS unverified |
 | SBOM, reproducible release builds, artifact signing | Implemented |
 | Cross-platform verification on Linux | Implemented |
 | WASM execution: untrusted components run under fuel, a memory cap and a copy budget | Implemented |
@@ -95,8 +96,8 @@ pedantic with `-D warnings`, rustdoc with `-D warnings`, the tools workspace, an
 gates (`ncui-arch`, `ncui-registry`, `ncui-placeholders`, and the count check described below).
 `cargo test --workspace --all-targets` is the suite behind that claim;
 `tools/linux_gate.py` runs the Linux side: every gate it lists, last run clean under WSL2
-against this tree — twenty-three gates, 1373 workspace tests and 52 in the tools workspace, no
-failures.
+against this tree. Its printed tally is authoritative and the latest result is recorded in
+`docs/completion-audit.md` §8.
 **macOS has not been run**: no host is reachable
 from the machine that produced this tree, and the registry records it as `unverified` rather
 than inferred from a CI matrix. That is
@@ -112,7 +113,7 @@ is compiled, linted and tested rather than merely present.
 Run the validator for the authoritative, machine-readable version:
 
 ```sh
-cargo run --release --bin ncui-registry -- protocols/feature-registry.json
+cargo run --release --manifest-path tools/Cargo.toml --bin ncui-registry -- protocols/feature-registry.json
 ```
 
 A capability is recorded as either `complete` — implemented, tested, integrated, observable and
@@ -198,7 +199,10 @@ let _command = runtime.register_page_command(
 
 A command whose capabilities the page grant does not cover is refused at registration, so a
 page is never handed authority the host did not grant it. A command that requires a
-destructive capability also requires the page to state its consent in the call's payload.
+destructive capability also requires host approval for that exact call. The page cannot
+authorize itself with a boolean; the desktop host presents a native confirmation prompt. On
+Linux, `rfd` uses `zenity` for this message dialog; if the tool is missing or fails, the operation
+is refused rather than approved silently.
 
 The two halves of the contract are one file: `packages/ncui-client/src/bridge.js` is the
 script the host injects, and it is the same file the package's own suite exercises. The
@@ -222,8 +226,9 @@ console.log(note.text, note.bytes);
 
 The command exists only because the grant names the capability: `filesystem.read` registers
 `fs.read_text`, `fs.list` and `fs.stat`; `filesystem.write` registers `fs.write_text`, which
-is destructive and therefore needs the page to state its consent. A page that was not granted
-a capability is never offered the command, and the call is authorized again when it is made.
+is destructive and therefore needs host approval for the exact write. A page that was not
+granted a capability is never offered the command, and the call is authorized again when it is
+made.
 
 Every path is checked twice — once lexically by the same containment check the rest of the
 project uses, and once against the canonical path, so a symlink inside the directory cannot
@@ -235,7 +240,6 @@ With `process.spawn` granted, a page can also run a program:
 const result = await window.ncui.invoke("process.run", {
   program: "git",
   args: ["status", "--short"],
-  consent: true, // process.spawn is destructive
 });
 console.log(result.status, result.stdout);
 ```
@@ -258,7 +262,7 @@ There is no shell: the program and its arguments are an argument vector, never a
 line. A program path must be inside the application or a bare name the system resolves. The
 child gets a scrubbed environment — variables whose names look like keys, secrets, tokens or
 passwords are removed — a time limit, and bounded output. `process.spawn` is destructive, so
-the call is refused unless the page states its consent.
+the call is refused unless the host approves the exact program and arguments.
 
 ## Page windows
 
@@ -406,8 +410,9 @@ The placeholder scanner is invoked once per workspace root. Exemption is decided
 file's first path component, so a single invocation rooted above both workspaces would treat
 every test file as production source.
 
-The workspace denies `unsafe_code` outright, and denies `unwrap`, `expect`, `panic`, `todo`,
-`unimplemented`, `print_stdout`, `print_stderr`, and `dbg!` in library code. Clippy runs at
+The workspace denies `unsafe_code`, with one package-scoped exception for muda's Windows menu
+attachment recorded in ADR-012, and denies `unwrap`, `expect`, `panic`, `todo`, `unimplemented`,
+`print_stdout`, `print_stderr`, and `dbg!` in library code. Clippy runs at
 `pedantic` with warnings denied, and every `#[allow]` must carry a written `reason`.
 
 ## Known gaps
@@ -483,15 +488,16 @@ The headline, on Windows x86_64 with five repeats:
 
 | | Electron | NC-UI | Tauri | NC-UI |
 | --- | --- | --- | --- | --- |
-| Cold start to a window | 308.8 ms | **51.9 ms** | 52.4 ms | **51.8 ms** |
-| Idle working set | 301.3 MiB | 349.1 MiB | 335.9 MiB | 350.9 MiB |
+| Cold start to a window | 308.8 ms | **51.9 ms** | 52.9 ms | 55.1 ms |
+| Idle working set | 301.3 MiB | 349.1 MiB | 334.9 MiB | **330.4 MiB** |
 | Idle CPU | **0.00 %** | **0.00 %** | **0.00 %** | **0.00 %** |
-| IPC round trip | **0.188 ms** | 0.375 ms | **0.281 ms** | 0.329 ms |
-| Distributed size | 356.8 MiB | **11.3 MiB** | **3.2 MiB** | 11.3 MiB |
+| IPC round trip | **0.188 ms** | 0.375 ms | 1.398 ms | **0.348 ms** |
+| Distributed size | 356.8 MiB | **11.3 MiB** | **8.5 MiB** | 11.4 MiB |
 
-NC-UI is 32× smaller than Electron and starts 5.9× faster; it is level with Tauri on startup,
-and all three measure 0.00 % CPU at idle. It is slower than both on IPC, larger than both at
-idle, and larger than Tauri on disk; the comparison records why rather than hiding it. The
+NC-UI is 32× smaller than Electron and starts 5.9× faster; it is level with Tauri 2 on startup,
+and all three measure 0.00 % CPU at idle. It is slower than Electron on IPC but 4.0× faster than
+Tauri 2, larger than Electron at idle but 1.3 % smaller than Tauri 2, and larger than Tauri 2 on
+disk; the comparison records why rather than hiding it. The
 IPC figure is the one that moved most: a page call used to cost 16.4 ms because the page loop
 slept between pumps, a blocking wait on the engine's message channel brought it under 0.4 ms,
 and removing the asset server's 2 ms accept poll took it from 0.52 ms to 0.375 ms. The

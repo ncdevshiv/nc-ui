@@ -97,6 +97,9 @@ pub struct FileFilter {
 /// surfaces with different limits, and a re-export of both into `lib.rs` would collide.
 pub const MAX_DIALOG_TITLE_BYTES: usize = 256;
 
+/// The longest complete confirmation message shown for a destructive operation.
+pub const MAX_CONFIRM_MESSAGE_BYTES: usize = 16_384;
+
 /// The longest extension this module accepts, and the longest a returned path may be.
 pub const MAX_EXTENSION_BYTES: usize = 32;
 pub const MAX_PATH_BYTES: usize = 4096;
@@ -307,6 +310,61 @@ pub trait DialogBackend: core::fmt::Debug + Send + Sync {
             reason: "this backend does not show a colour dialog".to_owned(),
         })
     }
+
+    /// Presents a complete destructive-operation confirmation.
+    ///
+    /// # Errors
+    ///
+    /// [`DialogError::RefusedRequest`] when the text is malformed,
+    /// [`DialogError::Unavailable`] when this backend cannot ask for confirmation, and
+    /// [`DialogError::Failed`] when a shown prompt cannot be completed.
+    fn confirm(&self, title: &str, message: &str) -> Result<bool, DialogError> {
+        validate_confirm_request(title, message)?;
+        Err(DialogError::Unavailable {
+            reason: "this backend does not show confirmation dialogs".to_owned(),
+        })
+    }
+}
+
+/// Validates the complete text of a confirmation before a platform is asked to show it.
+///
+/// # Errors
+///
+/// [`DialogError::RefusedRequest`] when either field is empty, over-long, or carries a control
+/// character other than the whitespace used to lay out the operation.
+pub(crate) fn validate_confirm_request(title: &str, message: &str) -> Result<(), DialogError> {
+    validate_confirm_text("title", title, MAX_DIALOG_TITLE_BYTES, false)?;
+    validate_confirm_text("message", message, MAX_CONFIRM_MESSAGE_BYTES, true)
+}
+
+fn validate_confirm_text(
+    field: &'static str,
+    text: &str,
+    maximum: usize,
+    allow_layout_whitespace: bool,
+) -> Result<(), DialogError> {
+    if text.trim().is_empty() {
+        return Err(DialogError::RefusedRequest {
+            field,
+            reason: "it is empty".to_owned(),
+        });
+    }
+    if text.len() > maximum {
+        return Err(DialogError::RefusedRequest {
+            field,
+            reason: format!("it is longer than {maximum} bytes"),
+        });
+    }
+    if let Some(character) = text.chars().find(|character| {
+        character.is_control()
+            && !(allow_layout_whitespace && matches!(character, '\n' | '\r' | '\t'))
+    }) {
+        return Err(DialogError::RefusedRequest {
+            field,
+            reason: format!("it contains the control character {character:?}"),
+        });
+    }
+    Ok(())
 }
 
 /// The options an application may set on a dialog.
@@ -518,6 +576,17 @@ mod platform {
     }
 
     impl DialogBackend for RfdDialogs {
+        fn confirm(&self, title: &str, message: &str) -> Result<bool, DialogError> {
+            super::validate_confirm_request(title, message)?;
+            let answer = rfd::MessageDialog::new()
+                .set_title(title)
+                .set_description(message)
+                .set_level(rfd::MessageLevel::Warning)
+                .set_buttons(rfd::MessageButtons::YesNo)
+                .show();
+            Ok(confirmation_answer(&answer))
+        }
+
         fn show(
             &self,
             kind: DialogKind,
@@ -602,6 +671,11 @@ mod platform {
                 })
             }
         }
+    }
+
+    /// Only an explicit Yes approves; every other answer withholds approval.
+    fn confirmation_answer(answer: &rfd::MessageDialogResult) -> bool {
+        matches!(answer, rfd::MessageDialogResult::Yes)
     }
 
     /// Wraps one chosen path, treating the platform's `None` as the person cancelling.
@@ -711,6 +785,22 @@ mod platform {
         })
     }
 
+    #[cfg(test)]
+    mod confirmation_tests {
+        use super::confirmation_answer;
+
+        #[test]
+        fn only_an_explicit_yes_approves() {
+            assert!(confirmation_answer(&rfd::MessageDialogResult::Yes));
+            assert!(!confirmation_answer(&rfd::MessageDialogResult::No));
+            assert!(!confirmation_answer(&rfd::MessageDialogResult::Ok));
+            assert!(!confirmation_answer(&rfd::MessageDialogResult::Cancel));
+            assert!(!confirmation_answer(&rfd::MessageDialogResult::Custom(
+                "unexpected".to_owned(),
+            )));
+        }
+    }
+
     #[cfg(all(test, windows))]
     mod color_tests {
         use super::{color_dialog_script, parse_color_output};
@@ -782,6 +872,22 @@ pub const fn dialogs_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn complete_confirmation_text_is_bounded_and_layout_aware() {
+        assert!(validate_confirm_request("Confirm", "subject: page:1\nparameters: {}").is_ok());
+        for (title, message) in [
+            ("   ", "operation"),
+            ("Confirm", "\n\t"),
+            ("Confirm\nunsafe", "operation"),
+            ("Confirm", "operation\u{7}"),
+            (&"t".repeat(MAX_DIALOG_TITLE_BYTES + 1), "operation"),
+            ("Confirm", &"m".repeat(MAX_CONFIRM_MESSAGE_BYTES + 1)),
+        ] {
+            let error = validate_confirm_request(title, message).expect_err("refused");
+            assert_eq!(error.code(), "dialog_request_refused", "{error}");
+        }
+    }
 
     #[test]
     fn a_colour_request_is_validated_before_anything_is_shown() {

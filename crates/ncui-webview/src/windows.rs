@@ -13,13 +13,14 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use ncui_core::{Capability, CapabilitySet, ComponentId, WindowId};
+use ncui_webview_child::{ChildWebviewEntry, ChildWebviewId, ChildWebviewRequest};
 
-use crate::PageMessage;
 use crate::capability::CapabilityGrant;
 use crate::lifecycle::{HostState, WindowLifecycle};
 use crate::navigation::{NavigationPolicy, NavigationRequest};
 use crate::request::WindowRequest;
 use crate::seam::{ActionTable, HostSeam};
+use crate::{ChildPageMessage, PageMessage};
 
 /// The maximum number of windows one registry will hold open.
 ///
@@ -27,6 +28,29 @@ use crate::seam::{ActionTable, HostSeam};
 /// `ncui.window.create` exhaust memory and window handles, and the failure would be an
 /// engine error far from the call that caused it.
 pub const MAX_WINDOWS: usize = 32;
+
+/// The maximum number of child webviews one parent window may own.
+///
+/// Child surfaces consume engine handles and native composition resources. Keeping the bound
+/// per parent lets a runtime support several windows without allowing any one page to create an
+/// unbounded number of embedded browsers.
+pub const MAX_CHILDREN_PER_WINDOW: usize = 16;
+
+/// The longest one wait blocks on either child IPC source before checking the other.
+const CHILD_WAIT_SLICE: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// One child surface owned by a window.
+///
+/// The lifecycle is shared with the child's seam, but is independent of the parent's lifecycle.
+/// The request is the last applied record, including the original URL; bounds-only updates must
+/// not turn it into a navigation request.
+#[derive(Debug)]
+struct ChildSurface {
+    lifecycle: WindowLifecycle,
+    seam: Arc<HostSeam>,
+    request: ChildWebviewRequest,
+    pending_messages: VecDeque<ChildPageMessage>,
+}
 
 /// Spawns one engine host for a window.
 ///
@@ -121,6 +145,13 @@ pub struct Window {
     pub maximized: bool,
     /// The components mounted in this window, in mount order.
     pub components: Vec<MountedComponent>,
+    /// Child surfaces this parent owns, keyed by the engine's canonical identity.
+    children: BTreeMap<ChildWebviewId, ChildSurface>,
+    /// Receivers for the IPC channels handed to child engines at creation.
+    ///
+    /// These stay with the parent rather than in a process-wide registry: dropping the parent
+    /// drops both the receivers and the engine that owns the corresponding child surfaces.
+    child_ipc_receivers: BTreeMap<ChildWebviewId, std::sync::mpsc::Receiver<ChildPageMessage>>,
     /// Messages the page has sent and the host has not yet consumed.
     pending_page_messages: VecDeque<PageMessage>,
 }
@@ -201,6 +232,18 @@ impl Window {
     #[must_use]
     pub fn set_tray(&self, tray: Option<crate::TrayRequest>) -> bool {
         self.host.as_ref().is_some_and(|host| host.set_tray(tray))
+    }
+
+    /// Attaches a native menu to this window, or removes it when `menu` is `None`.
+    #[must_use]
+    pub fn set_menu(&self, menu: Option<crate::MenuRequest>) -> bool {
+        self.host.as_ref().is_some_and(|host| host.set_menu(menu))
+    }
+
+    /// Takes the next native menu selection for this window.
+    #[must_use]
+    pub fn poll_menu_event(&self) -> Option<crate::MenuEvent> {
+        self.host.as_ref().and_then(|host| host.poll_menu_event())
     }
 
     /// Records the fields `shape` named, so the window's summary describes the window that exists.
@@ -306,6 +349,373 @@ impl Window {
             .is_some_and(|host| host.evaluate_script(script))
     }
 
+    /// Creates one child webview owned by this window.
+    ///
+    /// The child's initial navigation is checked here because the engine performs that load on
+    /// the host's behalf. The child receives the parent's navigation, action and locale policy,
+    /// but an independent lifecycle and an empty grant.
+    ///
+    /// # Errors
+    ///
+    /// Returns a diagnostic when the request is invalid, the parent is full or unavailable, the
+    /// initial URL is refused, the engine cannot build the surface, or the child lifecycle cannot
+    /// reach `Running`.
+    pub fn create_child_webview(
+        &mut self,
+        request: &ChildWebviewRequest,
+    ) -> Result<ChildWebviewId, String> {
+        request.validate().map_err(|error| error.to_string())?;
+        if self.children.len() >= MAX_CHILDREN_PER_WINDOW {
+            return Err(format!(
+                "parent window {} already owns {MAX_CHILDREN_PER_WINDOW} child webviews",
+                self.id
+            ));
+        }
+        if !self.is_serving() {
+            return Err(format!(
+                "parent window {} is not serving with a live host",
+                self.id
+            ));
+        }
+
+        let Some(navigation) = NavigationRequest::from_url(&request.url, true) else {
+            return Err(format!(
+                "the child webview URL `{}` cannot be read, and an unreadable URL is refused",
+                request.url
+            ));
+        };
+        if let crate::navigation::Verdict::Deny { reason } =
+            self.seam.evaluate_navigation(&navigation)
+        {
+            return Err(format!(
+                "the child webview URL `{}` is not permitted: {reason}",
+                request.url
+            ));
+        }
+
+        let lifecycle = WindowLifecycle::new();
+        lifecycle
+            .transition(HostState::Created)
+            .map_err(|error| format!("a fresh child lifecycle refused `Created`: {error}"))?;
+        lifecycle
+            .transition(HostState::Attaching)
+            .map_err(|error| format!("the child lifecycle could not begin attaching: {error}"))?;
+        let seam = Arc::new(self.seam.isolated_child(lifecycle.clone()));
+        let (ipc_tx, ipc_rx) = std::sync::mpsc::sync_channel(crate::MAX_CHILD_IPC_MESSAGES);
+        let Some(host) = self.host.as_ref() else {
+            return Err(format!("parent window {} has no engine host", self.id));
+        };
+        let raw = match host.create_child_webview(request, &seam, ipc_tx) {
+            Ok(raw) => raw,
+            Err(error) => {
+                let _ = lifecycle.transition(HostState::Crashed);
+                return Err(error);
+            }
+        };
+        let child = ChildWebviewId::from_raw(raw);
+
+        if self.children.contains_key(&child) {
+            return Err(Self::close_failed_child_build(
+                host.as_ref(),
+                raw,
+                &lifecycle,
+                format!("the engine returned duplicate child webview identity {child}"),
+            ));
+        }
+        if let Err(error) = lifecycle.transition(HostState::Running) {
+            return Err(Self::close_failed_child_build(
+                host.as_ref(),
+                raw,
+                &lifecycle,
+                format!("the child lifecycle could not reach `Running`: {error}"),
+            ));
+        }
+        if !host.is_alive() {
+            return Err(Self::close_failed_child_build(
+                host.as_ref(),
+                raw,
+                &lifecycle,
+                format!(
+                    "parent window {} lost its engine while child {child} was being built",
+                    self.id
+                ),
+            ));
+        }
+
+        // Record only a running child. The IPC receiver is retained beside the policy record so
+        // messages sent through the creation channel are drained by the same polling APIs.
+        self.child_ipc_receivers.insert(child, ipc_rx);
+        self.children.insert(
+            child,
+            ChildSurface {
+                lifecycle,
+                seam,
+                request: request.clone(),
+                pending_messages: VecDeque::new(),
+            },
+        );
+        self.queue_child_ipc_messages(child);
+        Ok(child)
+    }
+
+    /// Closes an engine child after a build succeeded but could not be committed.
+    fn close_failed_child_build(
+        host: &dyn crate::WebViewBackend,
+        child: u64,
+        lifecycle: &WindowLifecycle,
+        reason: String,
+    ) -> String {
+        let _ = lifecycle.transition(HostState::Crashed);
+        match host.close_child_webview(child) {
+            Ok(()) => reason,
+            Err(error) => format!("{reason}; closing the engine child also failed: {error}"),
+        }
+    }
+
+    /// Moves one child, validating geometry without treating its URL as a navigation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a diagnostic for invalid geometry, an unknown child, a missing parent host, or an
+    /// engine refusal. Stored bounds change only after the engine accepts them.
+    pub fn set_child_webview_bounds(
+        &mut self,
+        child: ChildWebviewId,
+        request: &ChildWebviewRequest,
+    ) -> Result<(), String> {
+        request
+            .validate_bounds()
+            .map_err(|error| error.to_string())?;
+        if !self.children.contains_key(&child) {
+            return Err(format!(
+                "child webview {child} is not owned by parent window {}",
+                self.id
+            ));
+        }
+        let host = self
+            .host
+            .as_ref()
+            .ok_or_else(|| format!("parent window {} has no engine host", self.id))?;
+        host.set_child_webview_bounds(child.raw(), request)?;
+
+        let surface = self
+            .children
+            .get_mut(&child)
+            .ok_or_else(|| format!("child webview {child} disappeared while moving it"))?;
+        surface.request.x = request.x;
+        surface.request.y = request.y;
+        surface.request.width = request.width;
+        surface.request.height = request.height;
+        Ok(())
+    }
+
+    /// Closes one child, removing its record only after the engine confirms the close.
+    ///
+    /// # Errors
+    ///
+    /// Returns a diagnostic when the child is unknown, the parent has no host, or the engine
+    /// refuses the close.
+    pub fn close_child_webview(&mut self, child: ChildWebviewId) -> Result<(), String> {
+        let lifecycle = self
+            .children
+            .get(&child)
+            .map(|surface| surface.lifecycle.clone())
+            .ok_or_else(|| {
+                format!(
+                    "child webview {child} is not owned by parent window {}",
+                    self.id
+                )
+            })?;
+        let host = self
+            .host
+            .as_ref()
+            .ok_or_else(|| format!("parent window {} has no engine host", self.id))?;
+        host.close_child_webview(child.raw())?;
+
+        let _ = lifecycle.transition(HostState::Destroying);
+        let _ = lifecycle.transition(HostState::Destroyed);
+        self.children.remove(&child);
+        self.child_ipc_receivers.remove(&child);
+        Ok(())
+    }
+
+    /// This parent's children, ordered by their canonical engine identities.
+    #[must_use]
+    pub fn list_child_webviews(&self) -> Vec<ChildWebviewEntry> {
+        self.children
+            .iter()
+            .map(|(&id, surface)| ChildWebviewEntry {
+                id,
+                parent: self.id,
+                bounds: surface.request.clone(),
+            })
+            .collect()
+    }
+
+    /// The canonical identities of this parent's children, in deterministic order.
+    #[must_use]
+    pub fn child_ids(&self) -> Vec<ChildWebviewId> {
+        self.children.keys().copied().collect()
+    }
+
+    /// The isolated seam governing one child, when this parent owns it.
+    #[must_use]
+    pub fn seam_for_child(&self, child: ChildWebviewId) -> Option<Arc<HostSeam>> {
+        self.children
+            .get(&child)
+            .map(|surface| surface.seam.clone())
+    }
+
+    /// Takes one child-page message, polling both IPC and the parent host when necessary.
+    pub fn take_child_page_message(&mut self, child: ChildWebviewId) -> Option<ChildPageMessage> {
+        if let Some(message) = self.pop_pending_child_message(child) {
+            return Some(message);
+        }
+        self.queue_child_ipc_messages(child);
+        if let Some(message) = self.pop_pending_child_message(child) {
+            return Some(message);
+        }
+
+        let message = self
+            .host
+            .as_ref()?
+            .poll_child_webview_message(child.raw())?;
+        if !self.push_child_page_message(child, message) {
+            return None;
+        }
+        self.pop_pending_child_message(child)
+    }
+
+    /// Waits for one child-page message and queues anything the wait consumes.
+    ///
+    /// The parent host receives the whole wait budget for this child. If it times out, the
+    /// creation IPC channel is drained as well so a message arriving during the wait is not lost.
+    pub fn wait_child_page_message(
+        &mut self,
+        child: ChildWebviewId,
+        timeout: std::time::Duration,
+    ) -> Option<ChildPageMessage> {
+        let started = std::time::Instant::now();
+        let mut primary_connected = self.child_ipc_receivers.contains_key(&child);
+        loop {
+            if let Some(message) = self.pop_pending_child_message(child) {
+                return Some(message);
+            }
+            self.queue_child_ipc_messages(child);
+            if let Some(message) = self.pop_pending_child_message(child) {
+                return Some(message);
+            }
+            if !self.children.contains_key(&child) {
+                return None;
+            }
+            if let Some(message) = self
+                .host
+                .as_ref()
+                .and_then(|host| host.poll_child_webview_message(child.raw()))
+                && self.push_child_page_message(child, message)
+            {
+                return self.pop_pending_child_message(child);
+            }
+
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                break;
+            }
+            if primary_connected {
+                let slice = timeout.saturating_sub(elapsed).min(CHILD_WAIT_SLICE);
+                match self
+                    .child_ipc_receivers
+                    .get_mut(&child)
+                    .map(|receiver| receiver.recv_timeout(slice))
+                {
+                    Some(Ok(message)) => {
+                        if self.push_child_page_message(child, message) {
+                            return self.pop_pending_child_message(child);
+                        }
+                    }
+                    Some(Err(std::sync::mpsc::RecvTimeoutError::Timeout)) => {}
+                    Some(Err(std::sync::mpsc::RecvTimeoutError::Disconnected)) | None => {
+                        primary_connected = false;
+                        if self.host.is_none() {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                break;
+            }
+            let slice = timeout.saturating_sub(elapsed).min(CHILD_WAIT_SLICE);
+            if let Some(message) = self
+                .host
+                .as_ref()
+                .and_then(|host| host.wait_child_webview_message(child.raw(), slice))
+                && self.push_child_page_message(child, message)
+            {
+                return self.pop_pending_child_message(child);
+            }
+        }
+
+        self.queue_child_ipc_messages(child);
+        self.pop_pending_child_message(child)
+    }
+
+    /// Delivers a response script to exactly one child through its parent host.
+    #[must_use]
+    pub fn post_to_child_page(&mut self, child: ChildWebviewId, script: &str) -> bool {
+        self.is_serving()
+            && self.children.get(&child).is_some_and(|surface| {
+                surface.lifecycle.is_serving()
+                    && self
+                        .host
+                        .as_ref()
+                        .is_some_and(|host| host.evaluate_child_script(child.raw(), script))
+            })
+    }
+
+    /// Queues a child message a blocking wait already consumed.
+    fn push_child_page_message(
+        &mut self,
+        child: ChildWebviewId,
+        message: ChildPageMessage,
+    ) -> bool {
+        if message.child != child.raw() {
+            return false;
+        }
+        let Some(surface) = self.children.get_mut(&child) else {
+            return false;
+        };
+        if surface.pending_messages.len() >= crate::MAX_CHILD_IPC_MESSAGES {
+            return false;
+        }
+        surface.pending_messages.push_back(message);
+        true
+    }
+
+    /// Removes one already-queued child message without polling the engine.
+    fn pop_pending_child_message(&mut self, child: ChildWebviewId) -> Option<ChildPageMessage> {
+        self.children.get_mut(&child)?.pending_messages.pop_front()
+    }
+
+    /// Drains the creation IPC channel into the child's policy-owned queue.
+    fn queue_child_ipc_messages(&mut self, child: ChildWebviewId) {
+        let Some(surface) = self.children.get_mut(&child) else {
+            return;
+        };
+        let Some(receiver) = self.child_ipc_receivers.get_mut(&child) else {
+            return;
+        };
+        while surface.pending_messages.len() < crate::MAX_CHILD_IPC_MESSAGES
+            && let Ok(message) = receiver.try_recv()
+        {
+            if message.child == child.raw() {
+                surface.pending_messages.push_back(message);
+            }
+        }
+    }
+
     /// Unmounts a component, reporting whether it was mounted.
     pub fn unmount(&mut self, id: ComponentId) -> Option<MountedComponent> {
         let position = self.components.iter().position(|c| c.id == id)?;
@@ -318,8 +728,23 @@ impl Window {
     /// only thing that knows it has died, so this is where that knowledge enters the state
     /// machine. Without it, `Running` would persist for a host that cannot answer.
     pub fn observe_engine_death(&mut self) {
-        if self.last_error().is_some() && !self.lifecycle.is_crashed() {
+        let engine_died = self
+            .host
+            .as_ref()
+            .is_some_and(|host| !host.is_alive() || host.last_error().is_some());
+        if !engine_died {
+            return;
+        }
+        if !self.lifecycle.is_crashed() {
             let _ = self.lifecycle.transition(HostState::Crashed);
+        }
+        for surface in self.children.values_mut() {
+            if matches!(
+                surface.lifecycle.state(),
+                Some(HostState::Attaching | HostState::Running | HostState::Suspended)
+            ) {
+                let _ = surface.lifecycle.transition(HostState::Crashed);
+            }
         }
     }
 }
@@ -612,28 +1037,153 @@ impl WindowRegistry {
         self.windows.get_mut(&id)
     }
 
-    /// Waits for the next message from any window's page, up to `timeout`.
+    /// Creates a child webview owned by `parent`.
     ///
-    /// The budget is divided among the open windows so a window visited first cannot hold
-    /// the whole wait while another window's page is ready. A message the wait receives is
-    /// queued on its window, so the runtime's pump drains it; the return value says whether
-    /// one was queued.
+    /// # Errors
+    ///
+    /// Returns [`WindowRejection::EngineUnavailable`] when the parent is not open. Request,
+    /// policy and engine failures remain in the inner [`Result`].
+    pub fn create_child_webview(
+        &mut self,
+        parent: WindowId,
+        request: &ChildWebviewRequest,
+    ) -> Result<Result<ChildWebviewId, String>, WindowRejection> {
+        let window =
+            self.windows
+                .get_mut(&parent)
+                .ok_or_else(|| WindowRejection::EngineUnavailable {
+                    reason: Some(format!("parent window {parent} is not open")),
+                })?;
+        Ok(window.create_child_webview(request))
+    }
+
+    /// Moves one child webview owned by `parent`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WindowRejection::EngineUnavailable`] when the parent is not open. Ownership,
+    /// geometry and engine failures remain in the inner [`Result`].
+    pub fn set_child_webview_bounds(
+        &mut self,
+        parent: WindowId,
+        child: ChildWebviewId,
+        request: &ChildWebviewRequest,
+    ) -> Result<Result<(), String>, WindowRejection> {
+        let window =
+            self.windows
+                .get_mut(&parent)
+                .ok_or_else(|| WindowRejection::EngineUnavailable {
+                    reason: Some(format!("parent window {parent} is not open")),
+                })?;
+        Ok(window.set_child_webview_bounds(child, request))
+    }
+
+    /// Closes one child webview owned by `parent`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WindowRejection::EngineUnavailable`] when the parent is not open. Ownership and
+    /// engine failures remain in the inner [`Result`].
+    pub fn close_child_webview(
+        &mut self,
+        parent: WindowId,
+        child: ChildWebviewId,
+    ) -> Result<Result<(), String>, WindowRejection> {
+        let window =
+            self.windows
+                .get_mut(&parent)
+                .ok_or_else(|| WindowRejection::EngineUnavailable {
+                    reason: Some(format!("parent window {parent} is not open")),
+                })?;
+        Ok(window.close_child_webview(child))
+    }
+
+    /// Every live child across all parents, ordered by window and then child identity.
+    #[must_use]
+    pub fn list_child_webviews(&self) -> Vec<ChildWebviewEntry> {
+        self.windows
+            .values()
+            .flat_map(Window::list_child_webviews)
+            .collect()
+    }
+
+    /// Takes the next child-page message in deterministic window/child order.
+    pub fn take_child_page_message(&mut self) -> Option<(WindowId, ChildPageMessage)> {
+        let surfaces: Vec<(WindowId, ChildWebviewId)> = self
+            .windows
+            .iter()
+            .flat_map(|(&parent, window)| {
+                window
+                    .child_ids()
+                    .into_iter()
+                    .map(move |child| (parent, child))
+            })
+            .collect();
+        for (parent, child) in surfaces {
+            if let Some(message) = self
+                .windows
+                .get_mut(&parent)
+                .and_then(|window| window.take_child_page_message(child))
+            {
+                return Some((parent, message));
+            }
+        }
+        None
+    }
+
+    /// Waits for the next message from any parent or child page, up to `timeout`.
+    ///
+    /// The budget is divided among every parent and child surface so the first window cannot
+    /// hold the whole wait while another surface is ready. Surfaces are visited in deterministic
+    /// window/child order, and anything a blocking wait consumes is queued for the runtime's pump.
     pub fn wait_page_message(&mut self, timeout: std::time::Duration) -> bool {
-        if self.windows.is_empty() {
+        let surfaces: Vec<(WindowId, Option<ChildWebviewId>)> = self
+            .windows
+            .values()
+            .flat_map(|window| {
+                core::iter::once((window.id, None)).chain(
+                    window
+                        .child_ids()
+                        .into_iter()
+                        .map(move |child| (window.id, Some(child))),
+                )
+            })
+            .collect();
+        if surfaces.is_empty() {
             return false;
         }
-        let slice = timeout / self.windows.len().max(1) as u32;
-        let ids: Vec<WindowId> = self.windows.values().map(|window| window.id).collect();
-        for id in ids {
-            let message = self
-                .windows
-                .get_mut(&id)
-                .and_then(|window| window.host.as_ref())
-                .and_then(|host| host.wait_page_message(slice));
-            if let Some(message) = message
-                && let Some(window) = self.windows.get_mut(&id)
-            {
-                window.push_page_message(message);
+        let slice = timeout / surfaces.len() as u32;
+        for (parent, child) in surfaces {
+            let queued = match child {
+                None => {
+                    let message = self
+                        .windows
+                        .get_mut(&parent)
+                        .and_then(|window| window.host.as_ref())
+                        .and_then(|host| host.wait_page_message(slice));
+                    if let Some(message) = message
+                        && let Some(window) = self.windows.get_mut(&parent)
+                    {
+                        window.push_page_message(message);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Some(child) => self.windows.get_mut(&parent).is_some_and(|window| {
+                    if window
+                        .children
+                        .get(&child)
+                        .is_some_and(|surface| !surface.pending_messages.is_empty())
+                    {
+                        return true;
+                    }
+                    window
+                        .wait_child_page_message(child, slice)
+                        .is_some_and(|message| window.push_child_page_message(child, message))
+                }),
+            };
+            if queued {
                 return true;
             }
         }
@@ -754,6 +1304,8 @@ impl WindowRegistry {
             fullscreen: request.fullscreen,
             maximized: request.maximized,
             components: Vec::new(),
+            children: BTreeMap::new(),
+            child_ipc_receivers: BTreeMap::new(),
             pending_page_messages: VecDeque::new(),
         };
         self.windows.insert(id, window);
@@ -835,11 +1387,11 @@ mod tests {
     impl HostFactory for Live {
         fn spawn(
             &self,
-            _window: WindowId,
+            window: WindowId,
             _request: &WindowRequest,
             _seam: &Arc<HostSeam>,
         ) -> Option<Box<dyn crate::WebViewBackend>> {
-            let backend = RecordingBackend::alive();
+            let backend = RecordingBackend::alive(window);
             self.created
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -863,13 +1415,31 @@ mod tests {
         }
     }
 
+    /// One child build, including the IPC sender the runtime handed to the engine.
+    #[derive(Debug, Clone)]
+    struct ChildCreation {
+        request: ChildWebviewRequest,
+        seam: Arc<HostSeam>,
+        ipc_tx: std::sync::mpsc::SyncSender<ChildPageMessage>,
+    }
+
     /// The state a recording engine shares between the window and the test that made it.
     #[derive(Debug, Default)]
     struct RecordingState {
-        alive: bool,
-        error: Option<String>,
+        parent: WindowId,
+        alive: std::sync::atomic::AtomicBool,
+        error: std::sync::Mutex<Option<String>>,
         messages: std::sync::Mutex<VecDeque<PageMessage>>,
         scripts: std::sync::Mutex<Vec<String>>,
+        child_creations: std::sync::Mutex<Vec<ChildCreation>>,
+        child_bounds: std::sync::Mutex<Vec<(WindowId, u64, ChildWebviewRequest)>>,
+        child_closes: std::sync::Mutex<Vec<(WindowId, u64)>>,
+        child_scripts: std::sync::Mutex<Vec<(u64, String)>>,
+        child_messages: std::sync::Mutex<BTreeMap<u64, VecDeque<ChildPageMessage>>>,
+        child_waits: std::sync::Mutex<Vec<(u64, std::time::Duration)>>,
+        issued_child_ids: std::sync::Mutex<VecDeque<u64>>,
+        fail_child_bounds: std::sync::Mutex<bool>,
+        fail_child_close: std::sync::Mutex<bool>,
     }
 
     /// A backend that records the bridge traffic, so the page-to-host and host-to-page
@@ -880,12 +1450,11 @@ mod tests {
     }
 
     impl RecordingBackend {
-        fn alive() -> Self {
+        fn alive(parent: WindowId) -> Self {
             let state = RecordingState {
-                alive: true,
-                error: None,
-                messages: std::sync::Mutex::new(VecDeque::new()),
-                scripts: std::sync::Mutex::new(Vec::new()),
+                parent,
+                alive: std::sync::atomic::AtomicBool::new(true),
+                ..RecordingState::default()
             };
             Self {
                 state: Arc::new(state),
@@ -911,16 +1480,102 @@ mod tests {
         }
     }
 
+    impl RecordingBackend {
+        /// Makes the next child build return an exact engine identity.
+        fn issue_child_id(&self, child: u64) {
+            self.state
+                .issued_child_ids
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push_back(child);
+        }
+
+        /// Queues a message from the engine's child-message channel.
+        fn deliver_child(&self, child: u64, body: &str) {
+            self.state
+                .child_messages
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(child)
+                .or_default()
+                .push_back(ChildPageMessage::new(child, body));
+        }
+
+        fn child_creations(&self) -> Vec<ChildCreation> {
+            self.state
+                .child_creations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+
+        fn child_bounds(&self) -> Vec<(WindowId, u64, ChildWebviewRequest)> {
+            self.state
+                .child_bounds
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+
+        fn child_closes(&self) -> Vec<(WindowId, u64)> {
+            self.state
+                .child_closes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+
+        fn child_scripts(&self) -> Vec<(u64, String)> {
+            self.state
+                .child_scripts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+
+        fn child_waits(&self) -> Vec<(u64, std::time::Duration)> {
+            self.state
+                .child_waits
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+
+        fn fail_child_close(&self, fail: bool) {
+            *self
+                .state
+                .fail_child_close
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = fail;
+        }
+
+        fn kill(&self) {
+            self.state
+                .alive
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            *self
+                .state
+                .error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some("recording engine crashed".to_owned());
+        }
+    }
+
     impl crate::WebViewBackend for RecordingBackend {
         fn as_any(&self) -> &dyn core::any::Any {
             self
         }
 
         fn last_error(&self) -> Option<String> {
-            self.state.error.clone()
+            self.state
+                .error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
         }
         fn is_alive(&self) -> bool {
-            self.state.alive
+            self.state.alive.load(std::sync::atomic::Ordering::SeqCst)
         }
         fn poll_page_message(&self) -> Option<PageMessage> {
             self.state
@@ -937,6 +1592,117 @@ mod tests {
                 .push(script.to_owned());
             true
         }
+
+        fn create_child_webview(
+            &self,
+            request: &ChildWebviewRequest,
+            seam: &Arc<HostSeam>,
+            ipc_tx: std::sync::mpsc::SyncSender<ChildPageMessage>,
+        ) -> Result<u64, String> {
+            let child = self
+                .state
+                .issued_child_ids
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+                .unwrap_or_else(|| {
+                    let creations = self
+                        .state
+                        .child_creations
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    10_000 + creations.len() as u64
+                });
+            self.state
+                .child_creations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(ChildCreation {
+                    request: request.clone(),
+                    seam: seam.clone(),
+                    ipc_tx,
+                });
+            Ok(child)
+        }
+
+        fn poll_child_webview_message(&self, child: u64) -> Option<ChildPageMessage> {
+            self.state
+                .child_messages
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get_mut(&child)?
+                .pop_front()
+        }
+
+        fn wait_child_webview_message(
+            &self,
+            child: u64,
+            timeout: std::time::Duration,
+        ) -> Option<ChildPageMessage> {
+            self.state
+                .child_waits
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((child, timeout));
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                if let Some(message) = self.poll_child_webview_message(child) {
+                    return Some(message);
+                }
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1).min(remaining));
+            }
+        }
+
+        fn evaluate_child_script(&self, child: u64, script: &str) -> bool {
+            self.state
+                .child_scripts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((child, script.to_owned()));
+            true
+        }
+
+        fn set_child_webview_bounds(
+            &self,
+            child: u64,
+            request: &ChildWebviewRequest,
+        ) -> Result<(), String> {
+            self.state
+                .child_bounds
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((self.state.parent, child, request.clone()));
+            if *self
+                .state
+                .fail_child_bounds
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            {
+                return Err("recording engine refused child bounds".to_owned());
+            }
+            Ok(())
+        }
+
+        fn close_child_webview(&self, child: u64) -> Result<(), String> {
+            self.state
+                .child_closes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((self.state.parent, child));
+            if *self
+                .state
+                .fail_child_close
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            {
+                return Err("recording engine refused child close".to_owned());
+            }
+            Ok(())
+        }
     }
 
     fn registry() -> WindowRegistry {
@@ -947,6 +1713,26 @@ mod tests {
                 None,
             )]))
             .with_default_grant(CapabilityGrant::of(&[Capability::InspectRuntime]))
+    }
+
+    fn open_window(registry: &mut WindowRegistry, factory: &Live) -> WindowId {
+        registry
+            .open(
+                factory,
+                &WindowRequest::new("https://app.example.com"),
+                None,
+            )
+            .expect("a live factory opens a window")
+    }
+
+    fn child_request(url: &str) -> ChildWebviewRequest {
+        ChildWebviewRequest {
+            url: url.to_owned(),
+            x: 10,
+            y: 20,
+            width: 320,
+            height: 240,
+        }
     }
 
     #[test]
@@ -1232,5 +2018,716 @@ mod tests {
         // A second call returns the same order, so an agent's view is stable.
         let again: Vec<_> = registry.summaries().into_iter().map(|s| s.id).collect();
         assert_eq!(ids, again, "the same order on a second call");
+    }
+
+    #[test]
+    fn a_child_is_listed_under_its_canonical_arbitrary_engine_id() {
+        let factory = Live::default();
+        let mut registry = registry();
+        let parent = open_window(&mut registry, &factory);
+        let engine = factory.created()[0].clone();
+        let raw = 0x0123_4567_89ab_cdef;
+        engine.issue_child_id(raw);
+        let request = child_request("https://app.example.com/child");
+
+        let child = registry
+            .create_child_webview(parent, &request)
+            .expect("the parent is open")
+            .expect("the engine builds the child");
+        assert_eq!(child.raw(), raw, "the runtime must not invent an identity");
+        let window = registry.get(parent).expect("registered");
+        assert_eq!(window.child_ids(), vec![child]);
+        assert_eq!(
+            window.list_child_webviews(),
+            vec![ChildWebviewEntry {
+                id: child,
+                parent,
+                bounds: request.clone(),
+            }]
+        );
+        assert_eq!(registry.list_child_webviews(), window.list_child_webviews());
+
+        let creations = engine.child_creations();
+        assert_eq!(creations.len(), 1);
+        assert_eq!(creations[0].request, request);
+        let child_seam = window.seam_for_child(child).expect("the child has a seam");
+        assert!(Arc::ptr_eq(&child_seam, &creations[0].seam));
+        assert!(!Arc::ptr_eq(&child_seam, &window.seam));
+    }
+
+    #[test]
+    fn an_invalid_or_forbidden_child_url_never_reaches_the_engine() {
+        let factory = Live::default();
+        let mut registry = registry();
+        let parent = open_window(&mut registry, &factory);
+        let engine = factory.created()[0].clone();
+
+        let mut empty = child_request("");
+        assert!(
+            registry
+                .create_child_webview(parent, &empty)
+                .expect("open parent")
+                .is_err()
+        );
+        empty.url = "https://app.example.com".to_owned();
+        empty.width = 0;
+        assert!(
+            registry
+                .create_child_webview(parent, &empty)
+                .expect("open parent")
+                .is_err()
+        );
+
+        for url in [
+            "not a URL",
+            "file:///C:/Windows/win.ini",
+            "javascript:alert(1)",
+            "https://evil.test/",
+            "data:text/html,<script>1</script>",
+        ] {
+            let error = registry
+                .create_child_webview(parent, &child_request(url))
+                .expect("the parent is open")
+                .expect_err("an unreachable child URL must be refused");
+            assert!(error.contains("URL"), "got: {error}");
+        }
+        assert!(engine.child_creations().is_empty());
+        assert!(registry.list_child_webviews().is_empty());
+    }
+
+    #[test]
+    fn a_child_has_an_empty_grant_copied_policy_and_an_independent_lifecycle() {
+        let mut registry = registry()
+            .with_seam_action(
+                "describe_metrics",
+                CapabilitySet::empty().with(Capability::InspectRuntime),
+            )
+            .with_default_locale("fr-FR", "ltr");
+        let factory = Live::default();
+        let parent = open_window(&mut registry, &factory);
+        let child = registry
+            .create_child_webview(parent, &child_request("https://app.example.com/child"))
+            .expect("open parent")
+            .expect("allowed child");
+        let window = registry.get(parent).expect("registered");
+        let child_lifecycle = window
+            .children
+            .get(&child)
+            .expect("child recorded")
+            .lifecycle
+            .clone();
+        let parent_lifecycle = window.lifecycle.clone();
+        let child_seam = window.seam_for_child(child).expect("child seam");
+
+        assert!(child_seam.grant().granted().is_empty());
+        assert!(!window.grant.granted().is_empty());
+        assert_eq!(
+            child_seam.actions().entries(),
+            window.seam.actions().entries()
+        );
+        let described = child_seam
+            .handle(&crate::SeamMessage::Describe, &mut |_request, _payload| {
+                Ok(serde_json::Value::Null)
+            });
+        assert!(described.ok);
+        let payload = described.payload.expect("describe returns its policy");
+        assert_eq!(payload["locale"], "fr-FR");
+        assert_eq!(payload["text_direction"], "ltr");
+
+        child_lifecycle
+            .transition(HostState::Suspended)
+            .expect("the child can suspend independently");
+        assert_eq!(parent_lifecycle.state(), Some(HostState::Running));
+        let refused = child_seam
+            .handle(&crate::SeamMessage::Describe, &mut |_request, _payload| {
+                Ok(serde_json::Value::Null)
+            });
+        assert!(!refused.ok, "a suspended child seam must not serve");
+        child_lifecycle
+            .transition(HostState::Running)
+            .expect("the child can resume independently");
+    }
+
+    #[test]
+    fn a_bounds_only_update_preserves_the_original_child_url() {
+        let factory = Live::default();
+        let mut registry = registry();
+        let parent = open_window(&mut registry, &factory);
+        let engine = factory.created()[0].clone();
+        let child = registry
+            .create_child_webview(parent, &child_request("https://app.example.com/original"))
+            .expect("open parent")
+            .expect("allowed child");
+        let bounds = ChildWebviewRequest {
+            url: String::new(),
+            x: 40,
+            y: 50,
+            width: 640,
+            height: 480,
+        };
+
+        registry
+            .set_child_webview_bounds(parent, child, &bounds)
+            .expect("open parent")
+            .expect("the engine moves the child");
+        let entry = registry
+            .list_child_webviews()
+            .into_iter()
+            .next()
+            .expect("the child is listed");
+        assert_eq!(entry.bounds.url, "https://app.example.com/original");
+        assert_eq!((entry.bounds.x, entry.bounds.y), (40, 50));
+        assert_eq!((entry.bounds.width, entry.bounds.height), (640, 480));
+        assert_eq!(
+            engine.child_bounds(),
+            vec![(parent, child.raw(), bounds.clone())]
+        );
+
+        let mut invalid = bounds.clone();
+        invalid.width = 0;
+        assert!(
+            registry
+                .set_child_webview_bounds(parent, child, &invalid)
+                .expect("open parent")
+                .is_err()
+        );
+        assert_eq!(
+            engine.child_bounds().len(),
+            1,
+            "invalid geometry never reaches the engine"
+        );
+
+        *engine
+            .state
+            .fail_child_bounds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        assert!(
+            registry
+                .set_child_webview_bounds(parent, child, &bounds)
+                .expect("open parent")
+                .is_err()
+        );
+        let retained = registry
+            .get(parent)
+            .expect("registered")
+            .list_child_webviews()[0]
+            .clone();
+        assert_eq!(
+            retained.bounds, entry.bounds,
+            "a refused move changes no record"
+        );
+    }
+
+    #[test]
+    fn a_child_cannot_be_moved_or_closed_through_another_parent_or_by_an_unknown_id() {
+        let factory = Live::default();
+        let mut registry = registry();
+        let first = open_window(&mut registry, &factory);
+        let second = open_window(&mut registry, &factory);
+        let child = registry
+            .create_child_webview(first, &child_request("https://app.example.com/child"))
+            .expect("open parent")
+            .expect("allowed child");
+        let request = child_request("");
+
+        assert!(
+            registry
+                .set_child_webview_bounds(second, child, &request)
+                .expect("second parent is open")
+                .is_err()
+        );
+        assert!(
+            registry
+                .close_child_webview(second, child)
+                .expect("second parent is open")
+                .is_err()
+        );
+        let unknown = ChildWebviewId::from_raw(99);
+        assert!(
+            registry
+                .set_child_webview_bounds(first, unknown, &request)
+                .expect("first parent is open")
+                .is_err()
+        );
+        assert!(
+            registry
+                .close_child_webview(first, unknown)
+                .expect("first parent is open")
+                .is_err()
+        );
+        assert!(factory.created()[0].child_bounds().is_empty());
+        assert!(factory.created()[0].child_closes().is_empty());
+
+        let missing = WindowId::new();
+        assert!(matches!(
+            registry.create_child_webview(missing, &request),
+            Err(WindowRejection::EngineUnavailable { reason: Some(_) })
+        ));
+        assert!(matches!(
+            registry.set_child_webview_bounds(missing, child, &request),
+            Err(WindowRejection::EngineUnavailable { reason: Some(_) })
+        ));
+        assert!(matches!(
+            registry.close_child_webview(missing, child),
+            Err(WindowRejection::EngineUnavailable { reason: Some(_) })
+        ));
+    }
+
+    #[test]
+    fn child_ipc_and_host_messages_survive_polling_and_waiting() {
+        let factory = Live::default();
+        let mut registry = registry();
+        let parent = open_window(&mut registry, &factory);
+        let engine = factory.created()[0].clone();
+        let raw = 55;
+        engine.issue_child_id(raw);
+        let child = registry
+            .create_child_webview(parent, &child_request("https://app.example.com/child"))
+            .expect("open parent")
+            .expect("allowed child");
+        let ipc_tx = engine.child_creations()[0].ipc_tx.clone();
+
+        ipc_tx
+            .send(ChildPageMessage::new(raw, "ipc poll"))
+            .expect("the child IPC sender is live");
+        let window = registry.get_mut(parent).expect("registered");
+        assert_eq!(
+            window
+                .take_child_page_message(child)
+                .expect("the IPC message is polled")
+                .body,
+            "ipc poll"
+        );
+
+        engine.deliver_child(raw, "host wait one");
+        engine.deliver_child(raw, "host wait two");
+        assert_eq!(
+            window
+                .wait_child_page_message(child, std::time::Duration::from_millis(10))
+                .expect("the host wait receives a message")
+                .body,
+            "host wait one"
+        );
+        assert!(
+            engine.child_waits().is_empty(),
+            "an already queued host message is polled without blocking"
+        );
+        assert_eq!(
+            window
+                .take_child_page_message(child)
+                .expect("the second host message was not lost")
+                .body,
+            "host wait two"
+        );
+
+        engine.deliver_child(raw, "registry host wait");
+        assert!(registry.wait_page_message(std::time::Duration::from_millis(20)));
+        let (owner, message) = registry
+            .take_child_page_message()
+            .expect("the registry queued the child message");
+        assert_eq!(owner, parent);
+        assert_eq!(message.child, raw);
+        assert_eq!(message.body, "registry host wait");
+
+        ipc_tx
+            .send(ChildPageMessage::new(raw, "registry ipc wait"))
+            .expect("the child IPC sender is live");
+        assert!(registry.wait_page_message(std::time::Duration::ZERO));
+        assert_eq!(
+            registry
+                .take_child_page_message()
+                .expect("the registry queued the IPC message")
+                .1
+                .body,
+            "registry ipc wait"
+        );
+    }
+
+    #[test]
+    fn child_ipc_is_bounded_and_resumes_after_the_host_drains_it() {
+        let factory = Live::default();
+        let mut registry = registry();
+        let parent = open_window(&mut registry, &factory);
+        let engine = factory.created()[0].clone();
+        let raw = 55;
+        engine.issue_child_id(raw);
+        let child = registry
+            .create_child_webview(parent, &child_request("https://app.example.com/child"))
+            .expect("open parent")
+            .expect("allowed child");
+        let ipc_tx = engine.child_creations()[0].ipc_tx.clone();
+
+        for index in 0..crate::MAX_CHILD_IPC_MESSAGES {
+            ipc_tx
+                .try_send(ChildPageMessage::new(raw, format!("message {index}")))
+                .expect("the bounded queue accepts its documented capacity");
+        }
+        assert!(
+            matches!(
+                ipc_tx.try_send(ChildPageMessage::new(raw, "overflow")),
+                Err(std::sync::mpsc::TrySendError::Full(_))
+            ),
+            "a child cannot grow IPC memory without bound"
+        );
+
+        let window = registry.get_mut(parent).expect("registered");
+        assert_eq!(
+            window
+                .take_child_page_message(child)
+                .expect("the host drains one message")
+                .body,
+            "message 0"
+        );
+        ipc_tx
+            .try_send(ChildPageMessage::new(raw, "after drain"))
+            .expect("draining makes room in the bounded queue");
+    }
+
+    #[test]
+    fn a_primary_child_ipc_message_wakes_a_wait_before_its_deadline() {
+        let factory = Live::default();
+        let mut registry = registry();
+        let parent = open_window(&mut registry, &factory);
+        let engine = factory.created()[0].clone();
+        let raw = 55;
+        engine.issue_child_id(raw);
+        let child = registry
+            .create_child_webview(parent, &child_request("https://app.example.com/child"))
+            .expect("open parent")
+            .expect("allowed child");
+        let ipc_tx = engine.child_creations()[0].ipc_tx.clone();
+        let window = registry.get_mut(parent).expect("registered");
+        let sender = ipc_tx.clone();
+        let delivered = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            sender
+                .send(ChildPageMessage::new(raw, "primary wakeup"))
+                .expect("the primary channel is live");
+        });
+        let started = std::time::Instant::now();
+        let message = window
+            .wait_child_page_message(child, std::time::Duration::from_secs(2))
+            .expect("the primary message is received");
+        assert_eq!(message.body, "primary wakeup");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "the primary channel must wake the wait instead of losing the whole timeout: {:?}",
+            started.elapsed()
+        );
+        delivered.join().expect("the sender finishes");
+    }
+
+    #[test]
+    fn a_child_message_with_the_wrong_identity_is_never_queued() {
+        let factory = Live::default();
+        let mut registry = registry();
+        let parent = open_window(&mut registry, &factory);
+        let engine = factory.created()[0].clone();
+        let raw = 55;
+        engine.issue_child_id(raw);
+        let child = registry
+            .create_child_webview(parent, &child_request("https://app.example.com/child"))
+            .expect("open parent")
+            .expect("allowed child");
+        let ipc_tx = engine.child_creations()[0].ipc_tx.clone();
+        ipc_tx
+            .send(ChildPageMessage::new(raw + 1, "wrong IPC child"))
+            .expect("the child IPC sender is live");
+        ipc_tx
+            .send(ChildPageMessage::new(raw, "right IPC child"))
+            .expect("the child IPC sender is live");
+
+        let window = registry.get_mut(parent).expect("registered");
+        assert_eq!(
+            window
+                .take_child_page_message(child)
+                .expect("the correctly tagged message is polled")
+                .body,
+            "right IPC child"
+        );
+
+        engine
+            .state
+            .child_messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(raw)
+            .or_default()
+            .push_back(ChildPageMessage::new(raw + 1, "wrong polled child"));
+        assert!(window.take_child_page_message(child).is_none());
+
+        engine
+            .state
+            .child_messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(raw)
+            .or_default()
+            .push_back(ChildPageMessage::new(raw + 1, "wrong waited child"));
+        assert!(
+            window
+                .wait_child_page_message(child, std::time::Duration::ZERO)
+                .is_none()
+        );
+        engine.deliver_child(raw, "right waited child");
+        assert_eq!(
+            window
+                .wait_child_page_message(child, std::time::Duration::ZERO)
+                .expect("the correctly tagged message is waited for")
+                .body,
+            "right waited child"
+        );
+    }
+
+    #[test]
+    fn a_response_script_reaches_only_the_named_child() {
+        let factory = Live::default();
+        let mut registry = registry();
+        let parent = open_window(&mut registry, &factory);
+        let engine = factory.created()[0].clone();
+        engine.issue_child_id(101);
+        engine.issue_child_id(202);
+        let request = child_request("https://app.example.com/child");
+        let first = registry
+            .create_child_webview(parent, &request)
+            .expect("open parent")
+            .expect("first child");
+        let second = registry
+            .create_child_webview(parent, &request)
+            .expect("open parent")
+            .expect("second child");
+
+        let window = registry.get_mut(parent).expect("registered");
+        assert!(window.post_to_child_page(second, "window.ncui.answer(2)"));
+        assert_eq!(
+            engine.child_scripts(),
+            vec![(second.raw(), "window.ncui.answer(2)".to_owned())]
+        );
+        assert!(
+            engine.evaluated().is_empty(),
+            "the parent page is not addressed"
+        );
+        assert!(
+            !engine
+                .child_scripts()
+                .iter()
+                .any(|(child, _)| *child == first.raw()),
+            "the other child is not addressed"
+        );
+        assert_eq!(engine.child_scripts().len(), 1);
+        let unknown = ChildWebviewId::from_raw(303);
+        assert!(!window.post_to_child_page(unknown, "must not be sent"));
+    }
+
+    #[test]
+    fn a_suspended_or_crashed_child_cannot_receive_scripts() {
+        let factory = Live::default();
+        let mut registry = registry();
+        let parent = open_window(&mut registry, &factory);
+        let engine = factory.created()[0].clone();
+        let child = registry
+            .create_child_webview(parent, &child_request("https://app.example.com/child"))
+            .expect("open parent")
+            .expect("allowed child");
+        let lifecycle = registry
+            .get(parent)
+            .expect("registered")
+            .children
+            .get(&child)
+            .expect("child recorded")
+            .lifecycle
+            .clone();
+        let window = registry.get_mut(parent).expect("registered");
+
+        assert!(window.post_to_child_page(child, "running"));
+        lifecycle
+            .transition(HostState::Suspended)
+            .expect("the child suspends");
+        assert!(!window.post_to_child_page(child, "suspended"));
+        assert_eq!(engine.child_scripts().len(), 1);
+
+        lifecycle
+            .transition(HostState::Running)
+            .expect("the child resumes");
+        assert!(window.post_to_child_page(child, "resumed"));
+        lifecycle
+            .transition(HostState::Crashed)
+            .expect("the child crashes");
+        assert!(!window.post_to_child_page(child, "crashed"));
+        assert_eq!(
+            engine.child_scripts(),
+            vec![
+                (child.raw(), "running".to_owned()),
+                (child.raw(), "resumed".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn parent_engine_death_crashes_every_live_child_lifecycle() {
+        let factory = Live::default();
+        let mut registry = registry();
+        let parent = open_window(&mut registry, &factory);
+        let engine = factory.created()[0].clone();
+        let child = registry
+            .create_child_webview(parent, &child_request("https://app.example.com/child"))
+            .expect("open parent")
+            .expect("allowed child");
+        let child_seam = registry
+            .get(parent)
+            .expect("registered")
+            .seam_for_child(child)
+            .expect("child seam");
+
+        engine.kill();
+        registry
+            .get_mut(parent)
+            .expect("registered")
+            .observe_engine_death();
+        let window = registry.get(parent).expect("registered");
+        assert_eq!(window.lifecycle.state(), Some(HostState::Crashed));
+        assert_eq!(
+            window
+                .children
+                .get(&child)
+                .expect("child recorded")
+                .lifecycle
+                .state(),
+            Some(HostState::Crashed)
+        );
+        let response = child_seam
+            .handle(&crate::SeamMessage::Describe, &mut |_request, _payload| {
+                Ok(serde_json::Value::Null)
+            });
+        assert!(!response.ok, "a crashed child seam must refuse requests");
+    }
+
+    #[test]
+    fn a_parent_cannot_own_more_than_the_child_capacity() {
+        let factory = Live::default();
+        let mut registry = registry();
+        let parent = open_window(&mut registry, &factory);
+        let request = child_request("https://app.example.com/child");
+        for _ in 0..MAX_CHILDREN_PER_WINDOW {
+            registry
+                .create_child_webview(parent, &request)
+                .expect("open parent")
+                .expect("a child below capacity is created");
+        }
+        let error = registry
+            .create_child_webview(parent, &request)
+            .expect("open parent")
+            .expect_err("the next child exceeds capacity");
+        assert!(error.contains(&MAX_CHILDREN_PER_WINDOW.to_string()));
+        assert_eq!(
+            registry.list_child_webviews().len(),
+            MAX_CHILDREN_PER_WINDOW
+        );
+        assert_eq!(
+            factory.created()[0].child_creations().len(),
+            MAX_CHILDREN_PER_WINDOW
+        );
+    }
+
+    #[test]
+    fn a_duplicate_engine_child_id_is_closed_and_refused() {
+        let factory = Live::default();
+        let mut registry = registry();
+        let parent = open_window(&mut registry, &factory);
+        let engine = factory.created()[0].clone();
+        let raw = 77;
+        engine.issue_child_id(raw);
+        engine.issue_child_id(raw);
+        let request = child_request("https://app.example.com/child");
+        let child = registry
+            .create_child_webview(parent, &request)
+            .expect("open parent")
+            .expect("the first child is recorded");
+        assert_eq!(child.raw(), raw);
+
+        let error = registry
+            .create_child_webview(parent, &request)
+            .expect("open parent")
+            .expect_err("a duplicate identity is refused");
+        assert!(error.contains("duplicate"));
+        assert_eq!(engine.child_closes(), vec![(parent, raw)]);
+        assert_eq!(registry.list_child_webviews().len(), 1);
+    }
+
+    #[test]
+    fn a_child_is_removed_only_after_the_engine_confirms_close() {
+        let factory = Live::default();
+        let mut registry = registry();
+        let parent = open_window(&mut registry, &factory);
+        let engine = factory.created()[0].clone();
+        let child = registry
+            .create_child_webview(parent, &child_request("https://app.example.com/child"))
+            .expect("open parent")
+            .expect("allowed child");
+        let seam = registry
+            .get(parent)
+            .expect("registered")
+            .seam_for_child(child)
+            .expect("child seam");
+
+        engine.fail_child_close(true);
+        assert!(
+            registry
+                .close_child_webview(parent, child)
+                .expect("open parent")
+                .is_err()
+        );
+        assert_eq!(registry.list_child_webviews().len(), 1);
+        assert_eq!(engine.child_closes(), vec![(parent, child.raw())]);
+
+        engine.fail_child_close(false);
+        registry
+            .close_child_webview(parent, child)
+            .expect("open parent")
+            .expect("the engine closes the child");
+        assert!(registry.list_child_webviews().is_empty());
+        let response = seam.handle(&crate::SeamMessage::Describe, &mut |_request, _payload| {
+            Ok(serde_json::Value::Null)
+        });
+        assert!(!response.ok, "a closed child seam no longer serves");
+    }
+
+    #[test]
+    fn a_child_requires_a_serving_parent_with_a_live_engine() {
+        let factory = Live::default();
+        let mut registry = registry();
+        let parent = open_window(&mut registry, &factory);
+        let engine = factory.created()[0].clone();
+        let request = child_request("https://app.example.com/child");
+
+        registry
+            .get_mut(parent)
+            .expect("registered")
+            .lifecycle
+            .transition(HostState::Suspended)
+            .expect("the parent can suspend");
+        assert!(
+            registry
+                .create_child_webview(parent, &request)
+                .expect("open parent")
+                .is_err()
+        );
+        assert!(engine.child_creations().is_empty());
+
+        registry
+            .get_mut(parent)
+            .expect("registered")
+            .lifecycle
+            .transition(HostState::Running)
+            .expect("the parent can resume");
+        engine.kill();
+        assert!(
+            registry
+                .create_child_webview(parent, &request)
+                .expect("open parent")
+                .is_err()
+        );
+        assert!(engine.child_creations().is_empty());
     }
 }

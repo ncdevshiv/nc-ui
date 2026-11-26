@@ -107,9 +107,10 @@ so a name that is a path cannot escape the root. An install over an existing one
 than merged, because a half-replaced application is worse than one that is clearly still the old
 version. And nothing is written outside the root the caller named.
 
-What is not here, and is recorded in `docs/known-gaps.md`: no installer executable and no MSI, no
-per-machine install, and no upgrade path — an upgrade would need to know what is running, which is
-the running instance's business rather than the installer's.
+What is not here, and is recorded in `docs/known-gaps.md`: no MSI and no per-machine install. A
+self-installing executable and an update path from a directory or release document are implemented;
+the update verifies the staged bundle before swapping it into place, while hand-off to a running
+instance remains the single-instance transport's responsibility.
 
 ## A link reaches the instance that is running
 

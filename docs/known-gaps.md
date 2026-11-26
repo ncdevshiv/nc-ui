@@ -124,11 +124,10 @@ but is irrelevant.
 
 ### Most citations are self-certifying
 
-32 of the 35 completed features cite, for at least one slot, a file inside its own crate. The
-three that do not are the tooling capabilities — `process.supply_chain_releases`,
-`process.verification_tooling` and `cross_platform.verification.linux` — which name `ncui-core`
-in `crates` for its version and licence identities but cite their evidence in `tools/` and
-`benches/`, which is where that work actually lives.
+Most completed features cite, for at least one slot, a file inside their own crate. Tooling
+capabilities such as `process.supply_chain_releases`, `process.verification_tooling` and
+`cross_platform.verification.linux` name `ncui-core` in `crates` for its version and licence
+identities but cite their evidence in `tools/` and `benches/`, which is where that work lives.
 
 `runtime.virtualization` is the clearest case of the pattern: it cites
 `crates/ncui-state/src/virtualize.rs` for all nine slots, including `security_review` and
@@ -152,16 +151,15 @@ not mistaken for something stronger than it is.
 
 ## macOS is the only platform with no run at all
 
-Every feature is recorded `verified` on Windows. Most are also `verified` on Linux; the rest are
-`unverified` there because the run that would cover them has not happened. The gate
-`tools/linux_gate.py` runs is the default configuration plus a stage that compiles the release
-configuration, and a feature whose evidence includes a test that opens a real window stays
-`unverified` on Linux only where a GPU is involved: the GTK and WebKit development libraries are
-installed there and WSLg supplies an X server and a Wayland socket, so the host opens genuine
-windows and the real-window tests run. That is new, and it took a fix: `ncui-webview-wry` creates
-its event loop on a worker thread and set tao's `with_any_thread` on Windows only, so the Unix
-backend panicked and `ncui run` could not open a window on Linux at all. The islands test needs a
-GPU device this session does not have. macOS is `unverified` everywhere: no macOS host is reachable, so the claim is
+All 76 implemented features are recorded `verified` on Windows; the absent macOS-verification
+entry makes no platform claim. Linux is verified per feature, and the registry is authoritative
+rather than a count copied into this document. The gate `tools/linux_gate.py` runs covers the
+default configuration, release-configuration builds and tests, and genuine GTK/WebKit windows
+through WSLg. That does not automatically satisfy every feature's benchmarks, metrics and
+integration evidence, so a Linux flag is set only when the feature's whole evidence set has been
+observed there. The GPU-dependent islands tests run under WSL2 with Mesa's lavapipe software
+Vulkan driver: the render, readback and HTTP island route assert real pixels, though this is not
+physical-GPU performance evidence. macOS is `unverified` everywhere: no macOS host is reachable, so the claim is
 the absence of a run rather than a run that passed.
 
 **macOS has a blocker beyond the missing host, and it is now known from the source rather than
@@ -176,12 +174,11 @@ platform — a design change to the host, not a flag, and one that cannot be ver
 machine.
 
 The Linux claim is a run, not an inference: `tools/linux_gate.py` executes every gate it lists
-under WSL2 and its tally is the authoritative count — 1373 tests across the workspace and 52 in
-the tools workspace on the revision this file records, over the gate's twenty-three stages. The distro
-has no system C compiler and no root to install one, so the run links with a compiler assembled
-from unpacked packages under `$HOME`; that is an adaptation of the environment, not a property of
-the tree, and it is why the gate's numbers are about the code rather than about the machine. An
-earlier revision of this file said nothing had been verified on either platform, which was true
+under WSL2, and the tally it prints is authoritative; the latest result is recorded in
+`docs/completion-audit.md` §8. Ubuntu 26.04 provides `cc` 15.2 and the pinned Rust 1.98.1
+toolchain. The gate keeps its Cargo targets under host-specific `/var/tmp` directories so Linux
+ELF artifacts cannot shadow Windows PE artifacts and a full build cannot exhaust `/tmp`'s tmpfs.
+An earlier revision of this file said nothing had been verified on either platform, which was true
 when it was written and stopped being true when the first Linux run happened.
 
 ## The scheduler declines one requested behaviour
@@ -190,34 +187,28 @@ See "Rejected alternatives" in `docs/adr/ADR-005-scheduler.md`. Ageing that coul
 background work above interactive work would break the no-starvation invariant, so the
 invariant was kept and the promotion ceiling lowered instead.
 
-## Consent on the page-command path is a plain `bool`, not a token
+## Consent is enforced and native acceptance is verified on Windows and Linux
 
-The two destructive-consent gates are in different states.
+Both destructive-consent paths use runtime-minted [`ConsentToken`](../crates/ncui-security/src/authz.rs)
+values bound to the authenticated subject, method, capabilities and exact normalized parameters.
 
-- **Agent/dispatch path — done.** A destructive method requires an unforgeable
-  [`ConsentToken`](../crates/ncui-security/src/authz.rs): `dispatch` reads `consent_token`
-  from the request, checks it against the minted ledger, and spends the nonce
-  (`Runtime::mint_consent` / `Runtime::consume_consent`). A bare `consent: true` authorizes
-  nothing there.
-- **Page-command path — still the bool.** `window::run_native_page_command` reads `consent`
-  as a bool; a page that writes `true` unconditionally has opted out of the gate. The gate
-  still fails closed when consent is absent (`AgentSession::require_consent` treats an absent
-  parameter as a refusal).
-
-The page path was deliberately **not** closed to a token, on evidence rather than omission.
-`Runtime::mint_consent` has no production caller — every call site is in a test — so there is
-no runtime path that mints a token a page could present. Closing the gate now would make
-destructive page commands permanently fail closed. That breaks legitimate component loading:
-`component.open` / `component.invoke` / `component.close` are destructive *page* commands
-(their capability `RunComponents` is in `Capability::is_destructive`), and the counter example
-loads its WebAssembly plugin through them. And the security benefit would be low: the page
-already holds `RunComponents` by grant, so the capability check is the real boundary — the bool
-is user-confirmation UX, and removing it stops a legitimate app from confirming without
-stopping a page that holds the capability anyway.
-
-The correct fix is a token minted by the runtime at the point of user confirmation, which
-belongs in the runtime's native consent UI — not implemented. Until that UI exists and mints
-tokens a page can obtain, the page gate keeps the bool and fails closed on absence.
+- **Agent/dispatch path — done.** A destructive method reads `consent_token`, checks it against
+  the minted ledger and spends the nonce (`Runtime::mint_consent` / `Runtime::consume_consent`).
+  A bare `consent: true` authorizes nothing.
+- **Native page-command path — done.** `window::run_native_page_command` applies the same
+  standing authorization, rate limit, token validation, one-time spend and audit rules. Forged,
+  altered, wrong-subject, wrong-command and replayed tokens are refused without spending the
+  valid operation's token or falling back to a prompt.
+- **Host confirmation — implemented.** The desktop CLI installs an `rfd` warning dialog before
+  the first window opens. Only an explicit Yes approves; decline, close, cancellation and errors
+  withhold approval. The prompt contains the complete bounded operation, and approval mints and
+  immediately spends a token in the same call.
+- **Platform evidence — Windows and Linux.** Integration tests prove the exact-operation
+  approval contract with an explicit host fixture. The real Windows dialog was driven through
+  its actual Yes and No buttons: Yes ran the destructive command and wrote its marker; No left
+  no output. Under WSL with X11 and Openbox, the real `zenity` dialog returned success on Yes and
+  `capability_denied` on Escape. Token issuance alone was not treated as approval evidence.
+  macOS remains unverified because no macOS host is available.
 
 ## The platform locale is read from the environment, so Windows reports `"und"`
 
@@ -518,25 +509,27 @@ asserts the guard and the wiring, not the nested build.
 
 ## The cross-framework comparison, and what it shows
 
-`comparison/` measures NC-UI against Electron and Tauri on two real applications. The
-headline is that NC-UI is 32× smaller than Electron and starts 5.9× faster, it is level with
-Tauri on startup, and all three measure 0.00 % CPU at idle. It is slower than both on IPC
-round trip (0.375 ms against Electron's 0.19 ms and Tauri's 0.28 ms), larger than both at idle
-(349 MiB against Electron's 301 MiB and Tauri's 336 MiB), and larger than Tauri on disk
-(11.3 MiB against 3.2 MiB, because the release build ships the GPU island renderer, which is
-6.4 MiB of it: the same build with the window host but without the renderer measures 4.88 MiB,
-and a build with no window host at all measures 1.64 MiB and refuses to open a window). The
-harness and the committed report are the evidence:
-`comparison/bench/results/windows.json`.
+`comparison/` measures NC-UI against Electron and Tauri 2 on two real applications. The
+2026-11-24 fail-closed run completed five repeats and five 200-round IPC samples for every
+configuration. NC-UI is 29× smaller than Electron and starts 4.6× faster; against Tauri 2 it
+starts 1.05× faster and is 3.5× faster on IPC. All three report 0.00 % framework-process CPU at
+idle. The Electron port is slower on IPC (0.351 ms against 0.196 ms) and larger at idle
+(361.9 MiB against 304.6 MiB). The Tauri port is 3.6 % larger at idle (362.5 MiB against
+349.9 MiB) and larger on disk (12.3 MiB against 8.5 MiB). The standard build ships the GPU
+island renderer; earlier isolated builds measured the renderer at about 6.4 MiB, the same host
+without it at about 4.9 MiB, and no window host at 1.64 MiB. Those are historical decomposition
+measurements, not a fresh breakdown of the current 12.3 MiB binary. The harness and
+`comparison/bench/results/windows.json` are the evidence.
 
 The IPC figure has a known cause and a measured history. A page call crosses the webview
 boundary twice (the page's `postMessage`, the host's `evaluate_script`) and the host's event
 loop runs on its own thread, so the response makes a thread hop Electron's direct C++ IPC does
 not. Before the page loop blocked on the engine's message channel, the same measurement was
 16.4 ms; the blocking wait brought it to 0.52 ms, and removing the asset server's 2 ms accept
-poll took it to 0.375 ms. The in-process half of that round trip — capability check, handler,
-response serialisation — is measured at a p99 of 900 ns, so the remaining gap is the boundary
-itself, and the reply can only be delivered by evaluating a script in the page: `wry`'s public
+poll took it to 0.375 ms. The current Electron-port median is 0.351 ms and the Tauri-port median
+is 0.410 ms. The in-process half of that round trip — capability check, handler, response
+serialisation — is measured at a p99 of 900 ns, so the remaining gap is the boundary itself,
+and the reply can only be delivered by evaluating a script in the page: `wry`'s public
 API exposes no `PostWebMessageAsJson` seam, and `unsafe_code = "forbid"` rules out calling the
 COM interface directly.
 
@@ -553,8 +546,8 @@ channel receive, so every fresh connection waited for the poll to expire before 
 while a connection is answered the moment it arrives (~560 µs p50) rather than on the next
 poll. Both numbers are measured over a real socket, not asserted.
 
-The memory gap is the webview runtime, and the decomposition is measured: `ncui.exe` is about
-26 MiB against Electron's 95 MiB main process, while the WebView2 runtime's own browser
+The current memory gap is the webview runtime, and an earlier decomposition measured it:
+`ncui.exe` was about 26 MiB against Electron's 95 MiB main process, while the WebView2 runtime's own browser
 process is about 129 MiB — a process Electron folds into its main process — and the renderer
 and GPU processes are smaller than Electron's. The size gap to Tauri is the runtime's own
 machinery — scheduler, metrics, audit log, worker pool, capability checks, and the GPU island
@@ -562,20 +555,21 @@ renderer — which a minimal Tauri binary does not carry. Neither is a defect th
 hides; both are recorded so a reader comparing the three frameworks starts from the
 measurement rather than from a claim.
 
-The largest single one of those, the GPU island renderer (6.4 MiB), is now **optional at link
-time**: `ncui build --profile minimal` ships the window host without it, measuring **4.902 MiB**
-on the counter example against the full build's 11.292 MiB (`standard`, the default, is unchanged).
-That closes most of the size gap to Tauri's 3.2 MiB for applications that draw no islands. What
-remains — a window host without the renderer cannot go below ~4.9 MiB on this toolchain, because
+The largest single one of those, the GPU island renderer (measured at 6.4 MiB in an earlier
+isolated build), is **optional at link time**: `ncui build --profile minimal` ships the window
+host without it and measured **4.902 MiB** on the counter example in that earlier comparison.
+The current default `standard` build is **12.3 MiB** after native-menu and other runtime work.
+That historical minimal measurement narrows the size gap to Tauri 2's 8.5 MiB for applications
+that draw no islands, but it is not a fresh measurement of today's minimal profile. What
+remains — a window host without the renderer previously measured ~4.9 MiB on this toolchain, because
 that is the WebView2 host itself plus the runtime's own machinery — is the residual, recorded rather
 than overclaimed. An application that draws no islands and ships `minimal` is within 1.7 MiB of
 Tauri; one that draws islands, or ships the default `standard`, still carries the renderer by
 choice.
 
-A2's "≤ 300 MiB idle working set" target is **blocked on the engine, not on host allocations**,
-and the decomposition is measured rather than inferred
-(`scripts/measure_a2_working_set.py`, the comparison harness's own Win32 `process_tree_memory`
-walk, five repeats, median). On a minimal scaffolded application — a window and a counter,
+A2's "≤ 300 MiB idle working set" target is **blocked on the engine, not on host allocations**.
+The current comparison measures 361.9 MiB for the NC-UI Electron port and 362.5 MiB for its Tauri
+port. A separate earlier decomposition of a minimal scaffolded application — a window and a counter,
 granted only `read.metrics` and `window` — the tree measures **317.4 MiB**, of which
 `msedgewebview2.exe` is **301.6 MiB** and `ncui.exe` **23.1 MiB**. The host is already lean and
 the subsystems A2 names are now lazy: the worker pool spawns its threads on first submitted task
@@ -645,47 +639,34 @@ commands are in ADR-012 for that reason.
 `windows` crate's own version split is what caused it. A CI job that runs `cargo update` and
 checks the build would catch it before a contributor does; there is not one yet.
 
-## The release binary is reproducible for one directory, not across directories
+## The release binary is reproducible in a fixed build directory
 
-`tools/build_release.py` builds the release binary twice and compares digests, which is the
-only honest way to check the claim. On Windows the two builds differ: **403,978 bytes of an
-11,816,448-byte binary**, and the check reports `NOT reproducible`.
+`python tools/build_release.py` generated the SBOM, built the release twice with
+`SOURCE_DATE_EPOCH=1704067200` and incremental compilation disabled, and compared the digests.
+Both Windows builds produced
+`ee3be54581946f5a7b72c55243b9a6643cf76e078bedc5fd6db49742511cb32f`.
 
-The cause is in the bytes, not in the build. A dependency's build script writes into its
-`OUT_DIR`, and that path is compiled into the binary — `.rdata` holds
-`<target>\release\build\glutin_wgl_sys-<hash>\…` from the graphics stack (the `glutin`/`wgpu`
-dependency chain), so a build into `target/release` and a build into a temporary directory
-embed different strings of different lengths, and everything the linker placed after them
-moves. Two builds into two *different* temporary directories differ by only 69 bytes — the PE
-timestamp and the PDB GUID, both derived from the content — which is how the path was
-isolated from ordinary nondeterminism.
-
-**What holds:** the same source built twice into the same directory produces the same bytes,
-and the code is identical across directories (23,656 differing bytes inside `.text`, all of
-them downstream of the shifted data). **What does not hold:** a consumer who rebuilds the
-release in a different directory gets a different binary and cannot verify it against the
-published digest. The claim "reproducible release builds" is therefore true only for a fixed
-build directory, and this section is where that is recorded rather than discovered by a
-failed release. The `/Brepro` flag in `.cargo/config.toml` fixes the timestamp and the PDB
-age; nothing in this tree fixes the embedded `OUT_DIR`, because it is emitted by a
-dependency's build script and `unsafe_code = "forbid"` plus the dependency policy rule out
-patching it. A dependency that reads `CARGO_TARGET_DIR` at build time is the thing to look
-for when this is revisited.
+The earlier cross-directory experiment still explains the boundary of that claim: a graphics
+dependency embeds its `OUT_DIR`, so building the same source under a different target directory
+changes path strings and shifts later data. The release pipeline therefore rebuilds twice in
+the same directory after `cargo clean`; it does not claim that a consumer's build elsewhere will
+be byte-identical. The `/Brepro` linker flag fixes the PE timestamp and PDB age, while the fixed
+directory removes the known path-dependent input. No signing key is configured on this machine,
+so the detached-signature step remains unexercised.
 
 ## The page bridge carries JSON only
 
-**The bridge carries JSON.** A request is a JSON object and a response is a JSON object.
-There is no binary path, so an application that moves a large buffer through a command
-pays JSON's cost twice: once into the page and once out of the runtime. The transport
-underneath the agent API already has a binary framing (`ncui-ipc`), and it is not the
-transport the page uses. Wiring it to the page is a real piece of work: the engine's IPC
-handler hands the host a string, and the host's answer travels back as a script.
+**The command bridge carries JSON.** A request is a JSON object and a response is a JSON
+object. A separate bounded raw `POST` channel now carries large binary payloads without JSON
+encoding, but the WebView command reply still travels back as an evaluated script because the
+engine's page-message seam hands the host a string. The agent transport's binary framing
+(`ncui-ipc`) is not the page's command transport.
 
-**The page's consent is a boolean.** A command that requires a destructive capability asks
-the page to state `consent: true` in its payload, and a page that says so is believed. The
-same limitation is recorded against the agent API above, and it has the same cause: the
-runtime has no surface through which a user can confirm anything. The fix is the same in
-both places: a confirmation the runtime mints, not a value the caller supplies.
+**Consent transport fields are reserved, not authorization.** `consent_token` is validated
+against the runtime's ledger and exact operation, then spent once for a destructive call. The
+legacy `consent` boolean is ignored. With no supplied token, the installed host prompter must
+obtain real approval; malformed or mismatched tokens never fall back to that prompt. Both fields
+are excluded from the operation digest and from the confirmation text.
 
 ## An application is a directory, and there is no bundler
 
@@ -796,8 +777,9 @@ names a title, a size, a minimum size, the four window options (`always_on_top`,
 `transparent`, `resizable`), whether the window opens fullscreen or maximised, and the image the
 window carries; a page that opens a window adds a place, those options, a minimum size and a name
 to remember it by; and a page that holds a window can make it fullscreen, maximised, minimised,
-hidden or focused, or give it a new title, place, size, float or resizability while it runs. What is missing
-is a menu and a per-application display mode.
+hidden or focused, or give it a new title, place, size, float or resizability while it runs. The manifest
+also declares native menus, and a selection reaches the page as a `menu` event. What is still missing is a
+per-application display mode.
 
 **The application icon is read from a bitmap file.** The manifest names an icon by a path relative
 to the application directory, and the runtime reads that file and decodes it into the straight RGBA
@@ -842,16 +824,17 @@ named failure. The modal itself — a person clicking a colour — is the same o
 verification the file dialogs record, and the picker is Windows-only until another platform's
 tool is added. |
 | Tray icon | Implemented: the manifest declares an image and a tooltip, the host creates it on its engine thread, and a click brings the application's window forward and tells its page | — (the platform's own call, through `tray-icon`) |
-| Native menus | Absent | Not a dependency question. `muda` is already in the tree through `tray-icon`, and on Linux (`init_for_gtk_window`) and macOS (`init_for_nsapp`) it attaches safely — but on **Windows** its entry point is `pub unsafe fn init_for_hwnd(hwnd: isize)`, and `unsafe_code = "forbid"` is a workspace-wide ban this project has refused to lift for any reason. A Windows menu bar therefore needs either a windowing crate that offers a safe seam, or a deliberate change to the safety rule |
-| Developer tools (the platform's web inspector) | Partial: open and close work; the open state is reported as unknown on Windows | `ncui.window.devtools.open` and `ncui.window.devtools.close` call wry's `open_devtools`/`close_devtools`; `ncui.window.devtools.state` answers `open`, `closed`, or `unknown` — and on **Windows** it answers `unknown`, because wry's Windows backend opens the inspector and then reports `is_devtools_open() == false` unconditionally. The runtime says what the platform told it rather than claiming a state it cannot know. The three calls require the `window` capability |
+| Native menus | Implemented on Windows and Linux: the manifest declares a bounded recursive tree, the host creates the platform menu, and a selection reaches the page as a `menu` event | macOS remains unverified. Windows needs muda's `pub unsafe fn init_for_hwnd`; ADR-012's ninth exception confines that one unsafe block and call site to `crates/ncui-webview-wry/src/menu.rs`, on the engine thread, with the menu dropped before its HWND. Labels do not imply native accelerators; applications declare global shortcuts separately. Windows' repeatable probe dispatches the real menu through `WM_COMMAND` and verifies the page handler; a physical mouse click remains a one-time human verification |
+| Developer tools (the platform's web inspector) | Implemented on Linux; partial on Windows | `ncui.window.devtools.open` and `ncui.window.devtools.close` call wry's `open_devtools`/`close_devtools`; `ncui.window.devtools.state` answers `open`, `closed`, or `unknown`. Linux's real WebKitGTK inspector is verified open and closed by a live host test. On **Windows** the state answers `unknown`, because wry's Windows backend opens the inspector and then reports `is_devtools_open() == false` unconditionally. The runtime says what the platform told it rather than claiming a state it cannot know. The three calls require the `window` capability |
 | Global shortcuts | Implemented: the manifest declares them, the runtime holds them while it runs and releases them when it stops, and the page hears a `shortcut` event | — (the platform's own registration call, through `global-hotkey`) |
-| Chrome DevTools Protocol (drive a page's engine: navigate, evaluate, inspect) | Implemented on Windows behind `Capability::Cdp`; the relay remains for pages that want it | The engine is created with `--remote-debugging-port=0`; the port and bearer path are read from the user-data directory's `DevToolsActivePort` file, and `ncui.cdp.send` delivers the command over a loopback WebSocket to the page's own DevTools endpoint, returning the endpoint's answer (ADR-017 Phase 2; no `unsafe`, no engine patching). A page can still relay through `ncui.on("ncui:cdp", ...)`. A page without its own relay no longer needs one. Logical child windows (`ncui.window.create.child`) are implemented; an embedded `<ncui-webview>` element remains ADR-017 Phase 3. Not exercised by the suite: the one live WebView2 exchange (the transport is proven to the endpoint boundary) |
+| Chrome DevTools Protocol (drive a page's engine: navigate, evaluate, inspect) | Implemented on Windows behind `Capability::Cdp`; explicitly unsupported on WebKitGTK | The Windows engine is created with `--remote-debugging-port=0`; the port and bearer path are read from the user-data directory's `DevToolsActivePort` file, and `ncui.cdp.send` delivers the command over a loopback WebSocket to the page's own DevTools endpoint, returning the endpoint's answer (ADR-017 Phase 2; no `unsafe`, no engine patching). A page can still relay through `ncui.on("ncui:cdp", ...)`. WebKitGTK exposes its native inspector but neither publishes `DevToolsActivePort` nor speaks CDP; non-Windows calls return `cdp_platform_unsupported` by name rather than waiting for a file that cannot exist. WebKit's WebDriver automation is a different protocol and is not presented as CDP. Platform-specific host tests cover the live WebView2 exchange and the WebKitGTK refusal. Logical child windows (`ncui.window.create.child`) are a separate top-level-window API |
+| Embedded child webviews | Implemented on Windows and Linux: a parent owns the child's lifecycle and isolated policy, the engine embeds a real surface, and create/bounds/close/list plus targeted page IPC are verified on both platforms | Geometry is explicit rather than DOM-synchronized; a `<ncui-webview>` custom element remains future work, and macOS is unverified |
 | Running on macOS | The code is written; the platform is not verified | AppKit requires the event loop on the main thread and `tao` offers no any-thread switch, so on macOS the engine loop owns the main thread and the runtime pump runs on a worker (ADR-018). Cross-compiling even a `cargo check` for the macOS target stops in `objc2-exception-helper`'s build script — this machine has no C compiler for the Apple target — so the path is reviewed but **not compiled or run here**; a platform is not "supported" until its gate has run on it, and `cross_platform.verification.macos` stays `not_implemented` until a macOS run says otherwise |
 
-Each capability still absent needs a new dependency, and ADR-012's dependency policy requires an ADR
-exception for each one — the same bar `wry`, `wgpu`, `rustybuzz` and `global-hotkey` had to clear.
-Adding them without that bar is how a runtime ends up with an unaudited native surface, which is
-the failure this project's capability model exists to prevent.
+A new native capability needs an ADR-012 exception when it requires a new dependency — the same bar
+`wry`, `wgpu`, `rustybuzz`, `global-hotkey` and `muda` had to clear. Adding one without that bar is how
+a runtime ends up with an unaudited native surface, which is the failure this project's capability
+model exists to prevent.
 
 The one thing that is *not* waiting on a dependency is the shape: the seam, the grant, the
 command table and the audit trail are already there, which is why each capability so far

@@ -25,6 +25,23 @@
       "command": "increment"
     }
   ],
+  "menus": [
+    {
+      "label": "Counter",
+      "items": [
+        { "type": "item", "label": "Increment", "command": "increment" },
+        { "type": "separator" },
+        {
+          "type": "submenu",
+          "label": "Window",
+          "items": [
+            { "type": "item", "label": "Open notes", "command": "notes" },
+            { "type": "item", "label": "Toggle fullscreen", "command": "fullscreen" }
+          ]
+        }
+      ]
+    }
+  ],
   "page_commands": [
     {
       "command": "counter.summary",

@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import math
 import os
 import shutil
 import statistics
@@ -73,6 +74,11 @@ kernel32 = ctypes.windll.kernel32
 psapi = ctypes.windll.psapi
 
 ENUM_WINDOWS_PROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+user32.GetWindowThreadProcessId.argtypes = [
+    wintypes.HWND,
+    ctypes.POINTER(wintypes.DWORD),
+]
+user32.GetWindowThreadProcessId.restype = wintypes.DWORD
 
 
 class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
@@ -105,8 +111,8 @@ class PROCESSENTRY32(ctypes.Structure):
     ]
 
 
-def visible_window_titles() -> list[str]:
-    titles: list[str] = []
+def visible_windows() -> list[tuple[int, str]]:
+    windows: list[tuple[int, str]] = []
 
     def callback(hwnd: int, _lparam: int) -> bool:
         if not user32.IsWindowVisible(hwnd):
@@ -116,17 +122,19 @@ def visible_window_titles() -> list[str]:
             return True
         buffer = ctypes.create_unicode_buffer(length + 1)
         user32.GetWindowTextW(hwnd, buffer, length + 1)
-        titles.append(buffer.value)
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        windows.append((pid.value, buffer.value))
         return True
 
     user32.EnumWindows(ENUM_WINDOWS_PROC(callback), 0)
-    return titles
+    return windows
 
 
-def wait_for_window(title: str, timeout: float = 30.0) -> bool:
+def wait_for_window(title: str, pid: int, timeout: float = 30.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if any(title in window for window in visible_window_titles()):
+        if any(owner == pid and title in window for owner, window in visible_windows()):
             return True
         time.sleep(0.05)
     return False
@@ -179,24 +187,42 @@ def snapshot_processes() -> dict[int, tuple[str, int]]:
     return entries
 
 
-def process_tree_memory(root_pid: int) -> int:
+def process_tree_pids(root_pid: int) -> set[int]:
     entries = snapshot_processes()
     children: dict[int, list[int]] = {}
     for pid, (_, parent) in entries.items():
         children.setdefault(parent, []).append(pid)
     stack = [root_pid]
     seen: set[int] = set()
-    total = 0
     while stack:
         pid = stack.pop()
         if pid in seen:
             continue
         seen.add(pid)
+        stack.extend(children.get(pid, []))
+    return seen
+
+
+def process_tree_memory(root_pid: int) -> int:
+    total = 0
+    for pid in process_tree_pids(root_pid):
         memory = process_memory(pid)
         if memory:
             total += memory
-        stack.extend(children.get(pid, []))
     return total
+
+
+def wait_for_process_tree(pid: int, timeout: float = 30.0) -> bool:
+    """Wait until the framework has a live descendant before sampling its idle state."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        root_memory = process_memory(pid)
+        if root_memory is None:
+            return False
+        if process_tree_memory(pid) > root_memory:
+            return True
+        time.sleep(0.1)
+    return False
 
 
 def process_cpu_100ns(pid: int) -> int | None:
@@ -223,7 +249,7 @@ def process_cpu_100ns(pid: int) -> int | None:
         kernel32.CloseHandle(handle)
 
 
-def process_cpu_percent(pid: int, window: float = 1.0) -> float:
+def process_cpu_percent(pid: int, window: float = 1.0) -> float | None:
     """One process's CPU use over `window` seconds, as a percentage of one core.
 
     The framework process is the stable signal: the webview's own processes do
@@ -232,8 +258,8 @@ def process_cpu_percent(pid: int, window: float = 1.0) -> float:
     start = process_cpu_100ns(pid)
     time.sleep(window)
     end = process_cpu_100ns(pid)
-    if not start or not end:
-        return 0.0
+    if start is None or end is None:
+        return None
     return (end - start) / 10_000_000.0 / window * 100.0
 
 
@@ -244,6 +270,24 @@ def kill_tree(pid: int) -> None:
         stderr=subprocess.DEVNULL,
         check=False,
     )
+
+
+def stop_process_tree(process: subprocess.Popen) -> None:
+    owned = process_tree_pids(process.pid)
+    kill_tree(process.pid)
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=10)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if all(process_memory(pid) is None for pid in owned):
+            return
+        time.sleep(0.05)
+    for pid in owned:
+        if pid != process.pid and process_memory(pid) is not None:
+            kill_tree(pid)
 
 
 def kill_by_path_prefix(prefix: str) -> None:
@@ -469,6 +513,59 @@ def percentiles(samples: list[float]) -> dict:
     }
 
 
+def validate_ipc_result(result: dict, rounds: int, framework: str, label: str) -> float:
+    if not isinstance(result, dict):
+        raise RuntimeError(f"{label}: IPC result is not a JSON object")
+    if result.get("framework") != framework:
+        raise RuntimeError(
+            f"{label}: IPC result names {result.get('framework')!r}, expected {framework!r}"
+        )
+    if type(result.get("rounds")) is not int or result["rounds"] != rounds:
+        raise RuntimeError(f"{label}: IPC result did not run the requested {rounds} rounds")
+    if type(result.get("completed")) is not int or result["completed"] != rounds:
+        raise RuntimeError(
+            f"{label}: only {result.get('completed')} of {rounds} IPC calls completed"
+        )
+    per_round = result.get("per_round_ms")
+    if (
+        not isinstance(per_round, (int, float))
+        or isinstance(per_round, bool)
+        or not math.isfinite(per_round)
+        or per_round < 0
+    ):
+        raise RuntimeError(f"{label}: IPC result has an invalid per-round time: {per_round!r}")
+    elapsed = result.get("elapsed_ms")
+    if (
+        not isinstance(elapsed, (int, float))
+        or isinstance(elapsed, bool)
+        or not math.isfinite(elapsed)
+        or elapsed < 0
+        or not math.isclose(float(per_round) * rounds, float(elapsed), rel_tol=1e-6, abs_tol=1e-6)
+    ):
+        raise RuntimeError(f"{label}: IPC elapsed time and per-round time disagree: {elapsed!r}")
+    return float(per_round)
+
+
+def summarize_ipc(results: list[dict], rounds: int) -> dict:
+    per_round_samples = [float(result["per_round_ms"]) for result in results]
+    elapsed_samples = [float(result["elapsed_ms"]) for result in results]
+    per_round = statistics.median(per_round_samples)
+    summary = dict(results[-1])
+    summary.update(
+        {
+            "per_round_ms_samples": per_round_samples,
+            "per_round_ms_min": min(per_round_samples),
+            "per_round_ms": per_round,
+            "per_round_ms_max": max(per_round_samples),
+            "elapsed_ms_samples": elapsed_samples,
+            "elapsed_ms_min": min(elapsed_samples),
+            "elapsed_ms": per_round * rounds,
+            "elapsed_ms_max": max(elapsed_samples),
+        }
+    )
+    return summary
+
+
 def measure(
     label: str,
     app: str,
@@ -482,14 +579,14 @@ def measure(
     bench_output: Path,
     enable_bench: callable,
     disable_bench: callable,
+    rounds: int,
     repeats: int,
 ) -> dict:
     enable_bench()
     startups: list[float] = []
     memories: list[int] = []
     cpu_samples: list[float] = []
-    ipc: dict | None = None
-    ipc_samples: list[float] = []
+    ipc_results: list[dict] = []
     for _ in range(repeats):
         # The idle run carries no benchmark trigger, so the page settles at its own
         # baseline. Measuring the working set after a benchmark would charge the
@@ -499,6 +596,7 @@ def measure(
         time.sleep(0.5)
         merged = os.environ.copy()
         merged.update(idle_env)
+        started = time.monotonic()
         process = subprocess.Popen(
             cmd,
             cwd=str(cwd),
@@ -506,21 +604,44 @@ def measure(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        started = time.monotonic()
-        if not wait_for_window(title, 30):
-            kill_tree(process.pid)
-            raise RuntimeError(f"{label}: window {title!r} did not appear")
-        startups.append((time.monotonic() - started) * 1000.0)
-        time.sleep(5.0)
-        cpu_samples.append(process_cpu_percent(process.pid, 2.0))
-        memories.append(process_tree_memory(process.pid))
-        kill_tree(process.pid)
+        try:
+            if not wait_for_window(title, process.pid, 30):
+                raise RuntimeError(
+                    f"{label}: process {process.pid} did not own a visible window "
+                    f"named {title!r} (status {process.poll()})"
+                )
+            if process.poll() is not None:
+                raise RuntimeError(f"{label}: process exited before the idle sample")
+            startups.append((time.monotonic() - started) * 1000.0)
+            if not wait_for_process_tree(process.pid):
+                raise RuntimeError(
+                    f"{label}: process {process.pid} did not expose a live descendant tree "
+                    "before idle sampling"
+                )
+            time.sleep(5.0)
+            if process.poll() is not None:
+                raise RuntimeError(f"{label}: process exited before the idle sample")
+            cpu = process_cpu_percent(process.pid, 2.0)
+            root_memory = process_memory(process.pid)
+            tree_memory = process_tree_memory(process.pid)
+            if cpu is None or root_memory is None or root_memory <= 0:
+                raise RuntimeError(f"{label}: the framework process vanished during sampling")
+            if tree_memory <= root_memory:
+                raise RuntimeError(
+                    f"{label}: idle process tree was incomplete: {tree_memory} bytes for "
+                    f"a {root_memory}-byte root"
+                )
+            cpu_samples.append(cpu)
+            memories.append(tree_memory)
+        finally:
+            stop_process_tree(process)
         time.sleep(0.5)
 
         # The benchmark run enables the trigger and reads what the page measured.
         enable_bench()
         kill_by_path_prefix(path_prefix)
         time.sleep(0.5)
+        bench_output.unlink(missing_ok=True)
         merged = os.environ.copy()
         merged.update(bench_env)
         process = subprocess.Popen(
@@ -530,23 +651,31 @@ def measure(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        if not wait_for_window(title, 30):
-            kill_tree(process.pid)
-            raise RuntimeError(f"{label}: window {title!r} did not appear")
-        result = wait_for_file(bench_output, 30)
-        if result is not None:
-            ipc = result
-            per_round = result.get("per_round_ms")
-            if isinstance(per_round, (int, float)):
-                ipc_samples.append(float(per_round))
-        kill_tree(process.pid)
+        try:
+            if not wait_for_window(title, process.pid, 30):
+                raise RuntimeError(
+                    f"{label}: process {process.pid} did not own a visible window "
+                    f"named {title!r} during IPC (status {process.poll()})"
+                )
+            if process.poll() is not None:
+                raise RuntimeError(f"{label}: process exited before the IPC sample")
+            if not wait_for_process_tree(process.pid):
+                raise RuntimeError(
+                    f"{label}: process {process.pid} did not expose a live descendant tree "
+                    "before the IPC sample"
+                )
+            result = wait_for_file(bench_output, 30)
+            if result is None:
+                raise RuntimeError(f"{label}: the page did not write a complete IPC result")
+            validate_ipc_result(result, rounds, framework, label)
+            ipc_results.append(result)
+        finally:
+            stop_process_tree(process)
         time.sleep(0.5)
     disable_bench()
-    if ipc is not None and ipc_samples:
-        ipc["per_round_ms_samples"] = ipc_samples
-        ipc["per_round_ms_min"] = min(ipc_samples)
-        ipc["per_round_ms"] = statistics.median(ipc_samples)
-        ipc["per_round_ms_max"] = max(ipc_samples)
+    if len(ipc_results) != repeats:
+        raise RuntimeError(f"{label}: only {len(ipc_results)} of {repeats} IPC repeats completed")
+    ipc = summarize_ipc(ipc_results, rounds) if ipc_results else None
     return {
         "label": label,
         "app": app,
@@ -655,7 +784,9 @@ def main() -> None:
                 "cmd": [str(ncui_exe), "run", str(port)],
                 "cwd": REPO,
                 "idle_env": {},
-                "bench_env": {},
+                # The host explicitly approves only component setup and the result write.
+                # Measured list_windows round trips never reach this policy.
+                "bench_env": {"NCUI_COMPARISON_HOST": "1"},
                 "title": title,
                 "path_prefix": str(ncui_exe.parent),
                 "bench_output": port / "bench-result.json",
@@ -687,6 +818,7 @@ def main() -> None:
             bench_output=config["bench_output"],
             enable_bench=config["enable_bench"],
             disable_bench=config["disable_bench"],
+            rounds=args.rounds,
             repeats=args.repeats,
         )
         measurement["size_bytes"] = config["size"]

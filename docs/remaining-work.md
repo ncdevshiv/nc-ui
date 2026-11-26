@@ -1,6 +1,6 @@
 # Remaining work
 
-The registry records 72 tracked features: 71 complete, 1 absent. This file is the plan for the
+The registry records 77 tracked features: 76 complete, 1 absent. This file is the plan for the
 one that remains, and records what building it needs — and, below, what the ones that used to
 remain needed, because the reasoning that moved them is worth keeping.
 
@@ -29,6 +29,7 @@ verified on this machine stays `absent` rather than being marked done.**
 | `abi.component_abi` | `crates/ncui-abi/` |
 | `process.supply_chain_releases` | `tools/build_release.py`, `.cargo/config.toml` |
 | `cross_platform.verification.linux` | `tools/linux_gate.py` |
+| `webview.native_menus` | `crates/ncui-app/src/manifest.rs`, `crates/ncui-webview-wry/src/menu.rs`, `crates/ncui-runtime/src/application.rs` |
 
 ## What remains
 
@@ -77,9 +78,10 @@ geometry, and the DOM's copy of the page has to be told which pixels the GPU own
 boundary is ADR-002's "highest-risk area in the renderer", and the section below records how each
 part of it was built.
 
-So the position now is that both halves are done and verified, and the capability is recorded
-`complete` because the renderer *can* be composited with the DOM and that composition is exercised
-by a test against a live host.
+So the position now is that both halves are done and verified on Windows, and the capability is
+recorded `complete` because the renderer *can* be composited with the DOM and that composition is
+exercised by a test against a live host. Linux platform flags remain separate until the same
+pixel evidence runs there.
 
 - **ADR-002 requires the full input contract** — mouse, keyboard, focus, scrolling, clipboard,
   selection, resize, high-DPI, drag and drop, IME, and accessibility. An island that is a bare
@@ -98,7 +100,7 @@ content of a region is rows of type rather than a colour (`ncui-gpu-renderer`'s 
 and text path, measured in `crates/ncui-bench/benches/latency.rs`), and an island's contents reach
 a screen reader through a description the runtime serves from the same model it draws from, which
 the page mirrors into the DOM (`examples/counter`). The registry records the feature `complete`,
-with its evidence citing the ten tests in `crates/ncui-runtime/tests/islands.rs`.
+with its evidence citing the thirteen tests in `crates/ncui-runtime/tests/islands.rs`.
 
 ### The window host
 
@@ -115,11 +117,11 @@ and the request appears in the audit trail under `page:<window-id>`.
 
 **What was missing, and is now done:** the `wry-engine` feature used to be off by default, so
 the binding was compiled and tested but not part of a release build. `ncui-cli`'s `wry-host`
-feature now enables it — with `gpu-islands`, because the release build serves the island route
-the counter example's canvas is — and the `adapters` CI job runs the workspace with
-`--all-features` on `windows-latest`, which opens a real window on a real host. The binding is
-therefore on the path a user's `ncui run` takes, not only on the path a contributor's build
-takes.
+feature now enables it, and the standard `wry-host-gpu` profile adds `gpu-islands` for the
+counter example's canvas; the minimal profile deliberately omits the renderer. The `adapters`
+CI job runs the workspace with `--all-features` on `windows-latest`, which opens a real window
+on a real host. The binding is therefore on the path a user's `ncui run` takes, not only on the
+path a contributor's build takes.
 
 ### Why the contract report has a consumer, and what that left
 
@@ -143,9 +145,8 @@ asserted. What is left is the ordinary work of a running system, not a missing c
 done                mcp_adapter · fuzzing · soak_and_leaks · webview.host
                     webview.engine · a11y.support · abi.component_abi
                     supply_chain_releases · cross_platform.verification.linux
-                    gpu.islands · every capability the gaps document lists as
-                    implemented: menus and file dialogs are the two it still
-                    lists as absent, for the reasons it gives there
+                    gpu.islands · native menus · file dialogs · every other
+                    capability the gaps document lists as implemented
 needs a Mac host    cross_platform.verification.macos
 ```
 

@@ -31,3 +31,10 @@ __pycache__/
 /comparison/ports/*/bench-config.json
 /comparison/ports/*/bench-result.json
 /comparison/bench/results/smoke.json
+
+# Machine-local agent memory, learnings and planning scratch. These are session state
+# on one machine, not source: committing them would put rotating binary indexes and
+# per-machine notes into every clone.
+.zvec/
+.learnings/
+futureplan/

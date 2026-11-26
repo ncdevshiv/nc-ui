@@ -142,6 +142,17 @@ impl Application {
             .operation("application::launch")
         })?;
 
+        #[cfg(not(feature = "native-menu"))]
+        if !manifest.menus.is_empty() {
+            return Err(NcError::new(ErrorKind::Validation {
+                field: "menus".to_owned(),
+                reason:
+                    "this build cannot attach native menus; rebuild with the `native-menu` feature"
+                        .to_owned(),
+            })
+            .operation("application::launch"));
+        }
+
         let assets = manifest.assets_directory(directory);
         // The GPU island surface, when this build has one. The route lives on the page's own origin,
         // so a page fetches a rendered island the way it fetches its own files: same origin, no
@@ -416,6 +427,30 @@ impl Application {
             .operation("application::launch")
         })?;
 
+        #[cfg(feature = "native-menu")]
+        if let Some(menu) = menu_request(&manifest) {
+            runtime
+                .windows
+                .set_menu(window, Some(menu))
+                .map_err(|error| {
+                    NcError::new(ErrorKind::Validation {
+                        field: "menus".to_owned(),
+                        reason: error.to_string(),
+                    })
+                    .operation("application::launch")
+                })?;
+            let _ = runtime.metrics.counter_inc(
+                "app.native_menus_attached",
+                &ncui_observability::metrics::Labels::new(),
+                1,
+            );
+            tracing::info!(
+                application = %manifest.name,
+                top_level_menus = manifest.menus.len(),
+                "the application attached its native menu"
+            );
+        }
+
         // The tray icon, when the manifest shows one. Its image is read and decoded here rather than
         // in the host, so a file that is missing or in a format this runtime cannot read is reported
         // to the person who named it — with the path they named.
@@ -499,6 +534,8 @@ impl Application {
         self.receive_handoffs();
         #[cfg(feature = "global-shortcuts")]
         self.deliver_shortcuts();
+        #[cfg(feature = "native-menu")]
+        self.deliver_menus();
         let labels = ncui_observability::metrics::Labels::new();
         if served > 0 {
             let _ =
@@ -578,6 +615,52 @@ impl Application {
                 accelerator = %accelerator,
                 command = %command,
                 "a global shortcut was pressed"
+            );
+        }
+    }
+
+    /// Delivers native menu selections to the page without choosing what they mean.
+    #[cfg(feature = "native-menu")]
+    fn deliver_menus(&mut self) {
+        loop {
+            let event = match self.runtime.windows.take_menu_event(self.window) {
+                Ok(Some(event)) => event,
+                Ok(None) => return,
+                Err(error) => {
+                    tracing::warn!(
+                        application = %self.name,
+                        %error,
+                        "a native menu selection could not be read"
+                    );
+                    return;
+                }
+            };
+            let command = event.command;
+            let Some(script) = menu_event_script(&command) else {
+                tracing::warn!("a native menu event could not be serialised");
+                return;
+            };
+            if !self
+                .runtime
+                .windows
+                .post_to_page(self.window, &script)
+                .unwrap_or(false)
+            {
+                tracing::warn!(
+                    application = %self.name,
+                    "a native menu selection could not be delivered to the page"
+                );
+                return;
+            }
+            let _ = self.runtime.metrics.counter_inc(
+                "app.menu_selections",
+                &ncui_observability::metrics::Labels::new(),
+                1,
+            );
+            tracing::info!(
+                application = %self.name,
+                command = %command,
+                "a native menu item was selected"
             );
         }
     }
@@ -775,6 +858,16 @@ impl Application {
         &self.runtime
     }
 
+    /// Installs the host surface that obtains real approval for destructive page commands.
+    #[must_use]
+    pub fn with_consent_prompter(
+        mut self,
+        prompter: Arc<dyn crate::consent::ConsentPrompter>,
+    ) -> Self {
+        self.runtime.set_consent_prompter(prompter);
+        self
+    }
+
     /// Reloads the page whenever a file under the assets directory changes.
     ///
     /// This is the development loop: edit a file, and the window shows the change. The
@@ -947,6 +1040,61 @@ fn register_shortcuts(manifest: &AppManifest) -> Result<Option<HeldShortcuts>, N
         manager,
         declared: manifest.shortcuts.clone(),
     }))
+}
+
+#[cfg(feature = "native-menu")]
+fn menu_event_script(command: &str) -> Option<String> {
+    let event = serde_json::json!({
+        "event": "menu",
+        "payload": { "command": command },
+    });
+    let encoded = serde_json::to_string(&event).ok()?;
+    Some(format!("window.ncui && window.ncui.__dispatch({encoded});"))
+}
+
+/// Converts the validated manifest menu into the engine-neutral request.
+#[cfg(feature = "native-menu")]
+fn menu_request(manifest: &AppManifest) -> Option<ncui_webview::MenuRequest> {
+    if manifest.menus.is_empty() {
+        return None;
+    }
+    Some(ncui_webview::MenuRequest {
+        menus: manifest
+            .menus
+            .iter()
+            .map(|menu| ncui_webview::MenuSubmenu {
+                label: menu.label.clone(),
+                enabled: menu.enabled,
+                items: menu_entries(&menu.items),
+            })
+            .collect(),
+    })
+}
+
+#[cfg(feature = "native-menu")]
+fn menu_entries(entries: &[ncui_app::MenuEntryConfig]) -> Vec<ncui_webview::MenuEntry> {
+    entries
+        .iter()
+        .map(|entry| match entry {
+            ncui_app::MenuEntryConfig::Item {
+                label,
+                command,
+                enabled,
+            } => ncui_webview::MenuEntry::Item {
+                label: label.clone(),
+                command: command.clone(),
+                enabled: *enabled,
+            },
+            ncui_app::MenuEntryConfig::Submenu(submenu) => {
+                ncui_webview::MenuEntry::Submenu(ncui_webview::MenuSubmenu {
+                    label: submenu.label.clone(),
+                    enabled: submenu.enabled,
+                    items: menu_entries(&submenu.items),
+                })
+            }
+            ncui_app::MenuEntryConfig::Separator => ncui_webview::MenuEntry::Separator,
+        })
+        .collect()
 }
 
 /// The tray request a manifest declares, with its image read and decoded.
@@ -1168,5 +1316,137 @@ fn write_window_state(path: &Path, geometry: ncui_webview::WindowGeometry) -> Re
 impl Drop for Application {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "test assertions must abort loudly on failure"
+)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "native-menu")]
+    fn manifest_with_menus() -> AppManifest {
+        AppManifest::parse(
+            r#"{"name":"menus","version":"1.0.0","menus":[
+                {"label":"File","items":[
+                    {"type":"item","label":"Open","command":"open"},
+                    {"type":"submenu","label":"More","enabled":false,"items":[
+                        {"type":"item","label":"Close","command":"close","enabled":false}
+                    ]}
+                ]}
+            ]}"#,
+            Path::new("ncui.app.json"),
+        )
+        .expect("a valid menu manifest")
+    }
+
+    #[cfg(feature = "native-menu")]
+    #[test]
+    fn manifest_menus_keep_their_shape_when_crossing_the_engine_boundary() {
+        let request = menu_request(&manifest_with_menus()).expect("the manifest declares menus");
+        assert_eq!(request.menus.len(), 1);
+        assert_eq!(request.menus[0].label, "File");
+        assert!(request.menus[0].enabled);
+        assert_eq!(
+            request.menus[0].items[0],
+            ncui_webview::MenuEntry::Item {
+                label: "Open".to_owned(),
+                command: "open".to_owned(),
+                enabled: true,
+            }
+        );
+        let ncui_webview::MenuEntry::Submenu(submenu) = &request.menus[0].items[1] else {
+            panic!("the nested menu survives conversion");
+        };
+        assert_eq!(submenu.label, "More");
+        assert!(!submenu.enabled);
+        assert_eq!(
+            submenu.items[0],
+            ncui_webview::MenuEntry::Item {
+                label: "Close".to_owned(),
+                command: "close".to_owned(),
+                enabled: false,
+            }
+        );
+
+        let plain = AppManifest::parse(
+            r#"{"name":"plain","version":"1.0.0"}"#,
+            Path::new("ncui.app.json"),
+        )
+        .expect("a minimal manifest");
+        assert_eq!(menu_request(&plain), None);
+    }
+
+    #[cfg(feature = "native-menu")]
+    #[test]
+    fn native_menu_events_are_json_data_not_executable_page_text() {
+        let command = "open\");window.__menu_injected=true;//\n\\\u{2028}";
+        let script = menu_event_script(command).expect("a menu event serialises");
+        let argument = script
+            .strip_prefix("window.ncui && window.ncui.__dispatch(")
+            .and_then(|rest| rest.strip_suffix(");"))
+            .expect("the bridge call has one JSON argument");
+        let event: serde_json::Value =
+            serde_json::from_str(argument).expect("the argument is one complete JSON value");
+
+        assert_eq!(event["event"], "menu");
+        assert_eq!(event["payload"]["command"], command);
+        assert!(script.contains(r#"\");window.__menu_injected=true;//"#));
+        assert!(script.contains(r"\n"));
+    }
+
+    #[cfg(not(feature = "native-menu"))]
+    struct Scratch(PathBuf);
+
+    #[cfg(not(feature = "native-menu"))]
+    impl Scratch {
+        fn new() -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("the system clock is after the Unix epoch")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "ncui-native-menu-refusal-{}-{nonce}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&path).expect("the scratch directory is created");
+            Self(path)
+        }
+    }
+
+    #[cfg(not(feature = "native-menu"))]
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(not(feature = "native-menu"))]
+    #[test]
+    fn a_menu_declaration_is_refused_before_a_feature_off_launch_allocates_resources() {
+        let scratch = Scratch::new();
+        std::fs::write(
+            scratch.0.join(ncui_app::MANIFEST_FILE_NAME),
+            r#"{"name":"menus","version":"1.0.0","menus":[
+                {"label":"File","items":[
+                    {"type":"item","label":"Open","command":"open"}
+                ]}
+            ]}"#,
+        )
+        .expect("the manifest is written");
+
+        let error = Application::launch(&scratch.0, Limits::default())
+            .expect_err("a feature-off build cannot honour a native menu");
+        assert!(matches!(
+            error.kind(),
+            ErrorKind::Validation { field, .. } if field == "menus"
+        ));
+        assert!(error.to_string().contains("native-menu"), "{error}");
+        assert!(!scratch.0.join("public").exists());
     }
 }

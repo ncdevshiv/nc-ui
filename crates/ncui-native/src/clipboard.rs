@@ -27,10 +27,17 @@
 //! * **A missing tool is reported, not hidden.** An empty clipboard and an unavailable
 //!   clipboard are different answers, and a caller that treats them the same will paste an
 //!   empty document. On Linux both a Wayland and an X11 tool are tried before the answer is
-//!   "unavailable".
+//!   "unavailable". A tool that starts but cannot reach its display also falls through to the
+//!   next backend, so a Wayland session failure does not hide a working X11 clipboard.
 
 use std::path::Path;
 use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::{
+    io::Write as _,
+    process::{Command, Stdio},
+    time::Instant,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -137,9 +144,22 @@ impl Clipboard {
     /// The clipboard of this platform, using its own tools.
     #[must_use]
     pub fn new() -> Self {
+        #[cfg(target_os = "linux")]
+        let mut write_tools = WRITE_TOOLS.to_vec();
+        #[cfg(not(target_os = "linux"))]
+        let write_tools = WRITE_TOOLS.to_vec();
+        #[cfg(target_os = "linux")]
+        let mut read_tools = READ_TOOLS.to_vec();
+        #[cfg(not(target_os = "linux"))]
+        let read_tools = READ_TOOLS.to_vec();
+        #[cfg(target_os = "linux")]
+        if std::env::var_os("WAYLAND_DISPLAY").is_none_or(|value| value.is_empty()) {
+            write_tools.retain(|tool| tool.program != "wl-copy");
+            read_tools.retain(|tool| tool.program != "wl-paste");
+        }
         Self {
-            write_tools: WRITE_TOOLS.to_vec(),
-            read_tools: READ_TOOLS.to_vec(),
+            write_tools,
+            read_tools,
             max_bytes: MAX_CLIPBOARD_BYTES,
         }
     }
@@ -177,6 +197,7 @@ impl Clipboard {
     /// when the clipboard holds more than the read limit.
     pub fn read_text(&self) -> Result<ClipboardText, ClipboardError> {
         let mut unavailable = None;
+        let mut failure = None;
         for tool in &self.read_tools {
             match run_command(
                 Path::new(tool.program),
@@ -199,7 +220,7 @@ impl Clipboard {
                     });
                 }
                 Ok(output) => {
-                    return Err(ClipboardError::Failed {
+                    failure = Some(ClipboardError::Failed {
                         tool: tool.program.to_owned(),
                         reason: first_line(&output.stderr),
                     });
@@ -210,15 +231,17 @@ impl Clipboard {
                     });
                 }
                 Err(other) => {
-                    return Err(ClipboardError::Failed {
+                    failure = Some(ClipboardError::Failed {
                         tool: tool.program.to_owned(),
                         reason: other.to_string(),
                     });
                 }
             }
         }
-        Err(unavailable.unwrap_or(ClipboardError::Unavailable {
-            tool: "the platform's clipboard tool".to_owned(),
+        Err(failure.unwrap_or_else(|| {
+            unavailable.unwrap_or(ClipboardError::Unavailable {
+                tool: "the platform's clipboard tool".to_owned(),
+            })
         }))
     }
 
@@ -236,23 +259,14 @@ impl Clipboard {
             });
         }
         let mut unavailable = None;
+        let mut failure = None;
         for tool in &self.write_tools {
-            match run_command(
-                Path::new(tool.program),
-                tool.program,
-                &tool.arguments(),
-                Some(text),
-                CLIPBOARD_TIMEOUT,
-                self.max_bytes,
-                None,
-            ) {
-                Ok(output) if output.status == 0 => {
-                    return Ok(ClipboardWritten { bytes: text.len() });
-                }
-                Ok(output) => {
-                    return Err(ClipboardError::Failed {
+            match run_writer(tool, text) {
+                Ok(None) => return Ok(ClipboardWritten { bytes: text.len() }),
+                Ok(Some(reason)) => {
+                    failure = Some(ClipboardError::Failed {
                         tool: tool.program.to_owned(),
-                        reason: first_line(&output.stderr),
+                        reason,
                     });
                 }
                 Err(ProcessError::NotFound { .. }) => {
@@ -261,15 +275,17 @@ impl Clipboard {
                     });
                 }
                 Err(other) => {
-                    return Err(ClipboardError::Failed {
+                    failure = Some(ClipboardError::Failed {
                         tool: tool.program.to_owned(),
                         reason: other.to_string(),
                     });
                 }
             }
         }
-        Err(unavailable.unwrap_or(ClipboardError::Unavailable {
-            tool: "the platform's clipboard tool".to_owned(),
+        Err(failure.unwrap_or_else(|| {
+            unavailable.unwrap_or(ClipboardError::Unavailable {
+                tool: "the platform's clipboard tool".to_owned(),
+            })
         }))
     }
 }
@@ -366,6 +382,98 @@ fn first_line(text: &str) -> String {
     }
 }
 
+/// Runs a clipboard writer, returning its failure reason when it did not succeed.
+fn run_writer(tool: &Tool, text: &str) -> Result<Option<String>, ProcessError> {
+    #[cfg(target_os = "linux")]
+    {
+        run_linux_writer(tool, text)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        run_command(
+            Path::new(tool.program),
+            tool.program,
+            &tool.arguments(),
+            Some(text),
+            CLIPBOARD_TIMEOUT,
+            MAX_CLIPBOARD_BYTES,
+            None,
+        )
+        .map(|output| {
+            if output.status == 0 {
+                None
+            } else {
+                Some(first_line(&output.stderr))
+            }
+        })
+    }
+}
+
+/// Linux clipboard owners daemonize while retaining the selection, so their inherited capture
+/// pipes must not keep the runner waiting until its timeout kills the new clipboard owner.
+#[cfg(target_os = "linux")]
+fn run_linux_writer(tool: &Tool, text: &str) -> Result<Option<String>, ProcessError> {
+    use std::os::unix::process::CommandExt as _;
+
+    let mut command = Command::new(tool.program);
+    command
+        .args(tool.arguments())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env_clear()
+        .process_group(0);
+    for (name, value) in crate::process::scrubbed_environment() {
+        command.env(name, value);
+    }
+    let mut child = command.spawn().map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => ProcessError::NotFound {
+            program: tool.program.to_owned(),
+        },
+        _ => ProcessError::SpawnFailed {
+            program: tool.program.to_owned(),
+            reason: error.to_string(),
+        },
+    })?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let input = text.to_owned();
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(input.as_bytes());
+        });
+    }
+    let deadline = Instant::now() + CLIPBOARD_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Ok((!status.success()).then(|| format!("exited with {status}")));
+            }
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let group = format!("-{}", child.id());
+                let _ = Command::new("kill")
+                    .args(["-KILL", group.as_str()])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(Some(
+                    "timed out while taking ownership of the clipboard".to_owned(),
+                ));
+            }
+            Err(error) => {
+                return Err(ProcessError::SpawnFailed {
+                    program: tool.program.to_owned(),
+                    reason: error.to_string(),
+                });
+            }
+        }
+    }
+}
+
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -389,7 +497,10 @@ mod tests {
             // report the same thing the same way: what is skipped is the part only a real platform
             // can answer, and the refusal path is covered by the test below.
             Err(ClipboardError::Unavailable { tool }) => {
-                let _ = tool;
+                assert!(
+                    std::env::var_os("NCUI_REQUIRE_CLIPBOARD").is_none(),
+                    "clipboard evidence was required, but no tool is available: {tool}"
+                );
                 return;
             }
             Err(error) => panic!("the write failed: {error}"),
@@ -439,6 +550,41 @@ mod tests {
         let clipboard = Clipboard::with_tools("cmd", &[], read, read_args);
         let error = clipboard.read_text().expect_err("a failing tool");
         assert_eq!(error.code(), "internal", "got: {error}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_failed_clipboard_tool_does_not_hide_the_next_backend() {
+        let clipboard = Clipboard {
+            write_tools: vec![
+                Tool {
+                    program: "sh",
+                    args: &["-c", "exit 4"],
+                },
+                Tool {
+                    program: "sh",
+                    args: &["-c", "cat >/dev/null"],
+                },
+            ],
+            read_tools: vec![
+                Tool {
+                    program: "sh",
+                    args: &["-c", "exit 4"],
+                },
+                Tool {
+                    program: "sh",
+                    args: &["-c", "printf fallback"],
+                },
+            ],
+            max_bytes: MAX_CLIPBOARD_BYTES,
+        };
+        clipboard
+            .write_text("payload")
+            .expect("the fallback writes");
+        assert_eq!(
+            clipboard.read_text().expect("the fallback reads").text,
+            "fallback"
+        );
     }
 
     #[test]

@@ -44,6 +44,26 @@ const TAG_BACKPRESSURE: u8 = 0x0A;
 const TAG_IO: u8 = 0x0B;
 const TAG_CODEC: u8 = 0x0C;
 const TAG_INTERNAL: u8 = 0x0D;
+const TAG_CDP: u8 = 0x0E;
+
+/// The finite set of engine-neutral CDP codes this build can decode into `&'static str`.
+/// Unknown future codes are rejected rather than leaked or silently assigned another meaning.
+pub(crate) const CDP_CODES: &[&str] = &[
+    "cdp_port_unavailable",
+    "cdp_connect_failed",
+    "cdp_transport_failed",
+    "cdp_command_failed",
+    "cdp_target_bind_failed",
+    "cdp_platform_unsupported",
+    "cdp_invalid_command",
+];
+
+pub(crate) fn cdp_code_from_name(name: &str) -> Option<&'static str> {
+    CDP_CODES
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == name)
+}
 
 /// Operation name recorded on an error recovered from an unrecognised tag.
 const OPAQUE_OPERATION: &str = "ipc::error::opaque";
@@ -131,7 +151,7 @@ pub(crate) fn io_kind_from_name(name: &str) -> std::io::ErrorKind {
 /// Split out so the tag table stays readable and each variant's field order is obvious at a
 /// glance. The order here is the contract; the decoder below reads it back in exactly this
 /// order.
-fn write_kind_fields(kind: &ErrorKind, out: &mut BufWriter) -> Result<()> {
+fn write_kind_fields(kind: &ErrorKind, tag: u8, out: &mut BufWriter) -> Result<()> {
     match kind {
         ErrorKind::CapabilityDenied {
             capability,
@@ -185,6 +205,10 @@ fn write_kind_fields(kind: &ErrorKind, out: &mut BufWriter) -> Result<()> {
             out.put_str(operation)?;
             out.put_str(reason)?;
         }
+        ErrorKind::Cdp { code, reason } if tag == TAG_CDP => {
+            out.put_str(code)?;
+            out.put_str(reason)?;
+        }
         other => {
             // The non_exhaustive fallback. See `TAG_OPAQUE`.
             out.put_str(&other.to_string())?;
@@ -209,6 +233,7 @@ fn kind_tag(kind: &ErrorKind) -> u8 {
         ErrorKind::Io { .. } => TAG_IO,
         ErrorKind::Codec { .. } => TAG_CODEC,
         ErrorKind::Internal { .. } => TAG_INTERNAL,
+        ErrorKind::Cdp { code, .. } if cdp_code_from_name(code).is_some() => TAG_CDP,
         _ => TAG_OPAQUE,
     }
 }
@@ -268,6 +293,19 @@ fn read_kind_fields(tag: u8, input: &mut BufReader<'_>) -> Result<ErrorKind> {
             operation: input.get_str()?.to_owned(),
             reason: input.get_str()?.to_owned(),
         },
+        TAG_CDP => {
+            let name = input.get_str()?;
+            let code = cdp_code_from_name(name).ok_or_else(|| {
+                NcError::new(ErrorKind::Codec {
+                    operation: "ipc::error::decode".to_owned(),
+                    reason: format!("unknown CDP error code {name}"),
+                })
+            })?;
+            ErrorKind::Cdp {
+                code,
+                reason: input.get_str()?.to_owned(),
+            }
+        }
         TAG_OPAQUE => ErrorKind::Internal {
             operation: OPAQUE_OPERATION.to_owned(),
             reason: input.get_str()?.to_owned(),
@@ -285,8 +323,9 @@ fn read_kind_fields(tag: u8, input: &mut BufReader<'_>) -> Result<ErrorKind> {
 /// Appends `error` to `out` in the error record layout.
 pub(crate) fn write_error(error: &NcError, out: &mut BufWriter) -> Result<()> {
     out.put_u8(ERROR_RECORD_VERSION);
-    out.put_u8(kind_tag(error.kind()));
-    write_kind_fields(error.kind(), out)?;
+    let tag = kind_tag(error.kind());
+    out.put_u8(tag);
+    write_kind_fields(error.kind(), tag, out)?;
     out.put_str(error.operation_name())?;
     match error.correlation() {
         Some(id) => {
@@ -412,6 +451,10 @@ mod tests {
                 operation: "registry::register".to_owned(),
                 reason: "invariant violated".to_owned(),
             },
+            ErrorKind::Cdp {
+                code: "cdp_target_bind_failed",
+                reason: "ambiguous page target".to_owned(),
+            },
         ]
     }
 
@@ -481,6 +524,22 @@ mod tests {
             ErrorKind::Io { io_kind, .. } => assert_eq!(*io_kind, std::io::ErrorKind::Other),
             other => panic!("expected an Io error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_unknown_cdp_code_is_rejected_without_leaking_or_guessing() {
+        let mut writer = BufWriter::new();
+        writer.put_u8(ERROR_RECORD_VERSION);
+        writer.put_u8(TAG_CDP);
+        writer.put_str("cdp_from_a_future_engine").unwrap();
+        writer.put_str("reason").unwrap();
+        writer.put_str("op").unwrap();
+        writer.put_u8(0);
+        let bytes = writer.finish();
+        let mut reader = BufReader::new(&bytes, "ipc::error::test");
+        let error = read_error(&mut reader).expect_err("unknown codes are not static strings");
+        assert!(matches!(error.kind(), ErrorKind::Codec { .. }));
+        assert!(error.to_string().contains("unknown CDP error code"));
     }
 
     #[test]

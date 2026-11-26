@@ -19,9 +19,8 @@ use ncui_runtime::agent::AgentSession;
 use ncui_runtime::dispatch::dispatch;
 use ncui_runtime::rpc::{Request, Response};
 use ncui_security::authz::AgentRole;
-use ncui_webview::ChildWebviewCapable;
 use ncui_webview::HostFactory;
-use ncui_webview_child::{ChildWebviewEntry, ChildWebviewId, ChildWebviewRequest};
+use ncui_webview_child::ChildWebviewRequest;
 use serde_json::{Value, json};
 
 /// A test factory whose hosts always come up alive.
@@ -91,7 +90,7 @@ impl ncui_webview::WebViewBackend for AlwaysAlive {
     fn is_devtools_open(&self) -> Option<bool> {
         Some(false)
     }
-    fn cdp_send(&self, _command: &Value) -> Result<Value, String> {
+    fn cdp_send(&self, _command: &Value) -> Result<Value, ncui_webview::CdpError> {
         // A capture answer carries the payload the method promises, so the window methods
         // that ride this transport see an honest engine answer.
         Ok(serde_json::json!({ "result": { "data": "QUJD" } }))
@@ -99,34 +98,27 @@ impl ncui_webview::WebViewBackend for AlwaysAlive {
     fn drag_window(&self) -> bool {
         true
     }
-}
 
-/// A child-webview engine that accepts every request and records nothing: the
-/// surface sweep only needs the calls to be answered.
-#[derive(Debug)]
-struct AlwaysCapable;
-
-impl ChildWebviewCapable for AlwaysCapable {
-    fn create_child(
+    fn create_child_webview(
         &self,
-        _parent: WindowId,
         _request: &ChildWebviewRequest,
-    ) -> Result<ChildWebviewId, String> {
-        Ok(ChildWebviewId::from_raw(1))
+        _seam: &std::sync::Arc<ncui_webview::HostSeam>,
+        ipc_tx: std::sync::mpsc::SyncSender<ncui_webview::ChildPageMessage>,
+    ) -> Result<u64, String> {
+        drop(ipc_tx);
+        Ok(1)
     }
-    fn set_child_bounds(
+
+    fn set_child_webview_bounds(
         &self,
-        _parent: WindowId,
-        _child: ChildWebviewId,
+        _child: u64,
         _request: &ChildWebviewRequest,
     ) -> Result<(), String> {
         Ok(())
     }
-    fn close_child(&self, _parent: WindowId, _child: ChildWebviewId) -> Result<(), String> {
+
+    fn close_child_webview(&self, _child: u64) -> Result<(), String> {
         Ok(())
-    }
-    fn list_children(&self) -> Vec<ChildWebviewEntry> {
-        Vec::new()
     }
 }
 
@@ -141,8 +133,7 @@ fn runtime() -> Runtime {
                 None,
             )]),
         ))
-        .with_factory(Box::new(AlwaysReady))
-        .with_child_engine(std::sync::Arc::new(AlwaysCapable));
+        .with_factory(Box::new(AlwaysReady));
     runtime
 }
 
@@ -222,11 +213,26 @@ fn params_for(name: &str, created_window: Option<WindowId>) -> Value {
         | "ncui.window.devtools.open"
         | "ncui.window.devtools.close"
         | "ncui.window.devtools.state"
-        | "ncui.window.child.bounds"
-        | "ncui.window.child.close" => json!({ "window": named, "child": "child-1" }),
-        "ncui.window.child.create" | "ncui.window.child.list" => {
-            json!({ "window": named, "url": "https://example.com" })
+        | "ncui.window.child.close" => {
+            json!({ "window": named, "child": "child-0000000000000001" })
         }
+        "ncui.window.child.create" => json!({
+            "window": named,
+            "url": "https://example.com",
+            "x": 10,
+            "y": 10,
+            "width": 400,
+            "height": 300
+        }),
+        "ncui.window.child.bounds" => json!({
+            "window": named,
+            "child": "child-0000000000000001",
+            "x": 20,
+            "y": 20,
+            "width": 320,
+            "height": 240
+        }),
+        "ncui.window.child.list" => json!({}),
         "ncui.window.zoom" => json!({ "window": named, "factor": 1.25 }),
         "ncui.window.print.pdf" | "ncui.window.screenshot" => json!({ "window": named }),
         "ncui.window.post" => json!({ "window": named, "script": "1;" }),
@@ -293,25 +299,20 @@ fn the_advertised_surface_matches_the_enforced_surface() {
                 "`{name}` is advertised as destructive but ran without consent"
             );
 
-            // With a minted consent token it must succeed. The legacy `consent: true`
-            // authorizes nothing destructive; the token is the consent, and it is bound to
-            // the method and the capabilities the method requires.
+            // Mint against the complete operation before adding the token transport field.
+            let mut consent_params = params_for(name, created_window);
             let correlation = CorrelationId::new();
             let requires: CapabilitySet = required.iter().copied().collect();
             let token = runtime
-                .mint_consent(correlation, name, requires)
+                .mint_consent(
+                    correlation,
+                    "integration-agent",
+                    name,
+                    requires,
+                    &consent_params,
+                )
                 .expect("a destructive method's requirements can be minted");
-            let mut consent_params = json!({ "consent_token": token.to_value() });
-            if name == "ncui.cdp.send" {
-                // The CDP seam requires the window and the command it forwards; the
-                // consent alone does not name them.
-                consent_params["window"] = json!(created_window.map_or_else(
-                    || "00000000000000000000000000000001".to_owned(),
-                    |id| id.to_string()
-                ));
-                consent_params["method"] = json!("Page.navigate");
-                consent_params["params"] = json!({ "url": "https://example.com" });
-            }
+            consent_params["consent_token"] = token.to_value();
             let allowed = call(&mut runtime, &mut administrator, name, consent_params);
             assert!(
                 allowed.error.is_none(),
@@ -409,4 +410,161 @@ fn a_rejected_request_does_not_disturb_the_session() {
     )
     .expect("response");
     assert!(allowed.error.is_none(), "{:?}", allowed.error);
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one pipeline test proves every child method and both outcomes without fixture shortcuts"
+)]
+fn child_operations_emit_bounded_method_and_outcome_metrics() {
+    let mut runtime = runtime();
+    let mut administrator = session(AgentRole::Administrator);
+    let created = call(
+        &mut runtime,
+        &mut administrator,
+        "ncui.window.create",
+        json!({ "url": "https://example.com" }),
+    );
+    let window = created.result.expect("window result")["id"]
+        .as_str()
+        .expect("window id")
+        .to_owned();
+
+    let invalid = call(
+        &mut runtime,
+        &mut administrator,
+        "ncui.window.child.create",
+        json!({ "window": window, "url": "", "x": 0, "y": 0, "width": 400, "height": 300 }),
+    );
+    assert!(
+        invalid.error.is_some(),
+        "an empty child URL must be refused"
+    );
+
+    let created = call(
+        &mut runtime,
+        &mut administrator,
+        "ncui.window.child.create",
+        json!({ "window": window, "url": "https://example.com/child", "x": 10, "y": 20, "width": 400, "height": 300 }),
+    );
+    let child = created.result.expect("child result")["child"]
+        .as_str()
+        .expect("child id")
+        .to_owned();
+    assert!(
+        call(
+            &mut runtime,
+            &mut administrator,
+            "ncui.window.child.list",
+            json!({}),
+        )
+        .error
+        .is_none(),
+        "listing a live child must succeed"
+    );
+    assert!(
+        call(
+            &mut runtime,
+            &mut administrator,
+            "ncui.window.child.bounds",
+            json!({ "window": window, "child": child, "x": -1, "y": 40, "width": 320, "height": 240 }),
+        )
+        .error
+        .is_some(),
+        "a negative child coordinate must be refused"
+    );
+    assert!(
+        call(
+            &mut runtime,
+            &mut administrator,
+            "ncui.window.child.bounds",
+            json!({ "window": window, "child": child, "x": 30, "y": 40, "width": 320, "height": 240 }),
+        )
+        .error
+        .is_none(),
+        "moving a live child must succeed"
+    );
+    let close = json!({ "window": window, "child": child });
+    assert!(
+        call(
+            &mut runtime,
+            &mut administrator,
+            "ncui.window.child.close",
+            close.clone(),
+        )
+        .error
+        .is_none(),
+        "closing a live child must succeed"
+    );
+    assert!(
+        call(
+            &mut runtime,
+            &mut administrator,
+            "ncui.window.child.close",
+            close,
+        )
+        .error
+        .is_some(),
+        "closing the same child twice must be refused"
+    );
+
+    let mut observer = session(AgentRole::Observer);
+    assert!(
+        call(
+            &mut runtime,
+            &mut observer,
+            "ncui.window.child.list",
+            json!({}),
+        )
+        .error
+        .is_some(),
+        "an observer must not enumerate child webviews"
+    );
+
+    let snapshot = call(
+        &mut runtime,
+        &mut administrator,
+        "ncui.metrics.query",
+        json!({}),
+    )
+    .result
+    .expect("metrics result");
+    let child_series: Vec<&Value> = snapshot["series"]
+        .as_array()
+        .expect("metric series")
+        .iter()
+        .filter(|series| series["name"] == "window.child_operations")
+        .collect();
+    assert_eq!(
+        child_series.len(),
+        8,
+        "four methods and two outcomes must create exactly eight bounded series"
+    );
+    for (method, outcome, expected) in [
+        ("create", "allowed", 1),
+        ("create", "refused", 1),
+        ("bounds", "allowed", 1),
+        ("bounds", "refused", 1),
+        ("close", "allowed", 1),
+        ("close", "refused", 1),
+        ("list", "allowed", 1),
+        ("list", "refused", 1),
+    ] {
+        let matching: Vec<_> = child_series
+            .iter()
+            .filter(|series| {
+                series["labels"]["method"] == method && series["labels"]["outcome"] == outcome
+            })
+            .collect();
+        assert_eq!(matching.len(), 1, "{method}/{outcome} must be unique");
+        assert_eq!(
+            matching[0]["labels"]
+                .as_object()
+                .map_or(0, serde_json::Map::len),
+            2
+        );
+        let value = matching[0]["value"].as_u64().expect("counter value");
+        assert_eq!(value, expected, "{method}/{outcome}");
+    }
 }

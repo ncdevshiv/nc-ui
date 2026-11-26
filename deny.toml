@@ -62,29 +62,6 @@ allow-wildcard-paths = true
 # collisions without failing the gate on ones already accounted for. Every entry
 # here should be re-reviewed when the pulling subsystems bump versions.
 skip = [
-    # First-party workspace crates come first: their versions are pinned by Cargo.lock,
-    # and they use workspace inheritance, which cargo-deny reports as a wildcard path
-    # because crates.io does not accept path dependencies in published manifests.
-    "ncui-a11y",
-    "ncui-abi",
-    "ncui-app",
-    "ncui-bench",
-    "ncui-cli",
-    "ncui-component",
-    "ncui-core",
-    "ncui-gpu",
-    "ncui-gpu-renderer",
-    "ncui-ipc",
-    "ncui-native",
-    "ncui-observability",
-    "ncui-runtime",
-    "ncui-scheduler",
-    "ncui-security",
-    "ncui-state",
-    "ncui-webview",
-    "ncui-webview-child",
-    "ncui-webview-wry",
-    "ncui-workers",
     "bit-set",
     "bit-vec",
     "bitflags",

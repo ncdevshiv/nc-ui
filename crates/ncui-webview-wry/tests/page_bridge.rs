@@ -17,7 +17,6 @@
     reason = "test assertions must abort loudly on failure"
 )]
 
-use core::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -41,41 +40,6 @@ Promise.all([
   window.ipc.postMessage('ERROR:' + String(error && error.message));
 });
 ";
-
-/// The page, as a data url the engine can load.
-fn page_url() -> String {
-    let mut encoded = String::with_capacity(PAGE_SCRIPT.len() * 3);
-    for byte in PAGE_SCRIPT.bytes() {
-        match byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'/'
-            | b'('
-            | b')'
-            | b'{'
-            | b'}'
-            | b'['
-            | b']'
-            | b':'
-            | b','
-            | b'.'
-            | b'-'
-            | b'_'
-            | b'!'
-            | b'~'
-            | b'*'
-            | b'\'' => {
-                encoded.push(char::from(byte));
-            }
-            _ => {
-                encoded.push('%');
-                let _ = write!(encoded, "{byte:02X}");
-            }
-        }
-    }
-    format!("data:text/html,<html><body><script>{encoded}</script></body></html>")
-}
 
 /// A running seam that declares one read-only action.
 fn running_seam() -> Arc<HostSeam> {
@@ -130,12 +94,17 @@ fn a_real_page_calls_the_bridge_and_receives_its_own_answers() {
     let seam = running_seam();
     let factory = WryHostFactory;
     let host = factory
-        .spawn(WindowId::new(), &WindowRequest::new(page_url()), &seam)
+        .spawn(WindowId::new(), &WindowRequest::new("about:blank"), &seam)
         .expect("a window with a page");
     assert!(
         host.is_alive(),
         "the host must come up: {:?}",
         host.last_error()
+    );
+    // Execute in a normal document rather than relying on a data document's startup order.
+    assert!(
+        host.evaluate_script(PAGE_SCRIPT),
+        "the host must be able to run the page's script"
     );
 
     // The page makes two calls. Both must arrive as requests with distinct ids.

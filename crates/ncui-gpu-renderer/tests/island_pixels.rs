@@ -43,9 +43,10 @@ fn device() -> Option<WgpuDevice> {
     match block_on(WgpuDeviceFactory.create()) {
         Ok(device) => Some(device),
         Err(error) => {
-            // The reason is not printed: the workspace denies `eprintln!`, and a machine with no
-            // adapter is a fact about the machine rather than a test failure.
-            let _ = error;
+            assert!(
+                std::env::var_os("NCUI_REQUIRE_GPU").is_none(),
+                "GPU evidence was required, but no graphics adapter is available: {error}"
+            );
             None
         }
     }

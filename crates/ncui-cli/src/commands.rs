@@ -173,6 +173,54 @@ fn new_app(directory: &str) -> Result<Value, String> {
 /// Without the `wry-host` feature there is no engine to open a window with, and the
 /// command says so rather than serving assets nobody will look at.
 #[cfg(feature = "wry-host")]
+#[derive(Debug)]
+struct ComparisonConsentPrompter;
+
+#[cfg(feature = "wry-host")]
+impl ncui_runtime::consent::ConsentPrompter for ComparisonConsentPrompter {
+    fn confirm(&self, request: &ncui_runtime::consent::ConsentRequest) -> ncui_core::Result<bool> {
+        Ok(comparison_approval_allowed(
+            request.subject(),
+            request.method(),
+            request.capabilities(),
+            request.params(),
+        ))
+    }
+}
+
+#[cfg(feature = "wry-host")]
+fn comparison_approval_allowed(
+    subject: &str,
+    method: &str,
+    capabilities: ncui_core::CapabilitySet,
+    params: &Value,
+) -> bool {
+    if !subject.starts_with("page:") {
+        return false;
+    }
+    let Some(params) = params.as_object() else {
+        return false;
+    };
+    match method {
+        "fs.write_text" => {
+            capabilities
+                == ncui_core::CapabilitySet::empty().with(ncui_core::Capability::FilesystemWrite)
+                && params.len() == 2
+                && params.get("path").and_then(Value::as_str) == Some("bench-result.json")
+                && params.get("text").and_then(Value::as_str).is_some()
+        }
+        "component.open" => {
+            capabilities
+                == ncui_core::CapabilitySet::empty().with(ncui_core::Capability::RunComponents)
+                && params.len() == 2
+                && params.get("name").and_then(Value::as_str) == Some("word_signal")
+                && params.get("artifact").and_then(Value::as_str) == Some("plugins/word_signal.wat")
+        }
+        _ => false,
+    }
+}
+
+#[cfg(feature = "wry-host")]
 fn run_app(
     directory: &str,
     watch: bool,
@@ -184,14 +232,36 @@ fn run_app(
     use ncui_runtime::application::Application;
 
     let directory_path = std::path::Path::new(directory);
+    let install_approval = |runtime: &mut Runtime| {
+        if std::env::var("NCUI_COMPARISON_HOST").as_deref() == Ok("1") {
+            runtime.set_consent_prompter(std::sync::Arc::new(ComparisonConsentPrompter));
+        } else {
+            runtime.set_consent_prompter(std::sync::Arc::new(
+                ncui_runtime::consent::NativeConsentPrompter::new(),
+            ));
+        }
+        Ok(())
+    };
     let mut application = if let Some(port) = port {
-        Application::launch_with_port(directory_path, Limits::default(), port)
-            .map_err(|error| format!("cannot run the application: {error}"))?
-            .with_link(url.map(str::to_owned))
+        Application::launch_with(
+            directory_path,
+            Limits::default(),
+            None,
+            Some(port),
+            install_approval,
+        )
+        .map_err(|error| format!("cannot run the application: {error}"))?
+        .with_link(url.map(str::to_owned))
     } else {
-        Application::launch(directory_path, Limits::default())
-            .map_err(|error| format!("cannot run the application: {error}"))?
-            .with_link(url.map(str::to_owned))
+        Application::launch_with(
+            directory_path,
+            Limits::default(),
+            None,
+            None,
+            install_approval,
+        )
+        .map_err(|error| format!("cannot run the application: {error}"))?
+        .with_link(url.map(str::to_owned))
     };
     if watch {
         application
@@ -714,10 +784,9 @@ fn health(runtime: &Runtime, deep: bool) -> CommandResult {
 
 /// Serves the agent API on loopback.
 ///
-/// The token is generated here rather than read from configuration because this build has
-/// no secret store yet (ADR-007 records OS entropy as unavailable without FFI). It is
-/// printed once, on stderr, and never logged or stored — a token written to a log file is a
-/// token in every backup of that file.
+/// The token is generated from operating-system entropy rather than read from configuration,
+/// because this build has no secret store yet. It is printed once, on stderr, and never logged
+/// or stored — a token written to a log file is a token in every backup of that file.
 fn serve(role: Option<&str>, registry: Option<Value>) -> CommandResult {
     let limits = Limits::default();
     let role = match role {
@@ -751,6 +820,9 @@ fn serve(role: Option<&str>, registry: Option<Value>) -> CommandResult {
         #[cfg(feature = "wry-host")]
         {
             runtime = runtime
+                .with_consent_prompter(std::sync::Arc::new(
+                    ncui_runtime::consent::NativeConsentPrompter::new(),
+                ))
                 .with_host(&ncui_runtime::window::hosted_origins())
                 .map_err(|error| format!("cannot install the window host: {error}"))?;
         }
@@ -992,6 +1064,72 @@ mod tests {
         );
         assert_eq!(payload["features_absent"], json!(["gpu.islands"]));
         assert_eq!(payload["registry_loaded"], true);
+    }
+
+    #[cfg(feature = "wry-host")]
+    #[test]
+    fn comparison_approval_is_limited_to_unmeasured_setup_and_result_writes() {
+        use ncui_core::{Capability, CapabilitySet};
+
+        let write = CapabilitySet::empty().with(Capability::FilesystemWrite);
+        let components = CapabilitySet::empty().with(Capability::RunComponents);
+        for (subject, method, capabilities, params, expected) in [
+            (
+                "page:00000000000000000000000000000001",
+                "fs.write_text",
+                write,
+                json!({ "path": "bench-result.json", "text": "{}" }),
+                true,
+            ),
+            (
+                "page:00000000000000000000000000000001",
+                "component.open",
+                components,
+                json!({ "name": "word_signal", "artifact": "plugins/word_signal.wat" }),
+                true,
+            ),
+            (
+                "tcp-1",
+                "fs.write_text",
+                write,
+                json!({ "path": "bench-result.json", "text": "{}" }),
+                false,
+            ),
+            (
+                "page:00000000000000000000000000000001",
+                "fs.write_text",
+                write,
+                json!({ "path": "other.txt", "text": "{}" }),
+                false,
+            ),
+            (
+                "page:00000000000000000000000000000001",
+                "fs.write_text",
+                write,
+                json!({ "path": "bench-result.json", "text": "{}", "extra": true }),
+                false,
+            ),
+            (
+                "page:00000000000000000000000000000001",
+                "component.open",
+                components,
+                json!({ "name": "word_signal", "artifact": "plugins/other.wat" }),
+                false,
+            ),
+            (
+                "page:00000000000000000000000000000001",
+                "component.invoke",
+                components,
+                json!({ "name": "word_signal", "method": "return_string" }),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                comparison_approval_allowed(subject, method, capabilities, &params),
+                expected,
+                "{method} with {params} must be {expected}"
+            );
+        }
     }
 
     #[test]

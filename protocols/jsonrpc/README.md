@@ -90,7 +90,7 @@ behind it, which is why `protocol_conformance.rs` checks this table against the 
 
 | Parameter | Methods | Meaning |
 | --- | --- | --- |
-| `consent` | every destructive method | The caller states that it means to do the thing; absent is treated as withholding it |
+| `consent_token` | every destructive method | A host-issued, consume-once approval bound to the authenticated subject, method, capabilities and exact operation parameters |
 | `deadline_ms` | every method | The budget the caller gives the call, in milliseconds |
 | `deep` | `ncui.health` | Ask every subsystem for its detail rather than a summary |
 | `limit` | every method that returns a collection | How many records to return: 100 by default, 10 000 at most |
@@ -107,6 +107,28 @@ behind it, which is why `protocol_conformance.rs` checks this table against the 
 | `script` | `ncui.window.post` | The script to evaluate in the page |
 | `landscape`, `print_background`, `scale`, `paper_width`, `paper_height` | `ncui.window.print_to_pdf` | The print options the engine accepts: orientation, page backgrounds, a scale between 0.1 and 2.0, and paper size in inches between 1 and 100 |
 | `format`, `quality` | `ncui.window.screenshot` | The image format (`png` or `jpeg`) and, for JPEG, a quality between 0 and 100 |
+
+### Consent and host approval
+
+Standing capability authorization and per-call destructive consent are separate gates. A destructive
+method is served only after the host approves the exact operation, either by installing a real
+confirmation surface or by supplying a token it minted after obtaining that approval. The legacy
+`consent` boolean authorizes nothing. There is no client-callable mint method: `ncui.consent.mint`
+was removed and returns `not_found`.
+
+A `consent_token` carries the logical-operation correlation, authenticated subject, method,
+capability set, SHA-256 digest of the normalized parameters and a 128-bit nonce. The runtime's
+ledger, not the token JSON, proves issuance and one-time use. The digest covers every operation
+parameter and excludes only the reserved `consent_token` and legacy `consent` transport fields.
+Changing the subject, correlation, method, required capabilities or parameters refuses the token;
+a refused attempt does not spend it, and a successful destructive call spends it once.
+
+Agent subjects name the authenticated session; socket subjects name the individual connection
+(`tcp-{connection_id}`), and page subjects name the window (`page:{target}`). Without a supplied
+token, the runtime rate-limits and authorizes the caller before prompting. Prompt text contains the
+subject, method, required capabilities and complete normalized parameters; oversized operation
+details are refused rather than truncated. A malformed, mismatched, replayed or wrong-subject token
+never falls back to a prompt. The token's correlation is used for the request's audit event.
 
 ### Error codes
 
@@ -132,7 +154,8 @@ surface.
 
 Every method declares the capability it requires. A method whose required capability is not
 held returns `-32001` and performs no work. A method marked **destructive** additionally
-requires explicit `consent: true` in its `params`; the default is refusal.
+requires exact host approval, represented by a valid `consent_token` or an installed native
+confirmation surface; the default is refusal.
 
 ### Implemented
 
@@ -148,7 +171,7 @@ is the one actually enforced.
 | `ncui.workers.inspect` | `inspect.runtime` | no | Worker lifecycle, queue depth and task counters |
 | `ncui.scheduler.inspect` | `inspect.runtime` | no | Ready-queue depth against capacity |
 | `ncui.logs.query` | `read.logs` | no | Bounded log ring, filtered by level and correlation |
-| `ncui.logs.purge` | `read.logs` | **yes** | Discards the log ring; requires `consent: true` |
+| `ncui.logs.purge` | `read.logs` | **yes** | Discards the log ring; requires exact host approval |
 | `ncui.metrics.query` | `read.metrics` | no | Metric snapshot with percentiles |
 | `ncui.window.list` | `inspect.runtime` | no | Every open window, with its lifecycle state and page grant |
 | `ncui.window.create` | `window` | no | Open a window on a URL; requires a host to be installed |
@@ -181,8 +204,7 @@ is the one actually enforced.
 | `ncui.app.emit` | `window` | no | Emit an application-defined event to a window's page (deep links, notification clicks, custom events) |
 | `ncui.window.drag.region` | `window` | no | Initiate a window drag from a drag region (titlebar) |
 | `ncui.window.create.child` | `window` | no | Open a child window with a narrowed grant |
-| `ncui.cdp.send` | `cdp` | **yes** | Send a CDP command to a child webview |
-| `ncui.consent.mint` | `inspect.runtime` | no | Mint a consent token for a destructive method |
+| `ncui.cdp.send` | `cdp` | **yes** | Send a CDP command to a window's own page target; requires exact host approval |
 | `ncui.trace.start` | `inspect.runtime` | no | Begin verbose tracing of operations |
 | `ncui.trace.stop` | `inspect.runtime` | no | End verbose tracing of operations |
 | `ncui.profile.start` | `inspect.runtime` | no | Begin profiling: record per-method timing |
@@ -253,8 +275,8 @@ bounded by one.
 
 Every method invocation produces an audit event containing `agent_id`, `request_id`,
 `correlation`, `method`, `target`, `result`, and the capabilities used. Destructive actions
-require an explicit `consent: true` field in `params`; holding the capability is necessary
-but not sufficient (ADR-007).
+require exact host approval as well as the standing capability; a supplied token's correlation
+identifies the audited logical operation (ADR-007).
 
 ## Versioning
 

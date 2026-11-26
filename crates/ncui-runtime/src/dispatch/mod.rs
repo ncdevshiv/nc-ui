@@ -21,7 +21,6 @@ use ncui_core::error::validation;
 use ncui_core::{Capability, CapabilitySet, CorrelationId, ErrorKind, NcError, Result};
 use ncui_security::audit::AuditEvent;
 use ncui_security::audit::AuditOutcome;
-use ncui_security::authz::Authorizer;
 use serde_json::{Value, json};
 
 use self::cargo::{invoke_benchmark_run, invoke_test_run};
@@ -31,21 +30,21 @@ use crate::describe::{MethodDescription, describe};
 use crate::health;
 use crate::rpc::{Request, Response};
 
-pub(crate) use self::params::json_error;
+pub(crate) use self::params::{consent_token_param, json_error};
 mod cargo;
 mod cdp_handler;
 mod params;
 
 use self::cdp_handler::invoke_cdp_send;
 use self::params::{
-    consent_token_param, deadline_param, enforce_deadline, grant_param, invoke_app_emit,
-    invoke_component_inspect, invoke_consent_mint, invoke_devtools_events, invoke_devtools_profile,
-    invoke_devtools_tree, invoke_logs_query, invoke_state_inspect, invoke_window_child_bounds,
-    invoke_window_child_close, invoke_window_child_create, invoke_window_child_list,
-    invoke_window_devtools_close, invoke_window_devtools_open, invoke_window_devtools_state,
-    invoke_window_drag_region, invoke_window_post, invoke_window_print_to_pdf,
-    invoke_window_screenshot, invoke_window_zoom, remembered_place, window_change_param,
-    window_id_param, window_rejection, window_request_param, window_shape_param,
+    deadline_param, enforce_deadline, grant_param, invoke_app_emit, invoke_component_inspect,
+    invoke_devtools_events, invoke_devtools_profile, invoke_devtools_tree, invoke_logs_query,
+    invoke_state_inspect, invoke_window_child_bounds, invoke_window_child_close,
+    invoke_window_child_create, invoke_window_child_list, invoke_window_devtools_close,
+    invoke_window_devtools_open, invoke_window_devtools_state, invoke_window_drag_region,
+    invoke_window_post, invoke_window_print_to_pdf, invoke_window_screenshot, invoke_window_zoom,
+    remembered_place, window_change_param, window_id_param, window_rejection, window_request_param,
+    window_shape_param,
 };
 
 /// The methods this runtime implements, with the authority each one needs.
@@ -334,12 +333,6 @@ pub fn method_table() -> Vec<MethodDescription> {
             false,
         ),
         entry(
-            "ncui.consent.mint",
-            "Mint a consent token for a destructive method. The token is bound to the calling session and must be presented as `consent_token` in the payload of the destructive call.",
-            inspect,
-            false,
-        ),
-        entry(
             "ncui.cdp.send",
             "Send a CDP (Chrome DevTools Protocol) command to a child webview. Requires Capability::Cdp. The command is forwarded to the target window's webview engine.",
             CapabilitySet::empty().with(Capability::Cdp),
@@ -418,7 +411,7 @@ fn run_pipeline(
     feature_registry: Option<&Value>,
     table: &[MethodDescription],
 ) -> Result<Value> {
-    let correlation = CorrelationId::new();
+    let mut correlation = CorrelationId::new();
 
     // The request shape the specification states: `params` is an object or absent. A positional list
     // is refused rather than read as "no parameters" — a caller that sent one would otherwise be told
@@ -444,62 +437,23 @@ fn run_pipeline(
 
     let deadline = deadline_param(&request.params)?;
 
-    let consent_token = consent_token_param(&request.params)?;
-
     let started = Instant::now();
     let outcome = (|| -> Result<Value> {
         session.rate_limit(now, 1)?;
-        session.authorize(method.requires)?;
-        if method.destructive {
-            // A destructive method requires a minted token: a bare `consent: true`
-            // authorizes nothing. The token is bound to the correlation, method, and
-            // capability recorded at mint time; validation checks the presented
-            // token against that recorded binding and the requested method, then
-            // spends the nonce. The pipeline correlation (fresh per call, used for
-            // audit and error correlation) is distinct from the token's
-            // mint-time correlation: the token proves the user approved the
-            // operation that was minted, not this particular dispatch's fresh id.
-            let Some(token) = consent_token.as_ref() else {
-                return Err(NcError::new(ErrorKind::CapabilityDenied {
-                    capability: "consent_token".to_owned(),
-                    subject: session.agent_id.clone(),
-                })
-                .operation("dispatch::consent")
-                .correlated(correlation));
-            };
-            let bound_correlation = token.correlation();
-            if !token.matches(bound_correlation, &request.method, method.requires) {
-                return Err(NcError::new(ErrorKind::CapabilityDenied {
-                    capability: "consent_token".to_owned(),
-                    subject: session.agent_id.clone(),
-                })
-                .operation("dispatch::consent")
-                .correlated(correlation));
-            }
-            // The pure predicate is checked first so a mismatched token is refused
-            // even when an agent holds the capability; ledger spend is second.
-            Authorizer.require_destructive_with_token(
-                &session.agent_id,
-                method.requires,
-                session.granted,
-                Some(token),
-                bound_correlation,
-                &request.method,
-            )?;
-            runtime.consume_consent(token, bound_correlation, &request.method, method.requires)?;
-        } else if let Some(token) = consent_token.as_ref() {
-            // A token on a non-destructive method is validated for shape but
-            // spends nothing: there is nothing to consent to.
-            let bound_correlation = token.correlation();
-            Authorizer.require_destructive_with_token(
-                &session.agent_id,
-                method.requires,
-                session.granted,
-                Some(token),
-                bound_correlation,
-                &request.method,
-            )?;
+        let consent_token = consent_token_param(&request.params)?;
+        if let Some(token) = &consent_token {
+            correlation = token.correlation();
         }
+        crate::consent::resolve(
+            runtime,
+            session,
+            &request.method,
+            method.requires,
+            method.destructive,
+            &request.params,
+            consent_token.as_ref(),
+            correlation,
+        )?;
         invoke(runtime, session, method, request, feature_registry)
     })();
 
@@ -531,6 +485,8 @@ fn run_pipeline(
         correlation,
     );
 
+    observe_child_operation(runtime, &request.method, outcome.is_ok(), correlation);
+
     // Record profiling data when profiling is active.
     if runtime.profiling_active {
         let elapsed = started.elapsed();
@@ -548,6 +504,36 @@ fn run_pipeline(
             Err(error.correlated(correlation).operation(operation))
         }
     }
+}
+
+fn observe_child_operation(
+    runtime: &Runtime,
+    method: &str,
+    succeeded: bool,
+    correlation: CorrelationId,
+) {
+    let operation = match method {
+        "ncui.window.child.create" => "create",
+        "ncui.window.child.bounds" => "bounds",
+        "ncui.window.child.close" => "close",
+        "ncui.window.child.list" => "list",
+        _ => return,
+    };
+    let outcome = if succeeded { "allowed" } else { "refused" };
+    if let Ok(labels) = ncui_observability::metrics::Labels::from_pairs([
+        ("method", operation),
+        ("outcome", outcome),
+    ]) {
+        let _ = runtime
+            .metrics
+            .counter_inc("window.child_operations", &labels, 1);
+    }
+    tracing::info!(
+        %correlation,
+        method = operation,
+        outcome,
+        "child webview operation completed"
+    );
 }
 
 #[allow(
@@ -863,7 +849,6 @@ fn invoke(
             runtime.devtools.reset_profile();
             serde_json::to_value(json!({ "reset": true })).map_err(|e| json_error(&e))
         }
-        "ncui.consent.mint" => invoke_consent_mint(runtime, session, &request.params),
         "ncui.cdp.send" => invoke_cdp_send(runtime, &request.params),
         "ncui.devtools.summary" => {
             serde_json::to_value(runtime.devtools.summary()).map_err(|e| json_error(&e))
@@ -890,6 +875,29 @@ mod tests {
     use ncui_core::WindowId;
     use ncui_observability::logring::{LogLevel, LogRecord};
     use ncui_security::authz::{AgentRole, ConsentToken};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct CountingPrompter {
+        calls: AtomicUsize,
+    }
+
+    impl crate::consent::ConsentPrompter for CountingPrompter {
+        fn confirm(&self, _request: &crate::consent::ConsentRequest) -> Result<bool> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
+        }
+    }
+
+    fn runtime_with_counting_prompter() -> (Runtime, Arc<CountingPrompter>) {
+        let prompter = Arc::new(CountingPrompter {
+            calls: AtomicUsize::new(0),
+        });
+        let approval_surface = Arc::clone(&prompter) as Arc<dyn crate::consent::ConsentPrompter>;
+        let runtime = runtime().with_consent_prompter(approval_surface);
+        (runtime, prompter)
+    }
 
     fn runtime() -> Runtime {
         Runtime::start(Limits::default()).expect("runtime")
@@ -918,6 +926,28 @@ mod tests {
         let request = Request::new(json!(1), method, params);
         dispatch(runtime, session, &request, Duration::from_secs(0), None)
             .expect("a call is not a notification")
+    }
+
+    fn bind_test_consent(
+        runtime: &mut Runtime,
+        session: &AgentSession,
+        method: &MethodDescription,
+        mut params: Value,
+    ) -> Value {
+        let token = runtime
+            .mint_consent(
+                CorrelationId::new(),
+                &session.agent_id,
+                &method.name,
+                method.requires,
+                &params,
+            )
+            .expect("mint exact test consent");
+        let Value::Object(operation) = &mut params else {
+            panic!("test consent is bound to object parameters");
+        };
+        operation.insert("consent_token".to_owned(), token.to_value());
+        params
     }
 
     #[test]
@@ -1132,8 +1162,7 @@ mod tests {
                             None,
                         )]),
                     ))
-                    .with_factory(Box::new(AlwaysReady))
-                    .with_child_engine(std::sync::Arc::new(AlwaysReadyChildren));
+                    .with_factory(Box::new(AlwaysReady));
             }
             let mut session = session(*role);
             let mut created_window: Option<WindowId> = None;
@@ -1142,30 +1171,19 @@ mod tests {
                     continue;
                 }
                 let params = if method.destructive {
-                    let correlation = CorrelationId::new();
-                    let token = runtime
-                        .mint_consent(correlation, &method.name, method.requires)
-                        .expect("mint");
-                    let mut params = json!({ "consent_token": token.to_value() });
-                    if method.name == "ncui.cdp.send" {
-                        // The CDP seam requires the window and the command it
-                        // forwards; the consent alone does not name them.
-                        if let Some(object) = params.as_object_mut() {
-                            object.insert(
-                                "window".to_owned(),
-                                json!(created_window.map_or_else(
-                                    || "00000000000000000000000000000001".to_owned(),
-                                    |id| id.to_string()
-                                )),
-                            );
-                            object.insert("method".to_owned(), json!("Page.navigate"));
-                            object.insert(
-                                "params".to_owned(),
-                                json!({ "url": "https://example.com" }),
-                            );
-                        }
-                    }
-                    params
+                    let operation = if method.name == "ncui.cdp.send" {
+                        json!({
+                            "window": created_window.map_or_else(
+                                || "00000000000000000000000000000001".to_owned(),
+                                |id| id.to_string()
+                            ),
+                            "method": "Page.navigate",
+                            "params": { "url": "https://example.com" },
+                        })
+                    } else {
+                        json!({})
+                    };
+                    bind_test_consent(&mut runtime, &session, &method, operation)
                 } else {
                     match method.name.as_str() {
                         "ncui.window.create" | "ncui.window.create.child" => {
@@ -1219,25 +1237,22 @@ mod tests {
                         "ncui.window.child.bounds" => match created_window {
                             Some(id) => json!({
                                 "window": id.to_string(),
-                                "child": "child-1",
+                                "child": "child-0000000000000001",
                                 "x": 0, "y": 0, "width": 320, "height": 240,
                             }),
                             None => json!({ "window": "00000000000000000000000000000001" }),
                         },
                         "ncui.window.child.close" => match created_window {
-                            Some(id) => json!({ "window": id.to_string(), "child": "child-1" }),
+                            Some(id) => {
+                                json!({ "window": id.to_string(), "child": "child-0000000000000001" })
+                            }
                             None => json!({ "window": "00000000000000000000000000000001" }),
                         },
-                        "ncui.window.child.list" => json!({}),
                         "ncui.window.shape" => match created_window {
                             Some(id) => json!({ "window": id.to_string(), "title": "renamed" }),
                             None => json!({ "window": "00000000000000000000000000000001" }),
                         },
-                        "ncui.consent.mint" => json!({
-                            "method": "fs.write_text",
-                            "capability": "filesystem.write"
-                        }),
-                        _ => json!({ "consent": true }),
+                        _ => json!({}),
                     }
                 };
                 let request = Request::new(json!(1), &method.name, params);
@@ -1503,8 +1518,7 @@ mod tests {
                     None,
                 )]),
             ))
-            .with_factory(Box::new(AlwaysReady))
-            .with_child_engine(std::sync::Arc::new(AlwaysReadyChildren));
+            .with_factory(Box::new(AlwaysReady));
         let mut session = session(AgentRole::Administrator);
         let registry = json!({ "schema_version": 1, "features": [] });
         // `ncui.window.create` is listed before `ncui.window.close`, so its id can be reused.
@@ -1561,27 +1575,19 @@ mod tests {
                 continue;
             }
             let params = if method.destructive {
-                let correlation = CorrelationId::new();
-                let token = runtime
-                    .mint_consent(correlation, &method.name, method.requires)
-                    .expect("mint");
-                let mut params = json!({ "consent_token": token.to_value() });
-                if method.name == "ncui.cdp.send" {
-                    // The CDP seam requires the window and the command it forwards;
-                    // the consent alone does not name them.
-                    if let Some(object) = params.as_object_mut() {
-                        object.insert(
-                            "window".to_owned(),
-                            json!(created_window.map_or_else(
-                                || "00000000000000000000000000000001".to_owned(),
-                                |id| id.to_string()
-                            )),
-                        );
-                        object.insert("method".to_owned(), json!("Page.navigate"));
-                        object.insert("params".to_owned(), json!({ "url": "https://example.com" }));
-                    }
-                }
-                params
+                let operation = if method.name == "ncui.cdp.send" {
+                    json!({
+                        "window": created_window.map_or_else(
+                            || "00000000000000000000000000000001".to_owned(),
+                            |id| id.to_string()
+                        ),
+                        "method": "Page.navigate",
+                        "params": { "url": "https://example.com" },
+                    })
+                } else {
+                    json!({})
+                };
+                bind_test_consent(&mut runtime, &session, &method, operation)
             } else {
                 match method.name.as_str() {
                     "ncui.window.create" | "ncui.window.create.child" => {
@@ -1626,14 +1632,14 @@ mod tests {
                         "window": created_window
                             .expect("create is listed before child.bounds")
                             .to_string(),
-                        "child": "child-1",
+                        "child": "child-0000000000000001",
                         "x": 0, "y": 0, "width": 320, "height": 240,
                     }),
                     "ncui.window.child.close" => json!({
                         "window": created_window
                             .expect("create is listed before child.close")
                             .to_string(),
-                        "child": "child-1",
+                        "child": "child-0000000000000001",
                     }),
                     "ncui.window.child.list" => json!({}),
                     "ncui.window.zoom" => json!({
@@ -1672,12 +1678,12 @@ mod tests {
                         "title": "renamed",
                     }),
                     "ncui.test.run" => {
-                        json!({ "package": "ncui-core", "filter": "ids_round_trip", "consent": true })
+                        json!({ "package": "ncui-core", "filter": "ids_round_trip" })
                     }
                     "ncui.benchmark.run" => {
-                        json!({ "package": "ncui-bench", "filter": "core_operations", "consent": true })
+                        json!({ "package": "ncui-bench", "filter": "core_operations" })
                     }
-                    _ => json!({ "deep": true, "consent": true }),
+                    _ => json!({ "deep": true }),
                 }
             };
             let request = Request::new(json!(1), &method.name, params);
@@ -1737,12 +1743,7 @@ mod tests {
         runtime.bench_allowed = false;
         let mut session = session(AgentRole::Administrator);
         for method in ["ncui.test.run", "ncui.benchmark.run"] {
-            let response = call(
-                &mut runtime,
-                &mut session,
-                method,
-                json!({ "consent": true }),
-            );
+            let response = call(&mut runtime, &mut session, method, json!({}));
             let error = response.error.expect("the guard refuses a nested build");
             assert_eq!(error.data.ncui_code, "validation", "{method}: {error:?}");
             assert!(
@@ -1815,41 +1816,6 @@ mod tests {
 
     /// A test factory whose hosts always come up alive.
     #[derive(Debug, Default)]
-    /// A child-webview engine for the dispatch tests: it accepts every child
-    /// request so the advertised child methods reach their handlers.
-    struct AlwaysReadyChildren;
-
-    impl ncui_webview::ChildWebviewCapable for AlwaysReadyChildren {
-        fn create_child(
-            &self,
-            _parent: WindowId,
-            _request: &ncui_webview_child::ChildWebviewRequest,
-        ) -> Result<ncui_webview_child::ChildWebviewId, String> {
-            Ok(ncui_webview_child::ChildWebviewId::from_raw(1))
-        }
-
-        fn set_child_bounds(
-            &self,
-            _parent: WindowId,
-            _child: ncui_webview_child::ChildWebviewId,
-            _request: &ncui_webview_child::ChildWebviewRequest,
-        ) -> Result<(), String> {
-            Ok(())
-        }
-
-        fn close_child(
-            &self,
-            _parent: WindowId,
-            _child: ncui_webview_child::ChildWebviewId,
-        ) -> Result<(), String> {
-            Ok(())
-        }
-
-        fn list_children(&self) -> Vec<ncui_webview_child::ChildWebviewEntry> {
-            Vec::new()
-        }
-    }
-
     struct AlwaysReady;
 
     impl ncui_webview::HostFactory for AlwaysReady {
@@ -1857,7 +1823,7 @@ mod tests {
             &self,
             _window: WindowId,
             _request: &ncui_webview::WindowRequest,
-            _seam: &std::sync::Arc<ncui_webview::HostSeam>,
+            _seam: &Arc<ncui_webview::HostSeam>,
         ) -> Option<Box<dyn ncui_webview::WebViewBackend>> {
             Some(Box::new(AlwaysAlive))
         }
@@ -1889,7 +1855,7 @@ mod tests {
             Some(false)
         }
 
-        fn cdp_send(&self, _command: &Value) -> Result<Value, String> {
+        fn cdp_send(&self, _command: &Value) -> Result<Value, ncui_webview::CdpError> {
             // A capture answer carries the payload the method promises, so the window
             // methods that ride this transport see an honest engine answer.
             Ok(serde_json::json!({ "result": { "data": "QUJD" } }))
@@ -1929,6 +1895,28 @@ mod tests {
         fn drag_window(&self) -> bool {
             true
         }
+
+        fn create_child_webview(
+            &self,
+            _request: &ncui_webview_child::ChildWebviewRequest,
+            _seam: &Arc<ncui_webview::HostSeam>,
+            ipc_tx: std::sync::mpsc::SyncSender<ncui_webview::ChildPageMessage>,
+        ) -> Result<u64, String> {
+            drop(ipc_tx);
+            Ok(1)
+        }
+
+        fn set_child_webview_bounds(
+            &self,
+            _child: u64,
+            _request: &ncui_webview_child::ChildWebviewRequest,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn close_child_webview(&self, _child: u64) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -1947,19 +1935,96 @@ mod tests {
     }
 
     #[test]
+    fn a_rate_limited_agent_is_refused_before_the_host_is_prompted() {
+        let (mut runtime, prompter) = runtime_with_counting_prompter();
+        let mut session =
+            AgentSession::new("agent-test", AgentRole::Administrator, 1, 1).expect("session");
+        session
+            .authenticate(&test_token(), &test_token())
+            .expect("authenticates");
+        assert!(
+            call(&mut runtime, &mut session, "ncui.health", json!({}))
+                .error
+                .is_none()
+        );
+        let response = call(&mut runtime, &mut session, "ncui.logs.purge", json!({}));
+        assert_eq!(
+            response.error.expect("error").data.ncui_code,
+            "limit_exceeded"
+        );
+        assert_eq!(
+            prompter.calls.load(Ordering::SeqCst),
+            0,
+            "rate limiting must happen before confirmation"
+        );
+    }
+
+    #[test]
+    fn a_missing_standing_capability_is_denied_before_the_host_is_prompted() {
+        let (mut runtime, prompter) = runtime_with_counting_prompter();
+        let mut session = session(AgentRole::Developer);
+        let request = Request::new(json!(1), "ncui.data.purge", json!({}));
+        let response = dispatch_with(
+            &mut runtime,
+            &mut session,
+            &request,
+            Duration::from_secs(0),
+            None,
+            &gated_table(),
+        )
+        .expect("response");
+        assert_eq!(
+            response.error.expect("error").data.ncui_code,
+            "capability_denied"
+        );
+        assert_eq!(
+            prompter.calls.load(Ordering::SeqCst),
+            0,
+            "standing authorization must happen before confirmation"
+        );
+    }
+
+    #[test]
+    fn a_forged_agent_token_never_falls_back_to_a_host_prompt() {
+        let (mut runtime, prompter) = runtime_with_counting_prompter();
+        let mut session = session(AgentRole::Administrator);
+        let forged = ConsentToken::mint(
+            CorrelationId::new(),
+            &session.agent_id,
+            "ncui.logs.purge",
+            CapabilitySet::empty().with(Capability::ReadLogs),
+            ncui_security::authz::consent_payload_digest(&json!({})).expect("digest"),
+            0xdead_beef,
+        );
+        let response = call(
+            &mut runtime,
+            &mut session,
+            "ncui.logs.purge",
+            json!({ "consent_token": forged.to_value() }),
+        );
+        assert_eq!(
+            response.error.expect("error").data.ncui_code,
+            "capability_denied"
+        );
+        assert_eq!(
+            prompter.calls.load(Ordering::SeqCst),
+            0,
+            "a supplied-token failure must not fall back to confirmation"
+        );
+    }
+
+    #[test]
     fn a_token_reused_for_a_different_method_is_refused() {
         let mut runtime = runtime();
         let mut session = session(AgentRole::Administrator);
-        let correlation = CorrelationId::new();
+        let params = json!({});
         let token = runtime
             .mint_consent(
-                correlation,
+                CorrelationId::new(),
+                &session.agent_id,
                 "ncui.logs.purge",
-                method_table()
-                    .iter()
-                    .find(|m| m.name == "ncui.logs.purge")
-                    .expect("p")
-                    .requires,
+                CapabilitySet::empty().with(Capability::ReadLogs),
+                &params,
             )
             .expect("mint");
         // Present the purge token for a different destructive method.
@@ -1989,9 +2054,15 @@ mod tests {
         let mut runtime = runtime();
         let mut session = session(AgentRole::Administrator);
         let requires = CapabilitySet::empty().with(Capability::ReadLogs);
-        let correlation = CorrelationId::new();
+        let params = json!({});
         let token = runtime
-            .mint_consent(correlation, "ncui.logs.purge", requires)
+            .mint_consent(
+                CorrelationId::new(),
+                &session.agent_id,
+                "ncui.logs.purge",
+                requires,
+                &params,
+            )
             .expect("mint");
         let value = token.to_value();
         let first = call(
@@ -2019,8 +2090,10 @@ mod tests {
         // Well-formed JSON, but the nonce was never minted here.
         let forged = ConsentToken::mint(
             correlation,
+            &session.agent_id,
             "ncui.logs.purge",
             CapabilitySet::empty().with(Capability::ReadLogs),
+            ncui_security::authz::consent_payload_digest(&json!({})).expect("digest"),
             0xdead_beef,
         );
         let response = call(

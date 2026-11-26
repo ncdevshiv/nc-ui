@@ -616,9 +616,13 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn a_real_notification_is_accepted_by_the_platform() {
+        #[cfg(target_os = "linux")]
+        if std::env::var_os("NCUI_REQUIRE_NOTIFICATION").is_none() {
+            return;
+        }
         // The end of the chain this module can verify on a machine with no eyes on it: the
         // platform's own API accepted the notification. Whether the user then sees it depends on
         // do-not-disturb and on the identity, which is why the module documents that.

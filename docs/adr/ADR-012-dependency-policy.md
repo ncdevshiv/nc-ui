@@ -1,6 +1,6 @@
 # ADR-012: Dependency policy
 
-**Status:** Accepted · **Date:** 2026-10-01 · **Amended:** 2026-10-16, 2026-10-23
+**Status:** Accepted · **Date:** 2026-10-01 · **Amended:** 2026-10-16, 2026-10-23, 2026-11-24
 
 ## Context
 NC-UI links a WebView and drives a GPU driver. A compromised transitive dependency in that
@@ -16,7 +16,8 @@ machine-checked:
 - known vulnerabilities and yanked versions are **denied**;
 - the licence allow-list is explicit, so a copyleft or unknown licence surfaces during CI rather
   than at release;
-- `unsafe_code` is **forbidden** in the runtime workspace.
+- `unsafe_code` is **forbidden** in the runtime workspace, except the one package-scoped Windows
+  menu attachment recorded in the ninth exception below.
 
 The count and shape of dependencies is a reviewable property. When a subsystem can be built on
 `std`, it is built on `std`.
@@ -103,9 +104,11 @@ The lockfile is committed, so the resolution is reproducible. It is recorded her
 is not obvious: a future `cargo update` will break the build, and the error it produces —
 "expected `ID3D12Device`, found `Direct3D12::ID3D12Device`" — says nothing about versions.
 
-## The third exception: `wry` and `tao`
+## The third exception: `wry`, `tao` and the Linux GTK container
 
-`ncui-webview-wry` depends on `wry` and `tao`, and nothing else in the workspace does.
+`ncui-webview-wry` depends on `wry` and `tao`, and nothing else in the workspace does. On Linux
+it also depends directly on the matching `gtk` bindings for one purpose: owning the `GtkFixed`
+container in which an embedded child webview is placed.
 
 The reason is the same shape as `wgpu`'s. A desktop runtime that cannot open a window is not
 a desktop runtime, and no `std` API opens one. `wry` is the WebView embedding layer and
@@ -117,7 +120,17 @@ compiles on a machine with no display and no `webkit2gtk`. On Linux the `webkit2
 development package is needed to build the feature, which is recorded here because it is the
 kind of thing that fails at build time rather than at review time.
 
-Both crates perform FFI internally, so this project's own code remains free of `unsafe`.
+Wry's raw-handle child API is X11-only, so the Linux child path uses wry's safe `build_gtk`
+entry point with a `GtkFixed` parent instead. That is the supported route for both X11 and
+Wayland; it also lets the adapter move the child with `GtkFixed::move_`, which wry's
+`set_bounds` alone does not do for a fixed parent. `gtk` was already in the locked tree through
+wry, and the direct edge uses that same version rather than adding a second binding stack.
+
+All three perform FFI internally; the adapter itself uses their safe APIs. The separate `gtk`
+binding is MIT-licensed, matching the allow-list, and remains pinned to the unmaintained 0.18 line
+already required by this wry version. Upgrading that line requires a coordinated wry/GTK migration
+rather than silently introducing a second binding stack. First-party `unsafe` is limited to the
+ninth exception below.
 
 ## The fourth exception: `rustybuzz`
 
@@ -268,6 +281,59 @@ same place the notification and clipboard calls run. The one step a test cannot 
 real modal open, because a test has no person; that is recorded in `docs/known-gaps.md` as a
 one-time human verification rather than claimed as automated.
 
+## The ninth exception: `muda`
+
+`ncui-webview-wry` depends on `muda`, and nothing else in the workspace does.
+
+The reason is specific. A native menu bar is application chrome the platform draws and dispatches;
+`std` exposes no API for one. The platform calls are `SetMenu`/`DrawMenuBar` on Windows,
+`gtk_container_add` on Linux and AppKit's menu objects on macOS. Hand-rolling those bindings would
+still require `unsafe`, and would add a second implementation of platform menu lifetime and event
+routing to the one place where a mistake can outlive the window that owns it.
+
+The alternatives were all worse than adding a dependency:
+
+* leave native menus absent, despite Electron's `Menu` and Tauri's `menu` API both providing them;
+* use a page-rendered menu, which would not be platform chrome and would not prove the native path;
+* hand-roll the FFI behind a local allowance, which would merely move the same unsafe work into
+  this repository without muda's platform coverage.
+
+`muda` performs the platform FFI internally. NC-UI's adapter is safe on Linux through
+`init_for_gtk_window`; Windows alone requires `Menu::init_for_hwnd`, which is `pub unsafe fn`.
+That single unsafe block and call site is the workspace's one function-scoped exception. Cargo
+passes a package-level `forbid` on the compiler command line, which no function attribute can
+override. The package therefore declares `unsafe_code = "allow"`, its crate root immediately
+restores `#![deny(unsafe_code)]`, and only the Windows `attach` function carries a reasoned
+`#[allow(unsafe_code)]`; the block is also compiled only behind `native-menu`. Every other unsafe
+block in this package remains a compile error. The HWND comes from the
+live tao window on the engine thread, and `EngineWindow` declares its menu before its window so the
+menu drops first and muda detaches it while the HWND is still valid. A replacement is fully built
+and duplicate-validated before any attachment changes, so a validation refusal leaves the current
+menu attached. On Windows the new menu is attached first, the old menu is removed from muda's HWND
+tracking, and the new menu is shown and verified; removing that tracking before the old object drops
+prevents its drop hook from detaching the replacement. If attachment, removal or verification fails,
+the previous menu is restored. Linux attaches the new GTK menu bar before dropping the old one.
+
+The dependency is optional and feature-gated: `native-menu` implies `wry-engine`, and the release
+`wry-host` feature enables it. A default build without a window host does not pull it in. Its licence
+is `Apache-2.0 OR MIT`, both on the allow-list in `deny.toml`; the dependency, licence and source
+checks run with all features so the tree is measured rather than asserted. macOS uses the safe
+`init_for_nsapp` path in the adapter but remains unverified until a macOS host runs it.
+
+## The tenth exception: `sha2` for consent integrity
+
+`ncui-security` depends directly on `sha2` to bind a consent token to the exact normalized
+parameters of the operation a person approved. The crate was already in the locked graph for
+bundle-file digests, so this adds no package or platform binding; it makes the security use a
+reviewable direct dependency rather than an accidental transitive one.
+
+A token bound only to a method and capability can be replayed with altered arguments. Hashing the
+canonical JSON operation parameters, with the consent transport fields removed, lets the runtime
+refuse that substitution while the minted-nonce ledger remains the authority. `sha2` is pure Rust,
+performs no FFI, and is confined to this integrity check and the existing bundle digest path. The
+alternative — comparing caller-controlled JSON without a canonical digest, or relying on token text
+as proof — would either miss semantically identical requests or accept altered operations.
+
 ## Consequences
 - Some conveniences are reimplemented rather than imported, which is a real cost paid for a
   smaller and more auditable attack surface. This is a deliberate trade, not an oversight.
@@ -276,4 +342,5 @@ one-time human verification rather than claimed as automated.
 
 ## Implementation status
 **Implemented.** `deny.toml` is in place, the CI supply-chain job runs `cargo deny check` and
-`rustsec/audit-check`, and `unsafe_code = "forbid"` is set workspace-wide.
+`rustsec/audit-check`, and `unsafe_code = "forbid"` is set workspace-wide except for the single
+function-scoped Windows menu attachment block documented above, enforced by a crate-level deny.

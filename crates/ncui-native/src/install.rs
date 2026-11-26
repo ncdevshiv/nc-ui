@@ -23,12 +23,11 @@
 //!
 //! # What is not here
 //!
-//! No MSI, no per-machine install, and no upgrade path: this installs for one user into one
-//! directory, and `docs/known-gaps.md` records the rest. An install that replaced files while an
-//! application was running would also need to know what was running, which is the running
-//! instance's business rather than this module's. The installer *executable* is written by
-//! `ncui build --installer`, which carries a bundle and installs it with this module rather than
-//! with a second implementation.
+//! No MSI and no per-machine install: this installs for one user into one directory, and
+//! `docs/known-gaps.md` records the rest. Updates verify a staged bundle before swapping it into
+//! place; handing a link or update notice to an already running application remains the running
+//! instance's business. The installer *executable* is written by `ncui build --installer`, which
+//! carries a bundle and installs it with this module rather than with a second implementation.
 
 use std::path::{Path, PathBuf};
 

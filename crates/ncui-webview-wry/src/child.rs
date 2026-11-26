@@ -1,115 +1,21 @@
-//! The wry engine binding for embedded child webviews (ADR-017 Phase 3).
+//! Parent-owned embedded child webviews (ADR-017 Phase 3).
 //!
-//! The parent window is a real `tao` window the engine already owns; the child
-//! is built with wry's `build_as_child`, which on Windows composes a child HWND
-//! inside the parent's frame, and moved with wry's `set_bounds`. The engine
-//! thread owns both, so every operation is a `HostEvent` the loop answers.
+//! Child surfaces are built and driven by the per-parent [`crate::WindowHost`] on the engine's
+//! event-loop thread. This module owns their engine state and translates logical rectangles into
+//! the form wry accepts.
 
 #![cfg(feature = "wry-engine")]
 
-use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::mpsc::{SyncSender, TrySendError};
 
-pub use ncui_webview_child::ChildWebviewError;
-use ncui_webview_child::{ChildWebviewEngine, ChildWebviewId, ChildWebviewRequest};
-
-use crate::host::HostEvent;
-
-/// How long an engine request for a child waits before the host reports the
-/// engine as not answering. The same bound the geometry and presentation
-/// requests use: an engine that has stopped answering is reported rather than
-/// blocking the caller forever.
-const CHILD_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// Builds children and drives them, on the engine's own thread.
-///
-/// One binding per process, shared with the window host: children are built
-/// through the same event loop the parent windows use, so they are created and
-/// moved on the thread that owns the platform.
-#[derive(Debug)]
-pub struct WryChildWebviewEngine {
-    proxy: tao::event_loop::EventLoopProxy<HostEvent>,
-}
-
-impl WryChildWebviewEngine {
-    /// Creates the binding over an engine proxy.
-    #[must_use]
-    pub fn new(proxy: tao::event_loop::EventLoopProxy<HostEvent>) -> Self {
-        Self { proxy }
-    }
-}
-
-impl ChildWebviewEngine for WryChildWebviewEngine {
-    fn create_child(
-        &self,
-        parent: ncui_core::WindowId,
-        request: &ChildWebviewRequest,
-    ) -> Result<u64, ChildWebviewError> {
-        let (reply, answers) = mpsc::channel();
-        self.proxy
-            .send_event(HostEvent::CreateChild {
-                parent: parent.to_string(),
-                request: Box::new(request.clone()),
-                reply,
-            })
-            .map_err(|error| ChildWebviewError::NotSupported {
-                reason: format!("the engine loop is not accepting work: {error}"),
-            })?;
-        answers
-            .recv_timeout(CHILD_REQUEST_TIMEOUT)
-            .map_err(|error| ChildWebviewError::EngineFailed {
-                reason: format!("the engine stopped answering: {error}"),
-            })?
-    }
-
-    fn set_child_bounds(
-        &self,
-        _parent: ncui_core::WindowId,
-        child: u64,
-        request: &ChildWebviewRequest,
-    ) -> Result<(), ChildWebviewError> {
-        let (reply, answers) = mpsc::channel();
-        self.proxy
-            .send_event(HostEvent::ChildBounds {
-                child,
-                request: Box::new(request.clone()),
-                reply,
-            })
-            .map_err(|error| ChildWebviewError::NotSupported {
-                reason: format!("the engine loop is not accepting work: {error}"),
-            })?;
-        answers
-            .recv_timeout(CHILD_REQUEST_TIMEOUT)
-            .map_err(|error| ChildWebviewError::EngineFailed {
-                reason: format!("the engine stopped answering: {error}"),
-            })?
-    }
-
-    fn close_child(
-        &self,
-        _parent: ncui_core::WindowId,
-        child: u64,
-    ) -> Result<(), ChildWebviewError> {
-        let (reply, answers) = mpsc::channel();
-        self.proxy
-            .send_event(HostEvent::CloseChild { child, reply })
-            .map_err(|error| ChildWebviewError::NotSupported {
-                reason: format!("the engine loop is not accepting work: {error}"),
-            })?;
-        answers
-            .recv_timeout(CHILD_REQUEST_TIMEOUT)
-            .map_err(|error| ChildWebviewError::EngineFailed {
-                reason: format!("the engine stopped answering: {error}"),
-            })?
-    }
-}
+use ncui_webview::{ChildPageMessage, HostSeam};
+use ncui_webview_child::{ChildWebviewError, ChildWebviewRequest};
+use tao::window::Window;
+use wry::{WebView, WebViewBuilder};
 
 /// The bounds a child request names, in the form wry's `set_bounds` takes.
-///
-/// The request's rectangle is logical pixels relative to the parent's client
-/// area, which is exactly what a child HWND position is.
-#[must_use]
-pub fn child_bounds(request: &ChildWebviewRequest) -> wry::Rect {
+fn child_bounds(request: &ChildWebviewRequest) -> wry::Rect {
     wry::Rect {
         position: wry::dpi::LogicalPosition::new(f64::from(request.x), f64::from(request.y)).into(),
         size: wry::dpi::LogicalSize::new(f64::from(request.width), f64::from(request.height))
@@ -117,34 +23,112 @@ pub fn child_bounds(request: &ChildWebviewRequest) -> wry::Rect {
     }
 }
 
-/// The capability trait the runtime downcasts to, implemented over the wry binding.
-impl ncui_webview::ChildWebviewCapable for WryChildWebviewEngine {
-    fn create_child(
-        &self,
-        parent: ncui_core::WindowId,
-        request: &ChildWebviewRequest,
-    ) -> Result<ChildWebviewId, String> {
-        ChildWebviewEngine::create_child(self, parent, request)
-            .map(ChildWebviewId::from_raw)
-            .map_err(|error| error.to_string())
-    }
+/// One live child webview inside a parent window's frame.
+pub(super) struct EngineChild {
+    /// The window whose frame owns this surface.
+    pub(super) parent: u64,
+    /// The wry webview, built as a child of the parent's frame.
+    pub(super) webview: WebView,
+    /// GTK owns the child's position on Linux, where wry's raw-handle child API is X11-only.
+    #[cfg(target_os = "linux")]
+    container: gtk::Fixed,
+}
 
-    fn set_child_bounds(
-        &self,
-        parent: ncui_core::WindowId,
-        child: ChildWebviewId,
+impl EngineChild {
+    pub(super) fn set_bounds(
+        &mut self,
         request: &ChildWebviewRequest,
-    ) -> Result<(), String> {
-        ChildWebviewEngine::set_child_bounds(self, parent, child.raw(), request)
-            .map_err(|error| error.to_string())
-    }
+    ) -> Result<(), ChildWebviewError> {
+        let bounds = child_bounds(request);
+        #[cfg(target_os = "linux")]
+        {
+            use gtk::prelude::*;
+            use wry::WebViewExtUnix as _;
 
-    fn close_child(
-        &self,
-        parent: ncui_core::WindowId,
-        child: ChildWebviewId,
-    ) -> Result<(), String> {
-        ChildWebviewEngine::close_child(self, parent, child.raw())
-            .map_err(|error| error.to_string())
+            let widget = self.webview.webview();
+            let scale = f64::from(widget.scale_factor());
+            let (width, height) = bounds.size.to_logical::<i32>(scale).into();
+            let (x, y) = bounds.position.to_logical::<i32>(scale).into();
+            widget.set_size_request(width, height);
+            self.container.move_(&widget, x, y);
+        }
+        self.webview
+            .set_bounds(bounds)
+            .map_err(|error| ChildWebviewError::EngineFailed {
+                reason: error.to_string(),
+            })
+    }
+}
+
+pub(super) fn build_child(
+    id: u64,
+    parent: u64,
+    window: &Window,
+    request: &ChildWebviewRequest,
+    seam: &Arc<HostSeam>,
+    ipc_tx: SyncSender<ChildPageMessage>,
+    host_ipc_tx: SyncSender<ChildPageMessage>,
+) -> Result<EngineChild, String> {
+    #[cfg(test)]
+    std::thread::sleep(std::time::Duration::from_millis(25));
+
+    // Creation is the one navigation the caller has already vetted. Every later navigation is
+    // offered to the child's isolated seam, which carries the parent's policy but none of its
+    // authority.
+    let initial = request.url.clone();
+    let navigation_seam = Arc::clone(seam);
+    let navigation_handler = move |target: String| -> bool {
+        if target == initial {
+            return true;
+        }
+        let Some(navigation) = ncui_webview::NavigationRequest::from_url(&target, true) else {
+            return false;
+        };
+        navigation_seam
+            .evaluate_navigation(&navigation)
+            .is_allowed()
+    };
+    let builder = WebViewBuilder::new()
+        .with_url(request.url.clone())
+        .with_bounds(child_bounds(request))
+        .with_navigation_handler(navigation_handler)
+        .with_ipc_handler(move |request: wry::http::Request<String>| {
+            let message = ChildPageMessage::new(id, request.body().to_owned());
+            match ipc_tx.try_send(message) {
+                Ok(()) | Err(TrySendError::Full(_)) => {}
+                Err(TrySendError::Disconnected(message)) => {
+                    let _ = host_ipc_tx.try_send(message);
+                }
+            }
+        })
+        .with_initialization_script(crate::host::BRIDGE_SCRIPT);
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::prelude::*;
+        use tao::platform::unix::WindowExtUnix as _;
+        use wry::WebViewBuilderExtUnix as _;
+
+        let vbox = window
+            .default_vbox()
+            .ok_or_else(|| "the parent window has no visual box for a child webview".to_owned())?;
+        let container = gtk::Fixed::new();
+        vbox.pack_start(&container, true, true, 0);
+        container.show_all();
+        let webview = builder.build_gtk(&container).map_err(|error| {
+            vbox.remove(&container);
+            error.to_string()
+        })?;
+        Ok(EngineChild {
+            parent,
+            webview,
+            container,
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let webview = builder
+            .build_as_child(window)
+            .map_err(|error| error.to_string())?;
+        Ok(EngineChild { parent, webview })
     }
 }

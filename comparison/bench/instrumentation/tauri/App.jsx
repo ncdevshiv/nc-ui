@@ -27,12 +27,8 @@ function App() {
     const started = performance.now()
     let completed = 0
     for (let i = 0; i < rounds; i += 1) {
-      try {
-        await invoke("return_string", { word: "You triggered the tauri action!" })
-        completed += 1
-      } catch {
-        // a refused call is a failed round, not a crash
-      }
+      await invoke("return_string", { word: "You triggered the tauri action!" })
+      completed += 1
     }
     const elapsed = performance.now() - started
     const result = {

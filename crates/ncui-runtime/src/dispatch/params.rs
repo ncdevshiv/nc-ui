@@ -22,7 +22,7 @@ use ncui_webview::{MAX_WINDOWS, WindowRejection};
 use serde_json::{Value, json};
 
 use crate::Runtime;
-use crate::agent::AgentSession;
+use crate::dispatch::cdp_handler::cdp_error;
 
 pub(crate) fn cursor_param(params: &Value) -> Result<Option<usize>> {
     let Some(value) = params.get("cursor") else {
@@ -185,26 +185,18 @@ pub(crate) fn invoke_window_drag_region(runtime: &mut Runtime, params: &Value) -
 /// The request is validated by the child crate; the engine builds the surface on
 /// its own thread and the child is recorded with its parent's identity.
 pub(crate) fn invoke_window_child_create(runtime: &mut Runtime, params: &Value) -> Result<Value> {
+    const OPERATION: &str = "dispatch::window_child_create";
     let parent = window_id_param(params)?;
     let url = params
         .get("url")
         .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    let number = |field: &str| -> i32 {
-        params
-            .get(field)
-            .and_then(Value::as_i64)
-            .map(|value| value as i32)
-            .unwrap_or_default()
-    };
+        .filter(|url| !url.is_empty())
+        .ok_or_else(|| validation("url", "must be a non-empty string").operation(OPERATION))?;
     let request = ncui_webview_child::ChildWebviewRequest {
-        url,
-        x: number("x"),
-        y: number("y"),
-        width: number("width") as u32,
-        height: number("height") as u32,
+        url: url.to_owned(),
+        ..child_bounds_param(params, OPERATION)?
     };
+    validate_child_request(&request, OPERATION)?;
     let created = runtime
         .create_child_webview(parent, &request)
         .map_err(|_| {
@@ -222,30 +214,11 @@ pub(crate) fn invoke_window_child_create(runtime: &mut Runtime, params: &Value) 
 
 /// `ncui.window.child.bounds` -- move a live child webview.
 pub(crate) fn invoke_window_child_bounds(runtime: &mut Runtime, params: &Value) -> Result<Value> {
+    const OPERATION: &str = "dispatch::window_child_bounds";
     let parent = window_id_param(params)?;
-    let child = params
-        .get("child")
-        .and_then(Value::as_str)
-        .and_then(|text| text.trim_start_matches("child-").parse::<u64>().ok())
-        .map(ncui_webview_child::ChildWebviewId::from_raw)
-        .ok_or_else(|| {
-            validation("child", "must be a child webview id")
-                .operation("dispatch::window_child_bounds")
-        })?;
-    let number = |field: &str| -> i32 {
-        params
-            .get(field)
-            .and_then(Value::as_i64)
-            .map(|value| value as i32)
-            .unwrap_or_default()
-    };
-    let request = ncui_webview_child::ChildWebviewRequest {
-        url: String::new(),
-        x: number("x"),
-        y: number("y"),
-        width: number("width") as u32,
-        height: number("height") as u32,
-    };
+    let child = child_id_param(params, OPERATION)?;
+    let request = child_bounds_param(params, OPERATION)?;
+    validate_child_request(&request, OPERATION)?;
     runtime
         .set_child_webview_bounds(parent, child, &request)
         .map_err(|_| {
@@ -264,15 +237,7 @@ pub(crate) fn invoke_window_child_bounds(runtime: &mut Runtime, params: &Value) 
 /// `ncui.window.child.close` -- close a live child webview.
 pub(crate) fn invoke_window_child_close(runtime: &mut Runtime, params: &Value) -> Result<Value> {
     let parent = window_id_param(params)?;
-    let child = params
-        .get("child")
-        .and_then(Value::as_str)
-        .and_then(|text| text.trim_start_matches("child-").parse::<u64>().ok())
-        .map(ncui_webview_child::ChildWebviewId::from_raw)
-        .ok_or_else(|| {
-            validation("child", "must be a child webview id")
-                .operation("dispatch::window_child_close")
-        })?;
+    let child = child_id_param(params, "dispatch::window_child_close")?;
     runtime
         .close_child_webview(parent, child)
         .map_err(|_| {
@@ -305,6 +270,64 @@ pub(crate) fn invoke_window_child_list(runtime: &mut Runtime) -> Result<Value> {
         })
         .collect();
     serde_json::to_value(json!({ "children": listed })).map_err(|e| json_error(&e))
+}
+
+fn child_id_param(
+    params: &Value,
+    operation: &'static str,
+) -> Result<ncui_webview_child::ChildWebviewId> {
+    params
+        .get("child")
+        .and_then(Value::as_str)
+        .and_then(ncui_webview_child::ChildWebviewId::parse)
+        .ok_or_else(|| {
+            validation("child", "must be a canonical child webview id").operation(operation)
+        })
+}
+
+fn child_bounds_param(
+    params: &Value,
+    operation: &'static str,
+) -> Result<ncui_webview_child::ChildWebviewRequest> {
+    let coordinate = |field: &str| -> Result<i32> {
+        let value = params
+            .get(field)
+            .and_then(Value::as_i64)
+            .ok_or_else(|| validation(field, "must be an integer").operation(operation))?;
+        i32::try_from(value)
+            .map_err(|_| validation(field, "must fit in a 32-bit coordinate").operation(operation))
+    };
+    let extent = |field: &str| -> Result<u32> {
+        let value = params.get(field).and_then(Value::as_u64).ok_or_else(|| {
+            validation(field, "must be a non-negative integer").operation(operation)
+        })?;
+        u32::try_from(value)
+            .map_err(|_| validation(field, "must fit in a 32-bit extent").operation(operation))
+    };
+    Ok(ncui_webview_child::ChildWebviewRequest {
+        url: String::new(),
+        x: coordinate("x")?,
+        y: coordinate("y")?,
+        width: extent("width")?,
+        height: extent("height")?,
+    })
+}
+
+fn validate_child_request(
+    request: &ncui_webview_child::ChildWebviewRequest,
+    operation: &'static str,
+) -> Result<()> {
+    let result = if request.url.is_empty() {
+        request.validate_bounds()
+    } else {
+        request.validate()
+    };
+    result.map_err(|error| match error {
+        ncui_webview_child::ChildWebviewError::InvalidRequest { field, reason } => {
+            validation(field, reason).operation(operation)
+        }
+        _ => validation("child", error.to_string()).operation(operation),
+    })
 }
 
 pub(crate) fn invoke_window_zoom(runtime: &mut Runtime, params: &Value) -> Result<Value> {
@@ -423,9 +446,9 @@ pub(crate) fn invoke_window_screenshot(runtime: &mut Runtime, params: &Value) ->
 
 /// Sends one CDP capture command to a window's engine and returns the base64 payload.
 ///
-/// The mapping matches `ncui.cdp.send`'s: a window that is not open is `not_found`, an
-/// engine without the transport or an endpoint that refuses is `conflict`, and an answer
-/// without the promised payload is a conflict rather than an empty success.
+/// The mapping matches `ncui.cdp.send`'s: a window that is not open is `not_found`, and an
+/// engine without the transport or an endpoint that refuses preserves its typed `cdp_*`
+/// code. An answer without the promised payload is a conflict rather than an empty success.
 fn cdp_capture_data(
     runtime: &mut Runtime,
     id: WindowId,
@@ -444,7 +467,7 @@ fn cdp_capture_data(
             })
             .operation(operation)
         })?
-        .map_err(|reason| NcError::new(ErrorKind::Conflict { reason }).operation(operation))?;
+        .map_err(|error| cdp_error(&error, operation))?;
     answer
         .get("result")
         .and_then(|result| result.get("data"))
@@ -1164,42 +1187,6 @@ pub(crate) fn invoke_devtools_profile(runtime: &Runtime) -> Result<Value> {
     .map_err(|e| json_error(&e))
 }
 
-/// `ncui.consent.mint` -- mint a consent token for a destructive method.
-///
-/// The caller specifies the method they want to perform and the capability
-/// it requires. The runtime mints an unforgeable token bound to the caller's
-/// session, the method name, and the capability set. The caller then presents
-/// this token as `consent_token` in the payload of the destructive call.
-///
-/// This replaces the insecure `consent: true` boolean on the page-command path.
-pub(crate) fn invoke_consent_mint(
-    runtime: &mut Runtime,
-    _session: &AgentSession,
-    params: &Value,
-) -> Result<Value> {
-    let method = params.get("method").and_then(Value::as_str).unwrap_or("");
-
-    let capability = params
-        .get("capability")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-
-    let capability_set = capability.parse::<Capability>().map_or_else(
-        |_| CapabilitySet::empty(),
-        |c| CapabilitySet::empty().with(c),
-    );
-
-    let correlation = CorrelationId::new();
-    let token = runtime.mint_consent(correlation, method, capability_set)?;
-
-    serde_json::to_value(json!({
-        "consent_token": token.to_value(),
-        "method": method,
-        "capability": capability,
-    }))
-    .map_err(|e| json_error(&e))
-}
-
 /// `ncui.app.emit` -- emit an application-defined event to a window's page.
 ///
 /// The JSON-RPC wrapper over [`Runtime::emit`] / [`Runtime::emit_all`], the
@@ -1250,10 +1237,8 @@ pub(crate) fn invoke_app_emit(runtime: &mut Runtime, params: &Value) -> Result<V
 ///
 /// `None` means the caller supplied no token. A present-but-malformed token is a
 /// refusal, not an absence: reading corruption as "no consent" would tell the
-/// caller nothing about why its token was ignored. The legacy `consent: true`
-/// bool is accepted as a value and ignored here — it authorizes nothing
-/// destructive — because removing the field outright would break clients that
-/// still send it before they migrate to `consent_token`.
+/// caller nothing about why its token was ignored. The legacy `consent` field
+/// authorizes nothing and is excluded from the operation's parameter binding.
 pub(crate) fn consent_token_param(params: &Value) -> Result<Option<ConsentToken>> {
     let Some(value) = params.get("consent_token") else {
         return Ok(None);
@@ -1310,6 +1295,89 @@ pub(crate) fn invoke_logs_query(runtime: &mut Runtime, params: &Value) -> Result
         "next_cursor": next_cursor,
     }))
     .map_err(|e| json_error(&e))
+}
+
+#[cfg(test)]
+mod child_param_tests {
+    use super::{
+        child_bounds_param, child_id_param, invoke_window_child_create, validate_child_request,
+    };
+    use crate::Runtime;
+    use ncui_core::{ErrorKind, Limits};
+    use serde_json::json;
+
+    const OPERATION: &str = "dispatch::child_param_test";
+    const NO_WINDOW: &str = "00000000000000000000000000000009";
+
+    #[test]
+    fn child_geometry_is_required_and_cannot_wrap_or_truncate() {
+        for params in [
+            json!({ "x": 0, "y": 0, "width": 100 }),
+            json!({ "x": -1, "y": 0, "width": 100, "height": 100 }),
+            json!({ "x": 0, "y": 0, "width": -1, "height": 100 }),
+            json!({ "x": 0, "y": 0, "width": 4_294_967_296_u64, "height": 100 }),
+            json!({ "x": 0, "y": 0, "width": 100.5, "height": 100 }),
+        ] {
+            let error = match child_bounds_param(&params, OPERATION) {
+                Ok(request) => {
+                    validate_child_request(&request, OPERATION).expect_err("invalid geometry")
+                }
+                Err(error) => error,
+            };
+            assert!(
+                matches!(error.kind(), ErrorKind::Validation { .. }),
+                "{error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn child_geometry_rules_are_applied_before_the_engine_is_asked() {
+        let request = child_bounds_param(
+            &json!({ "x": 0, "y": 0, "width": 0, "height": 100 }),
+            OPERATION,
+        )
+        .expect("numeric geometry parses");
+        let error = validate_child_request(&request, OPERATION).expect_err("zero extent");
+        assert!(
+            matches!(error.kind(), ErrorKind::Validation { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn child_creation_rejects_an_empty_url_before_window_lookup() {
+        let mut runtime = Runtime::start(Limits::default()).expect("runtime");
+        let error = invoke_window_child_create(
+            &mut runtime,
+            &json!({
+                "window": NO_WINDOW,
+                "url": "",
+                "x": 0,
+                "y": 0,
+                "width": 100,
+                "height": 100
+            }),
+        )
+        .expect_err("empty child url");
+        assert!(
+            matches!(error.kind(), ErrorKind::Validation { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn child_ids_must_use_the_canonical_hex_wire_form() {
+        let parsed = child_id_param(&json!({ "child": "child-0000000000000001" }), OPERATION)
+            .expect("canonical id");
+        assert_eq!(parsed.raw(), 1);
+        for malformed in ["1", "child-1", "child-000000000000000g"] {
+            assert!(
+                child_id_param(&json!({ "child": malformed }), OPERATION).is_err(),
+                "{malformed}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

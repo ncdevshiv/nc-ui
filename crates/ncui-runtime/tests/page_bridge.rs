@@ -17,14 +17,23 @@
     reason = "test assertions must abort loudly on failure"
 )]
 
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ncui_core::{Capability, CapabilitySet, Limits};
+use ncui_core::{
+    Capability, CapabilitySet, CorrelationId, ErrorKind, Limits, LimitsBuilder, NcError,
+};
 use ncui_runtime::Runtime;
+use ncui_runtime::consent::{ConsentPrompter, ConsentRequest};
 use ncui_runtime::dispatch::dispatch;
 use ncui_runtime::rpc::Request;
-use ncui_webview::{HostFactory, HostSeam, PageMessage, WebViewBackend};
+use ncui_security::authz::ConsentToken;
+use ncui_webview::{
+    ChildPageMessage, HostFactory, HostSeam, PageMessage, PageTarget, WebViewBackend,
+};
+use ncui_webview_child::{ChildWebviewId, ChildWebviewRequest};
 use serde_json::{Value, json};
 
 /// The state the test's engine shares with the test.
@@ -36,6 +45,16 @@ struct EngineState {
     evaluated: Mutex<Vec<String>>,
     /// Window drags the host has asked the engine to start.
     drags: Mutex<Vec<()>>,
+    /// Child pages this parent engine owns.
+    children: Mutex<BTreeMap<u64, PageEngine>>,
+    /// Child creation requests the parent engine accepted.
+    created: Mutex<Vec<ChildWebviewRequest>>,
+    /// Geometry most recently applied to each child.
+    bounds: Mutex<BTreeMap<u64, ChildWebviewRequest>>,
+    /// Children the parent engine closed.
+    closed: Mutex<Vec<u64>>,
+    /// The test engine's child identity source.
+    next_child: AtomicU64,
 }
 
 /// A page engine the test drives.
@@ -72,6 +91,24 @@ impl PageEngine {
     fn drag_count(&self) -> usize {
         self.state
             .drags
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    fn child(&self, child: ChildWebviewId) -> Self {
+        self.state
+            .children
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&child.raw())
+            .cloned()
+            .expect("the child exists")
+    }
+
+    fn created_children(&self) -> usize {
+        self.state
+            .created
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
@@ -117,6 +154,85 @@ impl WebViewBackend for PageEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(());
         true
+    }
+
+    fn create_child_webview(
+        &self,
+        request: &ChildWebviewRequest,
+        _seam: &Arc<HostSeam>,
+        ipc_tx: std::sync::mpsc::SyncSender<ChildPageMessage>,
+    ) -> Result<u64, String> {
+        let child = self.state.next_child.fetch_add(1, Ordering::SeqCst) + 1;
+        self.state
+            .children
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(child, PageEngine::new());
+        self.state
+            .created
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(request.clone());
+        drop(ipc_tx);
+        Ok(child)
+    }
+
+    fn poll_child_webview_message(&self, child: u64) -> Option<ChildPageMessage> {
+        let engine = self
+            .state
+            .children
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&child)
+            .cloned()?;
+        let body = engine
+            .state
+            .outgoing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop()?;
+        Some(ChildPageMessage::new(child, body))
+    }
+
+    fn evaluate_child_script(&self, child: u64, script: &str) -> bool {
+        let Some(engine) = self
+            .state
+            .children
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&child)
+            .cloned()
+        else {
+            return false;
+        };
+        engine.evaluate_script(script)
+    }
+
+    fn set_child_webview_bounds(
+        &self,
+        child: u64,
+        request: &ChildWebviewRequest,
+    ) -> Result<(), String> {
+        self.state
+            .bounds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(child, request.clone());
+        Ok(())
+    }
+
+    fn close_child_webview(&self, child: u64) -> Result<(), String> {
+        self.state
+            .closed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(child);
+        self.state
+            .children
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&child);
+        Ok(())
     }
 }
 
@@ -209,6 +325,353 @@ fn open_window(runtime: &mut Runtime) -> ncui_core::WindowId {
         })
         .expect("a window id");
     id.parse().expect("a window id")
+}
+
+fn parent_engine(factory: &PageFactory, index: usize) -> PageEngine {
+    factory
+        .engines
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(index)
+        .cloned()
+        .expect("the parent engine exists")
+}
+
+fn child_request() -> ChildWebviewRequest {
+    ChildWebviewRequest {
+        url: "https://app.example.com/child".to_owned(),
+        x: 10,
+        y: 20,
+        width: 400,
+        height: 300,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptReply {
+    Approve,
+    Decline,
+    Fail,
+}
+
+#[derive(Debug)]
+struct RecordingPrompter {
+    reply: PromptReply,
+    requests: Mutex<Vec<ConsentRequest>>,
+}
+
+impl RecordingPrompter {
+    fn new(reply: PromptReply) -> Self {
+        Self {
+            reply,
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn requests(&self) -> Vec<ConsentRequest> {
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl ConsentPrompter for RecordingPrompter {
+    fn confirm(&self, request: &ConsentRequest) -> ncui_core::Result<bool> {
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(request.clone());
+        match self.reply {
+            PromptReply::Approve => Ok(true),
+            PromptReply::Decline => Ok(false),
+            PromptReply::Fail => Err(NcError::new(ErrorKind::Internal {
+                operation: "test::consent_prompt".to_owned(),
+                reason: "the approval surface is unavailable".to_owned(),
+            })),
+        }
+    }
+}
+
+fn runtime_with_page_grant_and_prompter(
+    capabilities: &[Capability],
+    prompter: Arc<RecordingPrompter>,
+) -> (Runtime, PageFactory) {
+    let mut runtime = Runtime::start(Limits::default())
+        .expect("runtime should start")
+        .with_consent_prompter(prompter);
+    runtime.grant_page_capabilities(capabilities);
+    attach_page(runtime)
+}
+
+fn invoke_page(
+    runtime: &mut Runtime,
+    engine: &PageEngine,
+    id: &str,
+    name: &str,
+    payload: &Value,
+) -> String {
+    engine.post(
+        &json!({
+            "id": id,
+            "action": "perform",
+            "name": name,
+            "payload": payload
+        })
+        .to_string(),
+    );
+    assert_eq!(runtime.pump_pages(Duration::from_secs(0)), 1);
+    engine.scripts().pop().expect("the page receives an answer")
+}
+
+fn page_subject(window: ncui_core::WindowId) -> String {
+    format!("page:{window}")
+}
+
+fn register_counting_write(runtime: &Runtime) -> Arc<AtomicU64> {
+    let executions = Arc::new(AtomicU64::new(0));
+    let observed = Arc::clone(&executions);
+    let _registration = runtime
+        .register_page_command(
+            "write_note",
+            CapabilitySet::empty().with(Capability::FilesystemWrite),
+            "Write a note",
+            move |_| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({ "written": true }))
+            },
+        )
+        .expect("register the destructive page command");
+    executions
+}
+
+fn mint_page_consent(
+    runtime: &mut Runtime,
+    window: ncui_core::WindowId,
+    method: &str,
+    required: CapabilitySet,
+    params: &Value,
+) -> ConsentToken {
+    runtime
+        .mint_consent(
+            CorrelationId::new(),
+            &page_subject(window),
+            method,
+            required,
+            params,
+        )
+        .expect("mint an exact page-operation token")
+}
+
+fn with_consent_token(mut params: Value, token: &ConsentToken) -> Value {
+    let Value::Object(operation) = &mut params else {
+        panic!("consent is bound to object parameters");
+    };
+    operation.insert("consent_token".to_owned(), token.to_value());
+    params
+}
+
+fn assert_page_refused(answer: &str, id: &str, code: &str) {
+    assert!(
+        answer.contains(&format!("\"id\":\"{id}\""))
+            && answer.contains(&format!("\"code\":\"{code}\"")),
+        "{id} must be refused as {code}: {answer}"
+    );
+}
+
+fn create_child(runtime: &Runtime, parent: ncui_core::WindowId) -> ChildWebviewId {
+    runtime
+        .create_child_webview(parent, &child_request())
+        .expect("the parent is open")
+        .expect("the engine creates the child")
+}
+
+fn reply_id_from(script: &str) -> String {
+    script
+        .split("__runCommand(\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("a reply id")
+        .to_owned()
+}
+
+#[test]
+fn a_child_page_is_listed_and_its_answer_returns_only_to_that_child() {
+    let (mut runtime, factory) = runtime_with_page_and_grant(&[Capability::Window]);
+    let parent = open_window(&mut runtime);
+    let child = create_child(&runtime, parent);
+    let parent_engine = parent_engine(&factory, 0);
+    let child_engine = parent_engine.child(child);
+
+    let listed = runtime.list_child_webviews();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, child);
+    assert_eq!(listed[0].parent, parent);
+    assert_eq!(listed[0].bounds, child_request());
+    assert_eq!(child.to_string(), "child-0000000000000001");
+    assert!(
+        runtime
+            .windows
+            .grant_for_target(PageTarget::Child { parent, child })
+            .expect("the child is live")
+            .expect("the child has a seam")
+            .is_empty(),
+        "a child must not inherit its parent's authority"
+    );
+
+    child_engine.post("{\"id\":\"child-describe\",\"action\":\"describe\"}");
+    assert_eq!(runtime.pump_pages(Duration::from_secs(0)), 1);
+    assert!(parent_engine.scripts().is_empty());
+    let answer = child_engine.scripts().pop().expect("the child answer");
+    assert!(answer.contains("\"id\":\"child-describe\""));
+    assert!(answer.contains("\"capabilities\":[]"));
+}
+
+#[test]
+fn a_child_initial_url_is_vetted_before_the_engine_builds_it() {
+    let (mut runtime, factory) = runtime_with_page();
+    let parent = open_window(&mut runtime);
+    let mut request = child_request();
+    request.url = "https://untrusted.example/".to_owned();
+
+    let refused = runtime
+        .create_child_webview(parent, &request)
+        .expect("the parent is open")
+        .expect_err("the child URL is outside the parent's navigation policy");
+    assert!(refused.contains("not an allowed origin"), "{refused}");
+    assert_eq!(parent_engine(&factory, 0).created_children(), 0);
+    assert!(runtime.list_child_webviews().is_empty());
+}
+
+#[test]
+fn a_child_cannot_be_moved_closed_or_reached_through_another_parent() {
+    let (mut runtime, factory) = runtime_with_page();
+    let parent = open_window(&mut runtime);
+    let other = open_window(&mut runtime);
+    let child = create_child(&runtime, parent);
+    let mut bounds = child_request();
+    bounds.url.clear();
+    bounds.x = 30;
+
+    assert!(
+        runtime
+            .set_child_webview_bounds(other, child, &bounds)
+            .expect("the other parent is open")
+            .is_err(),
+        "another parent cannot move this child"
+    );
+    assert!(
+        runtime
+            .close_child_webview(other, child)
+            .expect("the other parent is open")
+            .is_err(),
+        "another parent cannot close this child"
+    );
+    assert!(
+        !runtime
+            .windows
+            .post_to_target(
+                PageTarget::Child {
+                    parent: other,
+                    child,
+                },
+                "1;",
+            )
+            .expect("the other parent is open"),
+        "another parent cannot evaluate in this child"
+    );
+    assert_eq!(runtime.list_child_webviews().len(), 1);
+    assert_eq!(
+        parent_engine(&factory, 0).child(child).scripts(),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn child_bounds_preserve_the_url_and_close_removes_the_live_entry() {
+    let (mut runtime, factory) = runtime_with_page();
+    let parent = open_window(&mut runtime);
+    let child = create_child(&runtime, parent);
+    let mut bounds = child_request();
+    bounds.url.clear();
+    bounds.x = 40;
+    bounds.width = 320;
+
+    runtime
+        .set_child_webview_bounds(parent, child, &bounds)
+        .expect("the parent is open")
+        .expect("the child moves");
+    let listed = runtime.list_child_webviews();
+    assert_eq!(listed[0].bounds.url, child_request().url);
+    assert_eq!(listed[0].bounds.x, 40);
+    assert_eq!(listed[0].bounds.width, 320);
+
+    runtime
+        .close_child_webview(parent, child)
+        .expect("the parent is open")
+        .expect("the child closes");
+    assert!(runtime.list_child_webviews().is_empty());
+    assert!(!parent_engine(&factory, 0).evaluate_child_script(child.raw(), "1;"));
+}
+
+#[test]
+fn a_child_cannot_use_an_action_that_targets_its_parent_window() {
+    let (mut runtime, factory) = runtime_with_page_and_grant(&[Capability::Window]);
+    let parent = open_window(&mut runtime);
+    let child = create_child(&runtime, parent);
+    let parent_engine = parent_engine(&factory, 0);
+    let child_engine = parent_engine.child(child);
+
+    child_engine.post("{\"id\":\"child-drag\",\"action\":\"perform\",\"name\":\"drag_region\"}");
+    assert_eq!(runtime.pump_pages(Duration::from_secs(0)), 1);
+    assert_eq!(parent_engine.drag_count(), 0);
+    let answer = child_engine.scripts().pop().expect("the refusal");
+    assert!(answer.contains("\"code\":\"capability_denied\""));
+    assert!(answer.contains("\"id\":\"child-drag\""));
+}
+
+#[test]
+fn a_child_cannot_settle_a_sibling_pages_handler_call() {
+    let runtime = Runtime::start(Limits::default()).expect("runtime should start");
+    runtime
+        .page_commands
+        .register_js_command("js.echo", CapabilitySet::empty(), "Echo in the page")
+        .expect("the command registers");
+    let (mut runtime, factory) = attach_page(runtime);
+    let parent = open_window(&mut runtime);
+    let first = create_child(&runtime, parent);
+    let second = create_child(&runtime, parent);
+    let parent_engine = parent_engine(&factory, 0);
+    let first_engine = parent_engine.child(first);
+    let second_engine = parent_engine.child(second);
+
+    first_engine.post("{\"id\":\"first-call\",\"action\":\"perform\",\"name\":\"js.echo\"}");
+    assert_eq!(runtime.pump_pages(Duration::from_secs(0)), 1);
+    let run = first_engine
+        .scripts()
+        .pop()
+        .expect("the first child's handler starts");
+    let reply_id = reply_id_from(&run);
+
+    second_engine.post(&format!(
+        "{{\"id\":\"{reply_id}\",\"action\":\"command_result\",\"ok\":true,\"payload\":{{\"spoofed\":true}}}}"
+    ));
+    assert_eq!(runtime.pump_pages(Duration::from_secs(0)), 1);
+    assert_eq!(first_engine.scripts().len(), 1);
+    assert!(second_engine.scripts().is_empty());
+
+    first_engine.post(&format!(
+        "{{\"id\":\"{reply_id}\",\"action\":\"command_result\",\"ok\":true,\"payload\":{{\"echo\":\"first\"}}}}"
+    ));
+    assert_eq!(runtime.pump_pages(Duration::from_secs(0)), 1);
+    let first_scripts = first_engine.scripts();
+    assert_eq!(first_scripts.len(), 2);
+    let settled = first_scripts.last().expect("the real answer");
+    assert!(settled.contains("\"id\":\"first-call\""));
+    assert!(settled.contains("\"echo\":\"first\""));
+    assert!(!settled.contains("spoofed"));
+    assert!(second_engine.scripts().is_empty());
+    assert!(parent_engine.scripts().is_empty());
 }
 
 #[test]
@@ -395,53 +858,257 @@ fn a_command_needing_an_ungranted_capability_is_refused_at_registration() {
 }
 
 #[test]
-fn a_destructive_application_command_needs_consent() {
-    // Consent for a destructive page command is currently the `consent` bool: absent means
-    // withhold (the gate fails closed), present means the page states the user confirmed. This
-    // drives the real pump through both. The bool is a documented stopgap — see the E1 entry in
-    // `known-gaps.md`: replacing it with an unforgeable token needs the runtime's consent UI,
-    // which does not exist yet, and no production path mints a token a page could present.
+fn a_destructive_application_command_without_host_approval_fails_closed() {
     let (mut runtime, factory) = runtime_with_page_and_grant(&[Capability::FilesystemWrite]);
-    let _registration = runtime
-        .register_page_command(
-            "write_note",
-            CapabilitySet::empty().with(Capability::FilesystemWrite),
-            "Write a note",
-            |_| Ok(json!({ "written": true })),
-        )
-        .expect("register");
+    let executions = register_counting_write(&runtime);
     let _window = open_window(&mut runtime);
-    let engine = factory
-        .engines
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .first()
-        .cloned()
-        .expect("one engine");
+    let engine = parent_engine(&factory, 0);
 
-    engine.post("{\"id\":\"call-5\",\"action\":\"perform\",\"name\":\"write_note\"}");
-    runtime.pump_pages(Duration::from_secs(0));
-    let refused = engine.scripts();
+    for (id, payload) in [
+        ("absent", json!({})),
+        ("boolean", json!({ "consent": true })),
+    ] {
+        let answer = invoke_page(&mut runtime, &engine, id, "write_note", &payload);
+        assert!(
+            answer.contains("\"code\":\"capability_denied\"")
+                && answer.contains(&format!("\"id\":\"{id}\"")),
+            "a page cannot authorize itself with a boolean: {answer}"
+        );
+    }
+    assert_eq!(
+        executions.load(Ordering::SeqCst),
+        0,
+        "a refused operation must not reach its handler"
+    );
+}
+
+#[test]
+fn a_destructive_page_command_validates_and_spends_consent_tokens() {
+    let prompter = Arc::new(RecordingPrompter::new(PromptReply::Approve));
+    let (mut runtime, factory) =
+        runtime_with_page_grant_and_prompter(&[Capability::FilesystemWrite], Arc::clone(&prompter));
+    let required = CapabilitySet::empty().with(Capability::FilesystemWrite);
+    let executions = register_counting_write(&runtime);
+    let owner = open_window(&mut runtime);
+    let other = open_window(&mut runtime);
+    let engine = parent_engine(&factory, 0);
+    let params = json!({ "path": "note.txt", "text": "approved" });
+    let token = mint_page_consent(&mut runtime, owner, "write_note", required, &params);
+    let wrong_command =
+        mint_page_consent(&mut runtime, owner, "another_command", required, &params);
+    let wrong_capability = mint_page_consent(
+        &mut runtime,
+        owner,
+        "write_note",
+        CapabilitySet::empty().with(Capability::FilesystemRead),
+        &params,
+    );
+    let wrong_subject = mint_page_consent(&mut runtime, other, "write_note", required, &params);
+    let altered = json!({ "path": "note.txt", "text": "not approved" });
+
+    for (id, payload, code) in [
+        (
+            "forged-text",
+            json!({ "consent_token": "forged" }),
+            "validation",
+        ),
+        (
+            "wrong-command",
+            with_consent_token(params.clone(), &wrong_command),
+            "capability_denied",
+        ),
+        (
+            "wrong-capability",
+            with_consent_token(params.clone(), &wrong_capability),
+            "capability_denied",
+        ),
+        (
+            "wrong-subject",
+            with_consent_token(params.clone(), &wrong_subject),
+            "capability_denied",
+        ),
+        (
+            "altered-arguments",
+            with_consent_token(altered, &token),
+            "capability_denied",
+        ),
+    ] {
+        let answer = invoke_page(&mut runtime, &engine, id, "write_note", &payload);
+        assert_page_refused(&answer, id, code);
+        if id == "forged-text" {
+            assert!(answer.contains("consent_token"), "{answer}");
+        }
+    }
+
+    let allowed = invoke_page(
+        &mut runtime,
+        &engine,
+        "valid-token",
+        "write_note",
+        &with_consent_token(params, &token),
+    );
     assert!(
-        refused.last().is_some_and(|script| {
-            script.contains("\"code\":\"capability_denied\"")
-                && script.contains("\"id\":\"call-5\"")
+        allowed.contains("\"id\":\"valid-token\"")
+            && allowed.contains("\"ok\":true")
+            && allowed.contains("\"written\":true"),
+        "the exact owner operation must run: {allowed}"
+    );
+    let replayed = invoke_page(
+        &mut runtime,
+        &engine,
+        "replayed-token",
+        "write_note",
+        &with_consent_token(json!({ "path": "note.txt", "text": "approved" }), &token),
+    );
+    assert_page_refused(&replayed, "replayed-token", "capability_denied");
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert!(
+        prompter.requests().is_empty(),
+        "every supplied-token refusal must fail without falling back to a prompt"
+    );
+    let audited = runtime
+        .audit
+        .to_vec()
+        .into_iter()
+        .find(|event| {
+            event.action == "page.write_note"
+                && event.request_id == token.correlation()
+                && event.outcome.as_str() == "allowed"
+        })
+        .expect("the successful operation is audited under the token correlation");
+    assert_eq!(audited.agent_id, page_subject(owner));
+    assert_eq!(audited.outcome.as_str(), "allowed");
+    assert_eq!(audited.capabilities_used, required);
+}
+
+#[test]
+fn host_approval_presents_the_exact_page_operation_before_it_runs() {
+    let prompter = Arc::new(RecordingPrompter::new(PromptReply::Approve));
+    let (mut runtime, factory) =
+        runtime_with_page_grant_and_prompter(&[Capability::FilesystemWrite], Arc::clone(&prompter));
+    let required = CapabilitySet::empty().with(Capability::FilesystemWrite);
+    let executions = register_counting_write(&runtime);
+    let window = open_window(&mut runtime);
+    let engine = parent_engine(&factory, 0);
+
+    let answer = invoke_page(
+        &mut runtime,
+        &engine,
+        "prompted-approval",
+        "write_note",
+        &json!({
+            "path": "note.txt",
+            "text": "approved",
+            "consent": true,
+            "nested": { "b": 2, "a": 1 }
         }),
-        "a destructive command without consent must be refused: {refused:?}"
     );
-
-    engine.post(
-        "{\"id\":\"call-6\",\"action\":\"perform\",\"name\":\"write_note\",\"payload\":{\"consent\":true}}",
-    );
-    runtime.pump_pages(Duration::from_secs(0));
-    let allowed = engine.scripts();
     assert!(
-        allowed
-            .last()
-            .is_some_and(|script| script.contains("\"written\":true")
-                && script.contains("\"id\":\"call-6\"")),
-        "consent must permit the destructive command: {allowed:?}"
+        answer.contains("\"id\":\"prompted-approval\"")
+            && answer.contains("\"ok\":true")
+            && answer.contains("\"written\":true"),
+        "host approval must permit the exact operation: {answer}"
     );
+    let requests = prompter.requests();
+    assert_eq!(requests.len(), 1, "one operation asks for approval once");
+    let request = &requests[0];
+    assert_eq!(request.subject(), page_subject(window).as_str());
+    assert_eq!(request.method(), "write_note");
+    assert_eq!(request.capabilities(), required);
+    assert_eq!(
+        request.params(),
+        &json!({
+            "path": "note.txt",
+            "text": "approved",
+            "nested": { "a": 1, "b": 2 }
+        })
+    );
+    let message = request.message();
+    assert!(message.contains(&page_subject(window)), "{message}");
+    assert!(message.contains("write_note"), "{message}");
+    assert!(
+        message.contains("note.txt") && message.contains("approved"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("\"consent\"") && !message.contains("consent_token"),
+        "{message}"
+    );
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    let audited = runtime
+        .audit
+        .to_vec()
+        .into_iter()
+        .find(|event| event.action == "page.write_note")
+        .expect("the prompted operation is audited");
+    assert_eq!(audited.agent_id, page_subject(window));
+    assert_eq!(audited.outcome.as_str(), "allowed");
+}
+
+#[test]
+fn a_declined_or_failed_page_approval_never_runs_the_command() {
+    for reply in [PromptReply::Decline, PromptReply::Fail] {
+        let prompter = Arc::new(RecordingPrompter::new(reply));
+        let (mut runtime, factory) = runtime_with_page_grant_and_prompter(
+            &[Capability::FilesystemWrite],
+            Arc::clone(&prompter),
+        );
+        let executions = register_counting_write(&runtime);
+        let _window = open_window(&mut runtime);
+        let engine = parent_engine(&factory, 0);
+
+        let answer = invoke_page(
+            &mut runtime,
+            &engine,
+            "withheld-approval",
+            "write_note",
+            &json!({ "path": "note.txt" }),
+        );
+        assert_page_refused(&answer, "withheld-approval", "capability_denied");
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            0,
+            "{reply:?} must not execute"
+        );
+        assert_eq!(prompter.requests().len(), 1, "{reply:?} must be observable");
+    }
+}
+
+#[test]
+fn a_rate_limited_page_is_refused_before_the_host_is_prompted() {
+    let limits = LimitsBuilder::new()
+        .agent_rate(1, 1)
+        .build()
+        .expect("a one-request page budget");
+    let prompter = Arc::new(RecordingPrompter::new(PromptReply::Approve));
+    let approval_surface = Arc::clone(&prompter) as Arc<dyn ConsentPrompter>;
+    let mut runtime = Runtime::start(limits)
+        .expect("runtime should start")
+        .with_consent_prompter(approval_surface);
+    runtime.grant_page_capabilities(&[Capability::FilesystemWrite]);
+    let executions = register_counting_write(&runtime);
+    let (mut runtime, factory) = attach_page(runtime);
+    let _window = open_window(&mut runtime);
+    let engine = parent_engine(&factory, 0);
+
+    let allowed = invoke_page(
+        &mut runtime,
+        &engine,
+        "budget-spent",
+        "describe_metrics",
+        &json!({}),
+    );
+    assert!(allowed.contains("\"ok\":true"), "{allowed}");
+    let refused = invoke_page(
+        &mut runtime,
+        &engine,
+        "over-budget",
+        "write_note",
+        &json!({}),
+    );
+    assert_page_refused(&refused, "over-budget", "limit_exceeded");
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    assert!(prompter.requests().is_empty());
 }
 
 #[test]

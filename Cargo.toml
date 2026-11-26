@@ -18,28 +18,29 @@ authors = ["NC-UI Contributors"]
 
 [workspace.dependencies]
 # Internal crates. Dependency direction is enforced by tools/ncui-arch (see ADR-011).
-ncui-a11y = { path = "crates/ncui-a11y" }
-ncui-abi = { path = "crates/ncui-abi" }
-ncui-core = { path = "crates/ncui-core" }
-ncui-observability = { path = "crates/ncui-observability" }
-ncui-security = { path = "crates/ncui-security" }
-ncui-ipc = { path = "crates/ncui-ipc" }
-ncui-state = { path = "crates/ncui-state" }
-ncui-scheduler = { path = "crates/ncui-scheduler" }
-ncui-workers = { path = "crates/ncui-workers" }
-ncui-runtime = { path = "crates/ncui-runtime" }
-ncui-webview = { path = "crates/ncui-webview" }
-ncui-app = { path = "crates/ncui-app" }
-ncui-native = { path = "crates/ncui-native" }
-ncui-component = { path = "crates/ncui-component" }
-ncui-webview-wry = { path = "crates/ncui-webview-wry" }
-ncui-webview-child = { path = "crates/ncui-webview-child" }
-ncui-gpu = { path = "crates/ncui-gpu" }
-ncui-gpu-renderer = { path = "crates/ncui-gpu-renderer" }
-ncui-cli = { path = "crates/ncui-cli" }
+ncui-a11y = { version = "0.1.0", path = "crates/ncui-a11y" }
+ncui-abi = { version = "0.1.0", path = "crates/ncui-abi" }
+ncui-core = { version = "0.1.0", path = "crates/ncui-core" }
+ncui-observability = { version = "0.1.0", path = "crates/ncui-observability" }
+ncui-security = { version = "0.1.0", path = "crates/ncui-security" }
+ncui-ipc = { version = "0.1.0", path = "crates/ncui-ipc" }
+ncui-state = { version = "0.1.0", path = "crates/ncui-state" }
+ncui-scheduler = { version = "0.1.0", path = "crates/ncui-scheduler" }
+ncui-workers = { version = "0.1.0", path = "crates/ncui-workers" }
+ncui-runtime = { version = "0.1.0", path = "crates/ncui-runtime" }
+ncui-webview = { version = "0.1.0", path = "crates/ncui-webview" }
+ncui-app = { version = "0.1.0", path = "crates/ncui-app" }
+ncui-native = { version = "0.1.0", path = "crates/ncui-native" }
+ncui-component = { version = "0.1.0", path = "crates/ncui-component" }
+ncui-webview-wry = { version = "0.1.0", path = "crates/ncui-webview-wry" }
+ncui-webview-child = { version = "0.1.0", path = "crates/ncui-webview-child" }
+ncui-gpu = { version = "0.1.0", path = "crates/ncui-gpu" }
+ncui-gpu-renderer = { version = "0.1.0", path = "crates/ncui-gpu-renderer" }
+ncui-cli = { version = "0.1.0", path = "crates/ncui-cli" }
 # External dependencies. Kept deliberately small; see ADR-012 (dependency policy).
 serde = { version = "1.0.229", features = ["derive"] }
-# A digest per bundled file. Already in the graph as a transitive dependency.
+# Canonical digests for bundle files and exact consent-operation parameters. Already in the
+# graph as a transitive dependency; the security use is recorded in ADR-012.
 sha2 = "0.10"
 # ADR-012 sixth exception: the platform call for a global shortcut is RegisterHotKey,
 # XGrabKey or RegisterEventHotKey, all foreign functions, and `unsafe_code = "forbid"`
@@ -54,6 +55,9 @@ tray-icon = "0.26"
 # permission and path-handling logic around the dialog is plain Rust and is tested without
 # the platform binding. See ADR-012 and crates/ncui-native/src/dialog.rs.
 rfd = "0.18"
+# ADR-012 ninth exception: a native menu bar is a Win32 menu, a GTK menu bar or an NSMenu.
+# Confined to the window host and behind the `native-menu` feature.
+muda = { version = "0.21", default-features = false, features = ["gtk3"] }
 serde_json = "1.0.145"
 thiserror = "2.0.17"
 tracing = "0.1.44"

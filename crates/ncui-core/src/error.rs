@@ -93,6 +93,15 @@ pub enum ErrorKind {
         reason: String,
     },
 
+    /// A Chrome `DevTools` Protocol (`CDP`) transport or target failure.
+    #[error("CDP failure ({code}): {reason}")]
+    Cdp {
+        /// The backend's stable `cdp_*` failure code.
+        code: &'static str,
+        /// The backend's diagnostic reason.
+        reason: String,
+    },
+
     /// A peer sent a message that violates the wire protocol.
     ///
     /// This is always a bug in the peer or a corrupted stream. It is never the fault of
@@ -188,6 +197,7 @@ impl ErrorKind {
             Self::Cancelled => "cancelled",
             Self::NotFound { .. } => "not_found",
             Self::Conflict { .. } => "conflict",
+            Self::Cdp { code, .. } => code,
             Self::Protocol { .. } => "protocol",
             Self::Backpressure { .. } => "backpressure",
             Self::Io { .. } => "io",
@@ -370,6 +380,13 @@ mod tests {
             }
             .is_retryable()
         );
+        assert!(
+            !ErrorKind::Cdp {
+                code: "cdp_transport_failed",
+                reason: "closed".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -396,6 +413,10 @@ mod tests {
                 id: "i".into(),
             },
             ErrorKind::Conflict { reason: "r".into() },
+            ErrorKind::Cdp {
+                code: "cdp_command_failed",
+                reason: "r".into(),
+            },
             ErrorKind::Protocol { reason: "r".into() },
             ErrorKind::Backpressure {
                 channel: "c".into(),

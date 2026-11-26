@@ -1,8 +1,8 @@
 # ADR-017: Child webviews and CDP-equivalent protocol
 
-**Status:** Accepted — Phase 1 implemented (`ncui.window.create.child`), Phase 2 implemented (the CDP WebSocket transport, 2026-11-22), Phase 3 open  
-**Date:** 2026-11-20  
-**Context:** ZCode's Browser tool requires child webviews and a DevTools Protocol (CDP) equivalent. NC-UI currently has neither. This ADR evaluates the design options, their trade-offs, and recommends an approach.
+**Status:** Accepted — Phase 1 implemented (`ncui.window.create.child`), Phase 2 implemented on Windows with an explicit WebKitGTK refusal, Phase 3 implementation integrated with final Windows/Linux verification in progress
+**Date:** 2026-11-20
+**Context:** ZCode's Browser tool requires child webviews and a DevTools Protocol (CDP) equivalent. At the time of this decision NC-UI had neither. This ADR records the options, the phased implementation, and the platform limits that remain.
 
 ## 1. The problem
 
@@ -18,13 +18,13 @@ ZCode's Browser tool needs two capabilities that NC-UI does not have:
 - Without child webviews, the Browser tool has no native port — the page disappears.
 - Without CDP, the Browser tool cannot navigate, evaluate, or screenshot the child view.
 
-### Current constraints
+### Constraints at the time of the decision
 
 1. **ADR-001 §15-16**: "does not patch, fork, or inject into the browser engine" — rules out modifying the WebView engine itself.
-2. **`unsafe_code = "forbid"`** — workspace-wide ban on `unsafe` Rust code.
+2. **`unsafe_code = "forbid"`** — workspace-wide ban on `unsafe` Rust code, except ADR-012's narrowly scoped Windows native-menu attachment.
 3. **`ncui-webview` is pure policy** — the platform binding lives in `ncui-webview-wry` (layer 3).
-4. **wry's public API has no child-webview seam** — `wry::WebViewBuilder` creates top-level windows, not children.
-5. **`wry` exposes no `PostWebMessageAsJson`** — the COM interface is not accessible from safe Rust.
+4. **wry's then-public API had no child-webview seam** — the pinned wry 0.57 line now provides `build_as_child` on Windows and `build_gtk` for an embedded GTK container on Linux.
+5. **wry exposes no `PostWebMessageAsJson`** — the COM interface is not accessible from safe Rust; the page bridge uses wry's IPC handler instead.
 
 ## 2. Options evaluated
 
@@ -36,10 +36,10 @@ ZCode's Browser tool needs two capabilities that NC-UI does not have:
 - Uses wry's existing public API — no FFI, no `unsafe`.
 - Child webview shares the parent's event loop, so no threading complexity.
 
-**Cons:**
-- wry 0.57 does not expose `add_child_webview` or `WebviewBuilder::new` for in-process children. The `wry` crate creates one webview per `WebView` instance; multiple webviews require multiple windows.
-- Even if wry supported it, the child would not have its own capability grant or navigation policy — those are per-window in NC-UI's model.
-- **Verdict: not viable with current wry.**
+**Cons (at the time):**
+- The wry API available when this ADR was written did not expose an in-process child builder. The pinned wry 0.57 line now exposes `build_as_child` and the Unix `build_gtk` path used by Phase 3.
+- Even with a child builder, the child needs its own capability grant and navigation policy rather than silently sharing the parent window's authority.
+- **Verdict at the time:** not viable with the then-current wry API. **Update:** Phase 3 uses the newer child APIs without patching wry.
 
 ### Option B: Multiple top-level windows with parent-child relationship
 
@@ -73,9 +73,9 @@ ZCode's Browser tool needs two capabilities that NC-UI does not have:
 - Does not work on Linux (WebKitGTK has no CDP) or macOS (WKWebView has no CDP).
 - **Verdict: high-risk, Windows-only, requires policy exception.**
 
-### Option D: Chrome DevTools Protocol via a WebSocket sidecar
+### Option D: Chrome DevTools Protocol via a loopback WebSocket transport
 
-**Approach:** On Windows, launch the WebView2 with `--remote-debugging-port=<port>` and connect to it via a WebSocket CDP client. The host communicates with the child webview through standard CDP over WebSocket.
+**Approach:** On Windows, launch WebView2 with `--remote-debugging-port=<port>` and connect to its published endpoint via a WebSocket CDP client. The host communicates with the named window's engine through standard CDP over WebSocket.
 
 **Pros:**
 - Uses the standard CDP protocol — no custom COM code, no `unsafe`.
@@ -84,12 +84,12 @@ ZCode's Browser tool needs two capabilities that NC-UI does not have:
 - The child webview is a real Chromium page with full DevTools access.
 
 **Cons:**
-- Requires launching a separate browser process (not embedded in the NC-UI window).
-- The WebSocket CDP connection is a new transport — adds latency.
-- WebView2 must be launched with the remote debugging flag, which may conflict with the wry host's own WebView2 instance.
-- The child is not visually embedded in the parent window — it's a separate browser process.
+- WebView2 must be launched with the remote debugging flag; the host owns and bounds the resulting loopback endpoint.
+- The WebSocket CDP connection is a new transport and adds latency.
+- The transport is Windows-only. WebKitGTK exposes a native inspector but publishes no Chromium `DevToolsActivePort` file and does not speak CDP.
+- CDP drives a page's engine; it does not by itself create an embedded child surface.
 
-**Verdict: the most practical CDP path, but does not deliver an embedded child webview.**
+**Verdict:** the practical CDP path on Windows, implemented without a sidecar browser process. Phase 3 supplies embedded surfaces separately.
 
 ### Option E: `<webview>` tag equivalent via a custom HTML element
 
@@ -97,20 +97,19 @@ ZCode's Browser tool needs two capabilities that NC-UI does not have:
 
 **Pros:**
 - Most natural developer experience — a page writes `<ncui-webview src="...">` and gets an embedded browser.
-- The child inherits the parent's capability grant (narrowed).
+- The child copies navigation policy but receives an empty capability grant rather than inheriting the parent's authority.
 - Cross-platform: WKWebView supports `addSubview`, WebViewGTK supports `add_child`, WebView2 supports child HWNDs.
 
 **Cons:**
-- Requires platform-specific native code for each OS (WebView2 child HWND, WKWebView subview, WebKitGTK child widget).
-- The wry crate does not expose these APIs — would need direct platform bindings.
-- Complex geometry synchronization between DOM and native child surface.
-- **Verdict: the right long-term design, but a large project.**
+- Requires platform-specific child containers and their lifetime rules.
+- Automatic DOM geometry adds observation, resize and z-order work beyond the explicit bounds API.
+- **Verdict:** the right long-term page API. Phase 3 implements the native child surface beneath it; the custom element remains future work.
 
 ## 3. Recommendation
 
-**Phased approach: Option B now, Option E later, Option D as a CDP bridge.**
+**Phased approach: Option B first, Option D for Windows CDP, and Option E's native child surface before its DOM custom element.**
 
-### Phase 1: Logical child windows (Option B) — immediate
+### Phase 1: Logical child windows (Option B) — implemented
 
 1. Add a `ncui.window.create_child` method that creates a second top-level window with a narrowed grant and a parent-child relationship.
 2. The child window is tracked in the parent's `WindowSummary` with `parent: Some(parent_id)`.
@@ -119,35 +118,40 @@ ZCode's Browser tool needs two capabilities that NC-UI does not have:
 
 This gives ZCode's Browser tool a working native port immediately — the browser view is a real NC-UI window with its own URL bar and content, even if it's not visually embedded.
 
-### Phase 2: CDP bridge via WebSocket (Option D) — implemented 2026-11-22
+### Phase 2: CDP bridge via WebSocket (Option D) — implemented 2026-11-22, hardened 2026-11-24
 
 1. The engine is always created with `--remote-debugging-port=0` on Windows (an ephemeral port, so two instances never collide).
-2. `ncui-webview-wry/src/cdp.rs` reads the port and bearer path from the user-data directory's `DevToolsActivePort` file and speaks the WebSocket handshake and one framed exchange over a loopback `TcpStream` — no new dependency.
-3. `ncui.cdp.send` (requiring `Capability::Cdp`) carries the command through the window's backend to the endpoint and returns the endpoint's `result`; the page-side `__cdpSend` relay remains for pages that want to observe the traffic.
-4. The engine-side call is a `WebViewBackend` method that a host without the transport refuses by name.
+2. `ncui-webview-wry/src/cdp.rs` reads the port and bearer path from the user-data directory's `DevToolsActivePort` file and performs a bounded WebSocket exchange over a loopback `TcpStream` — no new dependency. A command must carry a positive integer id; the client reads complete messages until that id answers, ignores events and unrelated responses, and safely handles ping/pong, fragmentation, close frames, and size limits.
+3. The browser endpoint is process-wide, not a window identity. During serialized top-level window creation the engine snapshots `Target.getTargets` before and after the build and stores the exactly-one new `page` target on that `EngineWindow`. A missing first-start endpoint supplies an empty baseline; zero or multiple new page targets fail closed as `cdp_target_bind_failed`, without title or URL guesses.
+4. Every page command is carried by `HostEvent::CdpRequest` with the host's engine `u64` identity and a bounded reply wait. The engine attaches `Target.attachToTarget { targetId, flatten: true }`, adds the returned `sessionId` (replacing any caller-supplied session), sends the command, and detaches afterward. Only browser-domain discovery such as `Browser.getVersion` uses the browser endpoint directly.
+5. `ncui.cdp.send` (requiring `Capability::Cdp`) carries the command through the window's backend and returns the endpoint's `result`; the page-side `__cdpSend` relay remains for pages that want to observe the traffic.
+6. `CdpError` is engine-neutral and `WebViewBackend::cdp_send` returns it directly. Runtime dispatch, screenshot/PDF capture, JSON-RPC, and recognized IPC codecs preserve the stable `cdp_*` code instead of collapsing every failure to a conflict.
+7. WebKitGTK has no Chromium CDP endpoint. Non-Windows engines return `cdp_platform_unsupported` without waiting for a port file that cannot exist; the real Linux inspector remains available through the separate devtools methods.
 
-This gives ZCode the CDP protocol it expects, with no `unsafe` code and no policy exception.
+This gives ZCode the CDP protocol it expects on Windows, with no `unsafe` code and no policy exception. Linux's refusal is explicit rather than presented as CDP support, and one window's page commands cannot silently execute in another window.
 
-### Phase 3: True embedded child webviews (Option E) — long-term
+### Phase 3: True embedded child webviews (Option E) — implementation integrated
 
-1. Design a `<ncui-webview>` custom element.
-2. Implement platform-specific child surface creation (WebView2 child HWND, WKWebView subview, WebKitGTK child).
-3. Synchronize geometry between DOM and native surface.
-4. This requires a new ADR and likely a new layer-3 crate (`ncui-webview-child`).
+1. The parent `Window` owns each child's lifecycle, isolated seam, current bounds and pending page messages; the live `WindowHost` routes operations with its internal engine window identity.
+2. Windows uses wry's `build_as_child`; Linux uses `build_gtk` inside a `gtk::Fixed`, with explicit widget movement because WebKitGTK's `set_bounds` does not move a child within that container.
+3. `ncui.window.child.create`, `ncui.window.child.bounds`, `ncui.window.child.close` and `ncui.window.child.list` expose the surface through the normal dispatch and consent pipeline.
+4. An embedded child copies navigation, action and locale policy but starts with an empty capability grant. It cannot act on its parent window or settle another page's deferred command.
+5. A `<ncui-webview>` custom element with automatic DOM geometry remains future work; the current API positions the native surface explicitly.
 
 ## 4. Security model
 
 - Child windows get a **narrowed grant** — a subset of the parent's capabilities. A page cannot grant its child more than it holds.
+- Embedded child surfaces copy the parent's navigation, action and locale policy but receive an **empty capability grant**; parent-window actions and cross-page deferred-reply settlement are refused.
 - CDP access requires a new `Capability::Cdp` — not in the default grant.
 - All CDP commands are audited and rate-limited.
 - The CDP WebSocket is loopback-only with a bearer token.
 
 ## 5. Consequences
 
-- **Positive:** Unblocks ZCode's Browser tool immediately (Phase 1). Provides a path to CDP without `unsafe` (Phase 2). Long-term embedded child webviews (Phase 3).
-- **Negative:** The child is a separate window in Phase 1, not embedded. Full CDP is Phase 2. True embedding is a large project (Phase 3).
-- **Risk:** Phase 2 depends on WebView2's `--remote-debugging-port` support, which is Windows-only. Linux/macOS CDP is not addressed.
-- **Alternative:** If ZCode's Browser tool can be adapted to use a separate window instead of an embedded view, Phase 1 alone may be sufficient.
+- **Positive:** Phase 1 supplies logical child windows; Phase 2 supplies real Windows CDP without `unsafe`; Phase 3 supplies parent-owned embedded surfaces on Windows and Linux with isolated policy and targeted IPC.
+- **Negative:** Phase 1 remains a separate window. CDP is Windows-only, and embedded geometry is explicit rather than DOM-synchronized.
+- **Risk:** native child composition and focus remain platform-specific; the parent owns engine cleanup, and every child operation is checked against that parent.
+- **Alternative:** a caller that does not need embedding can continue to use Phase 1 without the child-surface API.
 
 ## 6. References
 
@@ -155,4 +159,4 @@ This gives ZCode the CDP protocol it expects, with no `unsafe` code and no polic
 - ADR-012: Dependency policy (unsafe_code ban)
 - ADR-013: Page bridge (JSON-only seam)
 - `native/crates/nc-code-shell/src/browser_view.rs:477-615` — ZCode's current child webview usage
-- `G:/nc-ui/docs/known-gaps.md:538-541` — wry safe message seam limitation
+- `docs/known-gaps.md`, "The native surface, capability by capability" — current platform evidence and limits

@@ -1,7 +1,7 @@
 # NC-UI Goal Prompt — best-in-class against Electron, Tauri 2, and Zero Native
 
 **Status:** Draft goal specification.
-**Baseline:** the tree as measured in `docs/completion-audit.md` (2026-11-08) and `docs/known-gaps.md`.
+**Baseline:** the tree as measured in `docs/completion-audit.md` (2026-11-24) and `docs/known-gaps.md`.
 **Bar:** not "passes the gates." The gates already pass. The bar is *wins or ties on every axis a
 user or a benchmark can observe*, on every platform the competitors ship, with no capability
 silently absent.
@@ -24,27 +24,34 @@ baseline is stated before the target so the gap is visible rather than implied.
 
 ## 1. Where NC-UI stands today (the honest baseline)
 
-From `docs/completion-audit.md` §3 and §9, Windows x86_64, 5 repeats, median:
+From `comparison/bench/results/windows.json`, Windows x86_64, 2026-11-24, 5 repeats and
+200 IPC rounds per repeat, median:
 
-| Metric | Electron | NC-UI now | Tauri | Zero Native |
-| --- | ---: | ---: | ---: | ---: |
-| Cold start to window | 308.8 ms | **51.9 ms** | 52.4 ms | [E-claimed] tiny/instant |
-| Idle working set | 301.3 MiB | 349.1 MiB | 335.9 MiB | [E-claimed] |
-| Idle CPU | 0.00 % | **0.00 %** | 0.00 % | — |
-| IPC round trip | **0.188 ms** | 0.375 ms | 0.281 ms | — |
-| Distributed size | 356.8 MiB | 11.3 MiB | **3.2 MiB** | [E-claimed] tiny |
+| Metric | Electron | NC-UI (Electron port) | Tauri 2 | NC-UI (Tauri port) | Zero Native |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Cold start to window | 276.5 ms | **60.4 ms** | 64.0 ms | **60.7 ms** | [E-claimed] tiny/instant |
+| Idle working set | **304.6 MiB** | 361.9 MiB | **349.9 MiB** | 362.5 MiB | [E-claimed] |
+| Idle CPU | **0.00 %** | **0.00 %** | **0.00 %** | **0.00 %** | — |
+| IPC round trip | **0.196 ms** | 0.351 ms | 1.418 ms | **0.410 ms** | — |
+| Distributed size | 356.8 MiB | **12.3 MiB** | **8.5 MiB** | 12.3 MiB | [E-claimed] tiny |
 
 **Structural gaps that are not numbers:**
 
-- macOS does not work (`tao` main-thread event-loop panic) — desktop is Win + Linux only.
+- The macOS host path is written but **unverified**; ADR-018 records the main-thread event-loop
+  blocker, and macOS is deliberately deferred while Windows and Linux are completed.
 - **No mobile story at all.** Tauri 2 ships iOS/Android; Zero Native claims mobile.
-- Native menus (Windows) and devtools are **absent**. File/save/folder dialogs are
-  **implemented** behind the `dialogs` feature (`rfd`, ADR-012's eighth exception), except the
-  single real modal open, which needs a one-time human verification a test cannot drive and the
-  feature registry does not model; a **colour** dialog is still absent (`rfd` does not provide
-  one).
-- The page bridge is **JSON-only**; no binary path.
-- Consent is a **plain `bool`**; no unforgeable token.
+- Native menus are **implemented and verified on Windows and Linux** through `muda` (ADR-012's
+  ninth exception); macOS is unverified. DevTools open/close are implemented, with Windows open
+  state honestly reported as unknown. File/save/folder dialogs are implemented behind `dialogs`
+  (`rfd`, ADR-012's eighth exception), except the single real modal open, which needs a one-time
+  human verification; the colour dialog is implemented on Windows through the platform tool.
+- The page bridge has a JSON control path **and a bounded raw `POST` data channel** for large
+  payloads. The WebView reply still crosses as evaluated script, so the small-call IPC row is
+  unchanged by the binary data channel.
+- Dispatched destructive methods and native page commands require exact host approval. The
+  runtime validates subject-, method-, capability- and parameter-bound consume-once tokens, and
+  the desktop CLI installs a native confirmation dialog before the first window opens. The
+  legacy page `consent: true` path is gone; real dialog acceptance remains platform evidence.
 - **No bundler / transform layer.** The asset server serves files from disk and transforms
   nothing, so a TypeScript/JSX app must compile its own output first. What *is* built around the
   dev loop: `ncui new` scaffolds a runnable app in one command; `ncui run --watch` reloads the page
@@ -54,7 +61,8 @@ From `docs/completion-audit.md` §3 and §9, Windows x86_64, 5 repeats, median:
   gap is the transform itself (built-in Rust compiler vs. a dev-server proxy), which trades against
   the no-Node moat and is recorded as an open decision.
 - Native commands are **Rust-only**; a JS-only app cannot register one.
-- Release binary is reproducible for one build directory only (embedded `OUT_DIR`).
+- Release binary is reproducible for a fixed build directory; the cross-directory `OUT_DIR`
+  limitation is recorded, and no signing key is configured on this machine.
 
 ---
 
@@ -63,9 +71,10 @@ From `docs/completion-audit.md` §3 and §9, Windows x86_64, 5 repeats, median:
 NC-UI must win or tie on **every** row of the comparison table, on **every** platform it
 claims, not just cold-start.
 
-### A1. IPC round trip — beat 0.188 ms (Electron)
-- **Baseline [E-measured]:** 0.375 ms. The cause is measured, not inferred: the in-process
-  half (capability check, handler, response serialisation) is a p99 of **900 ns**, so **99.8 %
+### A1. IPC round trip — beat 0.196 ms (Electron)
+- **Baseline [E-measured]:** 0.351 ms for the Electron port and 0.410 ms for the Tauri port in
+  the 2026-11-24 comparison. The cause is measured, not inferred: the in-process
+  half (capability check, handler, response serialisation) is a p99 of **900 ns**, so **99.7 %
   of the round trip is the WebView boundary** — the page's `postMessage` in, the host's
   `evaluate_script` out, and a thread hop because the host's event loop runs on its own thread
   (`comparison/README.md`). `wry` exposes no `PostWebMessageAsJson` seam, so the reply can only
@@ -73,17 +82,18 @@ claims, not just cold-start.
 - **Correction to an earlier draft of this goal (measure-don't-trust):** a *binary* bridge
   does **not** close the small-round-trip gap. A binary transport can carry the page→host
   *request*, but the host→page *reply* must still cross as `evaluate_script(&str)`, so the
-  boundary hop — 99.8 % of the cost — remains. A binary path is worth building for
+  boundary hop — about 99.8 % of the current cost — remains. A binary path is worth building for
   **large-payload throughput** (an app moving a big buffer pays JSON's cost twice today), not
-  for the 200-call small-payload latency this row measures. Chasing ≤ 0.19 ms here with a
-  binary bridge would be optimising the 0.2 %.
+  for the 200-call small-payload latency this row measures. Chasing ≤ 0.196 ms here with a
+  binary bridge would be optimising the 0.3 %.
 - **What would actually move this row [E-target]:** remove a boundary crossing or the thread
   hop, not the encoding. Concretely: (a) a `PostWebMessageAsJson`-equivalent seam in the port
   (likely means a `wry` upstream change or a different port), or (b) co-locate the host's
   reply path with the page's event loop to remove the thread hop, or (c) accept the boundary
   cost and stop counting it as a defect — Electron's direct C++ IPC is a different architecture,
-  and Tauri (0.281 ms) pays the *same* WebView2 boundary, which is why it is only 1.2× faster
-  where Electron is 2.0×.
+  and Tauri 2 (1.452 ms in the current reproduction) pays the *same* WebView2 boundary. Against
+  Tauri 2, NC-UI's 0.436 ms already wins; Electron remains the faster row at 0.278 ms against
+  NC-UI's 0.363 ms.
 - **Reframed target:** keep the binary bridge as a *throughput* goal (large payloads), measured
   separately with a payload-size sweep; do not book it against the ≤ 0.19 ms small-round-trip
   target, which the boundary — not the encoding — owns.
@@ -92,14 +102,15 @@ claims, not just cold-start.
   hands the bytes to a route, so a page moves a large buffer raw instead of JSON-encoding it.
   `binary_channel/round_trip` in `ncui-bench` sweeps 1 KiB–1 MiB against a real listener over a
   real socket: ~150 µs fixed per round trip, throughput climbing to ~176 MiB/s at 64 KiB. The
-  WebView *boundary* hop (the 99.8 % that owns the ≤ 0.19 ms row) is untouched by design — this
+  WebView *boundary* hop (the 99.7 % that owns the ≤ 0.196 ms row) is untouched by design — this
   channel is the throughput half, measured on its own. Evidence: `changelog/unreleased/` binary
   POST channel fragment; `ncui-app` asset tests (byte-for-byte POST echo over a real socket).
 - **Evidence:** `comparison/README.md` IPC analysis; `comparison/bench/compare.py` row; the
   900 ns in-process p99 in the latency harness (`runtime.page_command_dispatch`).
 
-### A2. Idle working set — beat 301.3 MiB (Electron)
-- **Baseline [E-measured]:** 349.1 MiB, of which ~129 MiB is WebView2's own browser process.
+### A2. Idle working set — beat 304.6 MiB (Electron)
+- **Baseline [E-measured]:** 361.9 MiB for the Electron port and 362.5 MiB for the Tauri port in
+  the current comparison. An earlier minimal scaffolded-app decomposition measured 317.4 MiB.
 - **Target [E-target]:** ≤ 300 MiB tree total, Windows and Linux.
 - **Required work:** lazy-init the subsystems a minimal app does not touch (GPU renderer,
   worker pool, metrics ring) so a window-with-a-page does not pay for them; measure the
@@ -125,8 +136,9 @@ claims, not just cold-start.
   a single-process mode, or a lighter engine for minimal apps), not a code task. Recorded here
   and in `known-gaps.md` rather than marked done.
 
-### A3. Distributed size — approach 3.2 MiB (Tauri)
-- **Baseline [E-measured]:** 11.3 MiB; the GPU island renderer is 6.4 MiB of it.
+### A3. Distributed size — approach 8.5 MiB (Tauri 2)
+- **Baseline [E-measured]:** 12.3 MiB for both ports in the current comparison. An earlier
+  isolated build measured the GPU island renderer at about 6.4 MiB.
 - **Target [E-target]:** a `ncui build --profile minimal` that ships a window host **without**
   the GPU renderer for apps that do not use islands, landing ≤ 5 MiB; keep the full build for
   apps that do.
@@ -135,19 +147,22 @@ claims, not just cold-start.
   GPU-island renderer; `minimal` is the window host alone, which links out `wgpu` and the text
   shaper. The renderer became genuinely optional at link time: `wry-host` no longer implies
   `gpu-islands` (that implication was what forced 6.4 MiB into every window host), so a profile
-  can choose. Measured on the counter example: standard **11.292 MiB**, minimal **4.902 MiB**
-  (binary 4.872 MiB) — **≤ 5 MiB, target met**. The minimal bundle was launched and opened a
+  can choose. Measured earlier on the counter example: standard **11.292 MiB**, minimal
+  **4.902 MiB** (binary 4.872 MiB) — **≤ 5 MiB, target met then**. The current standard build is
+  12.3 MiB after native-menu and other runtime work; the minimal profile needs a fresh measurement.
+  The minimal bundle was launched and opened a
   real window (E2E). A page that asks for an island on `minimal` gets the asset server's 404 —
   the island route is `#[cfg(feature = "gpu-islands")]`-gated — which the counter example already
   renders as "No island on this machine" rather than a failure.
 - **Constraint honoured:** the standard build is byte-for-byte the size it was (11.292 MiB), so
   nothing was removed — the heavy subsystem was made *optional at link time*, as the constraint
-  requires. The remaining gap to Tauri's 3.2 MiB is the WebView2 host itself (a window host
+  requires. The remaining gap to Tauri 2's 8.5 MiB is the WebView2 host itself (a window host
   without the renderer cannot go below ~4.9 MiB on this toolchain), recorded rather than
   overclaimed.
 
 ### A4. Cold start — hold the win
-- **Baseline [E-measured]:** 51.9 ms. **Target:** stay ≤ 55 ms after A1–A3 land; a regression
+- **Baseline [E-measured]:** 55.1 ms for the Tauri port (51.9 ms for the Electron port).
+  **Target:** stay ≤ 55 ms after A1–A3 land; a regression
   here to pay for elsewhere is a defect.
 
 ### A5. Zero-copy GPU composition
@@ -166,24 +181,19 @@ claims, not just cold-start.
 A page must be able to do everything Electron and Tauri 2 pages can, behind the same
 capability-gated seam, with nothing recorded "absent."
 
-### B1. Fix the three absences first
-1. **Native menus (Windows).** Today blocked by `muda`'s `pub unsafe fn init_for_hwnd` vs the
-   workspace-wide `unsafe_code="forbid"`. Resolution is a **project decision**, not a code task:
-   either (a) a windowing crate with a safe menu seam, or (b) a single, audited, `#[allow(unsafe_code)]`
-   module with a written ADR-012 exception and a `reason`. Do not lift the ban globally.
-2. **File / colour / directory dialogs.** *File, save and folder dialogs are now done*: an
-   `rfd`-based implementation behind the `dialogs` feature plus the `DialogBackend` seam, so the
-   permission/option/path policy is tested headlessly and the platform adapter is thin
-   (ADR-012's eighth exception). The one step still open is not code: the single real modal open
-   needs a one-time human verification the registry does not model, recorded in
-   `docs/known-gaps.md`. A **colour** dialog remains absent — `rfd` does not provide one, so it
-   needs a separate dependency decision.
-3. **Devtools on every platform.** `wry`'s Windows backend reports `is_devtools_open()==false`
-   unconditionally and makes `close_devtools()` a no-op. Required: a devtools capability that
-   (a) opens, (b) can be *observed* open, (c) closes — on Windows, Linux, macOS. If the engine
-   cannot report state on a platform, implement the state tracking in the host so the host can
-   always answer, and gate the whole thing behind a `devtools` feature that is **on in debug and
-   off in release** by default.
+### B1. Close the former native-surface absences
+
+1. **Native menus — done on Windows and Linux.** Manifest-declared nested menus attach through
+   `muda`, route by per-window command id and deliver selections to the page. The single Windows
+   `init_for_hwnd` call is confined to the `native-menu` module under ADR-012's ninth exception;
+   the workspace ban remains in force everywhere else. macOS's safe adapter path is unverified.
+2. **File / colour / directory dialogs — implemented.** File, save and folder dialogs use `rfd`
+   behind `dialogs`; the colour dialog uses the Windows platform tool. Request validation and
+   path policy are tested headlessly. The one open evidence item is a person completing a real
+   modal selection, recorded in `docs/known-gaps.md` rather than claimed by a test.
+3. **Devtools — partial.** Open and close are implemented; Windows cannot report the open state
+   and answers `unknown` honestly. A future host-side state tracker may close that observation
+   gap without inventing a platform answer.
 
 ### B2. Complete the native surface to Tauri-2/Electron parity
 Everything below must exist as a capability-gated command with tests, or be recorded absent with
@@ -356,17 +366,21 @@ Zero Native's headline is instant rebuilds. NC-UI must match the *experience*, n
 
 ## 6. Goal E — security: keep the lead, close the two soft spots
 
-NC-UI's verified safety posture (`unsafe_code="forbid"`, clippy pedantic, fuzzing, property
-tests, capability model) is its **moat**. Zero Native being Zig means (by design) no borrow
-checker — do not trade the moat away for build speed.
+NC-UI's verified safety posture (`unsafe_code="forbid"` except one audited package, clippy
+pedantic, fuzzing, property tests, capability model) is its **moat**. Zero Native being Zig means
+(by design) no borrow checker — do not trade the moat away for build speed.
 
-- **E1. Unforgeable consent.** Replace the plain `bool` consent with a token the runtime mints at
-  the point of user confirmation. Requires the runtime UI surface that does not exist yet (see
-  `known-gaps.md`). Until it exists, the gate must keep failing closed.
+- **E1. Unforgeable consent — enforcement shipped, native acceptance evidence remains.**
+  Dispatched destructive methods and native page commands require runtime-minted tokens bound
+  to subject, method, capability, correlation and exact parameters, and spend them once. The
+  desktop CLI installs a real native confirmation surface before the first window opens; only
+  explicit approval mints and immediately spends a token. The page boolean is removed, and
+  `known-gaps.md` records the remaining per-platform dialog acceptance evidence.
 - **E2. Signed, integrity-checked bundles** (see B2). An installed app should be a signed
   artefact, not just a digest in a release doc.
-- **E3. Keep** `unsafe_code="forbid"` workspace-wide. Any new FFI (Job Objects, dialogs, menus) is
-  a scoped, audited, ADR-012-exceptioned module with a written `reason` — never a global lift.
+- **E3. Keep** `unsafe_code="forbid"` workspace-wide except ADR-012's single package-scoped
+  Windows menu attachment. Any new FFI (Job Objects, dialogs, menus) is a scoped, audited,
+  ADR-012-exceptioned module with a written `reason` — never a global lift.
 - **E4.** Every new untrusted parser (bundle, update document, dialog results, sidecar framing)
   gets a property test + a fuzz target, as the existing ones do.
 
@@ -383,29 +397,22 @@ Linux, and macOS** once B3 lands. Report the full table. NC-UI must be **best or
 cold start, idle CPU, IPC round trip, and — target after A2/A3 — memory and size. Where it is
 not, `comparison/README.md` carries the cause and the plan, exactly as it does now.
 
-**Measured status on Windows (the one host reproducible now):** the Electron / Tauri / NC-UI rows
-are measured by the harness. The **Tauri side is now Tauri 2**, the current major, ported from the
-1.2 the app was originally cloned at (the menu API, the capabilities model, and the page `invoke`
-module all changed, so it is a port of the comparison app, not a version bump; the port is carried
-by `bench/instrumentation/tauri/` and reproduces from a fresh clone). The **Electron leg and the
-Tauri 2 leg were each re-run end to end on 2026-11-14** (`python comparison/bench/compare.py`,
-repeats 5, rounds 200). It reproduces: cold start p50 **51.6 ms** for the NC-UI Electron port
-against Electron's **261.1 ms**; the Tauri legs are level (Tauri 2 **52.9 ms**, NC-UI **55.1 ms**);
-idle CPU **0.00 %** throughout; distributed size **11.4 MiB** against Electron's **356.8 MiB**
-(Tauri 2 **8.5 MiB**, smaller). One verdict changed when the Tauri side moved to the current major,
-and re-running is what surfaced it: **Tauri 2's own IPC is ~6× slower than Tauri 1.2's**
-(**1.398 ms** against the 0.252 ms measured before the upgrade, reproduced across two independent
-runs), which moves the IPC row against Tauri from a Tauri win to an NC-UI win (NC-UI **0.348 ms**).
-NC-UI's own IPC figure did not move — the same **0.31–0.37 ms** it measured against Electron and
-against Tauri 1.2 — which is the check that the row moved because Tauri's bridge changed, not
-because the measurement did. The rows where NC-UI is *not* best reproduce too, with their causes
-in `comparison/README.md`: IPC against **Electron** (**0.210 ms**, the double webview-boundary
-crossing plus thread hop) and idle memory (NC-UI **330–331 MiB** against Electron's **291.8 MiB**,
-the WebView2 runtime's own browser process). The fresh tables are recorded in
-`comparison/README.md` under "Reproducing these numbers". `build_ncui()` builds the
-renderer-carrying `wry-host-gpu` default, not the `minimal` profile A3 split off, so the size row
-cannot silently drift to ~4.9 MiB. Still open on F1: the **Zero Native** fourth side (no verified
-upstream in this repo, so its figures stay `[E-claimed]`) and the **Linux/macOS** legs (B3).
+**Measured status on Windows:** the Electron / Tauri 2 / NC-UI rows are measured by the harness.
+The **Tauri side is Tauri 2**, the current major, ported from the 1.2 the app was originally cloned
+at (the menu API, the capabilities model, and the page `invoke` module all changed, so it is a port
+of the comparison app, not a version bump; the port is carried by
+`bench/instrumentation/tauri/` and reproduces from a fresh clone). The 2026-11-24 fail-closed
+five-repeat, 200-round run gives cold start p50 **61.2 ms** for the NC-UI Electron port against
+Electron's **268.5 ms**, and **59.8 ms** for the NC-UI Tauri port against Tauri 2's **140.0 ms**.
+Idle framework-process CPU is **0.00 %** throughout. Distributed size is **12.3 MiB** against
+Electron's **356.8 MiB**, and **12.3 MiB** against Tauri 2's **8.5 MiB**. Tauri 2's IPC is
+**1.452 ms** against NC-UI's **0.436 ms**; Electron remains faster at **0.278 ms** against
+NC-UI's **0.363 ms**. Idle memory is **332.5 MiB** against Electron's **298.0 MiB**, and
+**332.6 MiB** against Tauri 2's **320.5 MiB**. The current tables are at the top of
+`comparison/README.md`. `build_ncui()` builds the renderer-carrying default, not the `minimal`
+profile A3 split off, so the size row cannot silently drift to an older ~4.9 MiB figure. Still
+open on F1: the **Zero Native** fourth side (no verified upstream in this repo, so its figures
+stay `[E-claimed]`) and the **Linux/macOS** legs (B3).
 
 ### F2. The internal regression gate becomes enforcing
 - **Baseline [E-measured]:** the latency gate reports but does not fail by default, because the
@@ -434,15 +441,17 @@ These are why the project is trustworthy; none of the goals above may violate th
 
 ## 9. Suggested sequencing (each phase is independently shippable)
 
-1. **Phase 1 — the three absences** (B1: menus, dialogs, devtools). Smallest scope, highest
-   user-visible parity gain, all Windows-first. *Dialogs (file/save/folder) are now closed*; the
-   open remainder is menus (Windows) and devtools (every platform), plus the colour dialog.
+1. **Phase 1 — the former native-surface absences** (B1: menus, dialogs, devtools). *Native
+   menus and file/save/folder/colour dialogs are delivered on their verified platforms*; the
+   remaining evidence item is a human completing a real modal selection, and DevTools open-state
+   observation on Windows is partial.
 2. **Phase 2 — the dev loop** (C2 bundler + ETag, D1/D2 reload-with-state). Removes the biggest
    "can't build a real app with this" blocker.
 3. **Phase 3 — performance** (A1 binary bridge, A2 memory, A3 size profiles). Attack IPC first;
    it's the most tractable measured gap.
 4. **Phase 4 — macOS** (B3). Unlocks the third desktop platform and the macOS leg of F1.
-5. **Phase 5 — command-language breadth** (C3, *done*: sidecar + JS commands) + **consent token** (E1).
+5. **Phase 5 — command-language breadth** (C3, *done*: sidecar + JS commands) + **consent enforcement**
+   (E1, *implemented*; native dialog acceptance evidence remains).
 6. **Phase 6 — mobile** (B4). Largest, last, own ADR.
 7. **Phase 7 — enforcement** (F2) once dedicated runners exist.
 
@@ -452,9 +461,10 @@ These are why the project is trustworthy; none of the goals above may violate th
 
 - [ ] Every row of the four-way comparison table: NC-UI best or tied, on Windows, Linux, macOS.
 - [ ] Registry reports **0 `not_implemented`** — macOS verified, and every capability present.
-- [ ] No "absent" left in `known-gaps.md` without a reason; the absences (menus, devtools,
-      colour dialog) closed. File/save/folder dialogs are done; their one open item is the
-      human-verified modal open recorded in `known-gaps.md`.
+- [ ] No "absent" left in `known-gaps.md` without a reason. Native menus and file/save/folder/
+      colour dialogs are delivered on their verified platforms; the dialogs' one open item is the
+      human-verified modal open recorded in `known-gaps.md`, and Windows DevTools open-state
+      observation remains partial.
 - [ ] Mobile host exists and its gate runs on real iOS + Android hardware.
 - [ ] Bundler + `ncui new` templates land; a TS app builds, runs and reloads with state.
 - [x] Sidecar command registration works, capability-gated (done — any-language stdin/stdout

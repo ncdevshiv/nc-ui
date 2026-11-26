@@ -31,10 +31,13 @@
 //!   the field, so a path with a space cannot become two arguments.
 //! * **The registration is readable.** [`registered`] reads back what the platform holds, so a
 //!   caller can see what a link will run rather than trust that it was set.
-//! * **Removal removes only what this module writes.** [`unregister`] deletes the scheme's key
-//!   and nothing else.
+//! * **Removal restores the user's machine.** [`unregister`] deletes the scheme's key and
+//!   restores the previous Linux handler, or removes this module's association when there was
+//!   no previous one.
 
 use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 
 // The platform tools run on Windows and Linux. macOS keeps a scheme registration in the
 // bundle's `Info.plist`, which no process here writes, so nothing runs a tool there.
@@ -426,20 +429,94 @@ fn platform_register(scheme: &str, line: &str) -> Result<(), ProtocolError> {
          NoDisplay=true\nTerminal=false\nMimeType=x-scheme-handler/{scheme};\n"
     );
     let path = applications.join(format!("ncui-{scheme}.desktop"));
+    let name = linux_desktop_name(scheme);
+    let previous_path = applications.join(format!(".ncui-{scheme}.previous"));
+    let previous = linux_default(scheme)?;
+    if previous.as_deref().is_some_and(|handler| handler != name) && !previous_path.exists() {
+        std::fs::write(&previous_path, previous.as_deref().unwrap_or_default()).map_err(
+            |error| ProtocolError::Failed {
+                tool: "desktop entry",
+                reason: format!("{}: {error}", previous_path.display()),
+            },
+        )?;
+    }
     std::fs::write(&path, entry).map_err(|error| ProtocolError::Failed {
         tool: "desktop entry",
         reason: format!("{}: {error}", path.display()),
     })?;
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    linux_set_default(scheme, &name)
+}
+
+/// Removes the desktop entry and the association.
+#[cfg(target_os = "linux")]
+fn platform_unregister(scheme: &str) -> Result<(), ProtocolError> {
+    let applications = linux_applications_dir()?;
+    let path = applications.join(format!("ncui-{scheme}.desktop"));
+    let previous_path = applications.join(format!(".ncui-{scheme}.previous"));
+    let name = linux_desktop_name(scheme);
+    if linux_default(scheme)?.as_deref() == Some(name.as_str()) {
+        let previous = match std::fs::read_to_string(&previous_path) {
+            Ok(previous) => previous.trim().to_owned(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(ProtocolError::Failed {
+                    tool: "desktop entry",
+                    reason: format!("{}: {error}", previous_path.display()),
+                });
+            }
+        };
+        if previous.is_empty() {
+            linux_remove_association(scheme, &name)?;
+        } else {
+            linux_set_default(scheme, &previous)?;
+        }
+    }
+    linux_remove_file(&path)?;
+    linux_remove_file(&previous_path)
+}
+
+/// The desktop-entry id this module owns for a scheme.
+#[cfg(target_os = "linux")]
+fn linux_desktop_name(scheme: &str) -> String {
+    format!("ncui-{scheme}.desktop")
+}
+
+/// Reads the default desktop entry through the platform's resolver.
+#[cfg(target_os = "linux")]
+fn linux_default(scheme: &str) -> Result<Option<String>, ProtocolError> {
+    let outcome = run_command(
+        Path::new("xdg-mime"),
+        "xdg-mime",
+        &[
+            "query".to_owned(),
+            "default".to_owned(),
+            format!("x-scheme-handler/{scheme}"),
+        ],
+        None,
+        PROTOCOL_TIMEOUT,
+        4096,
+        None,
+    )
+    .map_err(|error| tool_error("xdg-mime", &error))?;
+    if outcome.status != 0 {
+        return Err(ProtocolError::Failed {
+            tool: "xdg-mime",
+            reason: first_line(&outcome.stderr, &outcome.stdout),
+        });
+    }
+    let handler = outcome.stdout.trim();
+    Ok((!handler.is_empty()).then(|| handler.to_owned()))
+}
+
+/// Sets the default desktop entry through the platform's resolver.
+#[cfg(target_os = "linux")]
+fn linux_set_default(scheme: &str, handler: &str) -> Result<(), ProtocolError> {
     let outcome = run_command(
         Path::new("xdg-mime"),
         "xdg-mime",
         &[
             "default".to_owned(),
-            name,
+            handler.to_owned(),
             format!("x-scheme-handler/{scheme}"),
         ],
         None,
@@ -457,11 +534,80 @@ fn platform_register(scheme: &str, line: &str) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-/// Removes the desktop entry and the association.
+/// Removes only this module's desktop id from the user's MIME association lists.
 #[cfg(target_os = "linux")]
-fn platform_unregister(scheme: &str) -> Result<(), ProtocolError> {
-    let path = linux_applications_dir()?.join(format!("ncui-{scheme}.desktop"));
-    match std::fs::remove_file(&path) {
+fn linux_remove_association(scheme: &str, handler: &str) -> Result<(), ProtocolError> {
+    let applications = linux_applications_dir()?;
+    let config = linux_config_dir()?;
+    let mime = format!("x-scheme-handler/{scheme}");
+    for path in [
+        config.join("mimeapps.list"),
+        applications.join("mimeapps.list"),
+        applications.join("defaults.list"),
+    ] {
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(ProtocolError::Failed {
+                    tool: "MIME association",
+                    reason: format!("{}: {error}", path.display()),
+                });
+            }
+        };
+        let mut changed = false;
+        let mut kept = String::with_capacity(contents.len());
+        for line in contents.split_inclusive('\n') {
+            let Some((key, value)) = line.split_once('=') else {
+                kept.push_str(line);
+                continue;
+            };
+            if key.trim() != mime {
+                kept.push_str(line);
+                continue;
+            }
+            let entries: Vec<&str> = value
+                .trim()
+                .split(';')
+                .filter(|entry| !entry.trim().is_empty())
+                .collect();
+            let handlers: Vec<&str> = entries
+                .iter()
+                .copied()
+                .filter(|entry| entry.trim() != handler)
+                .collect();
+            if handlers.len() == entries.len() {
+                kept.push_str(line);
+                continue;
+            }
+            changed = true;
+            if handlers.is_empty() {
+                continue;
+            }
+            kept.push_str(key);
+            kept.push('=');
+            kept.push_str(&handlers.join(";"));
+            kept.push_str(";\n");
+        }
+        if changed {
+            let staging = path.with_extension("list.ncui-tmp");
+            std::fs::write(&staging, kept).map_err(|error| ProtocolError::Failed {
+                tool: "MIME association",
+                reason: format!("{}: {error}", staging.display()),
+            })?;
+            std::fs::rename(&staging, &path).map_err(|error| ProtocolError::Failed {
+                tool: "MIME association",
+                reason: format!("{}: {error}", path.display()),
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Removes a file whose absence already means the requested state.
+#[cfg(target_os = "linux")]
+fn linux_remove_file(path: &Path) -> Result<(), ProtocolError> {
+    match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(ProtocolError::Failed {
@@ -489,17 +635,37 @@ fn platform_registered(scheme: &str) -> Result<Option<String>, ProtocolError> {
 
 /// Where a user's desktop entries live.
 #[cfg(target_os = "linux")]
-fn linux_applications_dir() -> Result<std::path::PathBuf, ProtocolError> {
-    let home = std::env::var("HOME").map_err(|_| ProtocolError::Failed {
-        tool: "desktop entry",
-        reason: "HOME is not set, so the applications directory is unknown".to_owned(),
-    })?;
-    let directory = Path::new(&home).join(".local/share/applications");
+fn linux_applications_dir() -> Result<PathBuf, ProtocolError> {
+    let directory = match std::env::var_os("XDG_DATA_HOME") {
+        Some(path) if Path::new(&path).is_absolute() => PathBuf::from(path).join("applications"),
+        _ => {
+            let home = std::env::var("HOME").map_err(|_| ProtocolError::Failed {
+                tool: "desktop entry",
+                reason: "HOME is not set, so the applications directory is unknown".to_owned(),
+            })?;
+            Path::new(&home).join(".local/share/applications")
+        }
+    };
     std::fs::create_dir_all(&directory).map_err(|error| ProtocolError::Failed {
         tool: "desktop entry",
         reason: format!("{}: {error}", directory.display()),
     })?;
     Ok(directory)
+}
+
+/// The user's XDG configuration directory.
+#[cfg(target_os = "linux")]
+fn linux_config_dir() -> Result<PathBuf, ProtocolError> {
+    match std::env::var_os("XDG_CONFIG_HOME") {
+        Some(path) if Path::new(&path).is_absolute() => Ok(PathBuf::from(path)),
+        _ => {
+            let home = std::env::var("HOME").map_err(|_| ProtocolError::Failed {
+                tool: "MIME association",
+                reason: "HOME is not set, so the configuration directory is unknown".to_owned(),
+            })?;
+            Ok(Path::new(&home).join(".config"))
+        }
+    }
 }
 
 /// macOS keeps a scheme in the bundle's `Info.plist`.
@@ -607,6 +773,103 @@ mod tests {
     fn a_quote_inside_an_argument_cannot_end_it() {
         let line = command_line(Path::new("ncui"), &["a\"b".to_owned()]);
         assert_eq!(line, "\"ncui\" \"a\\\"b\"");
+    }
+
+    #[cfg(target_os = "linux")]
+    struct LinuxHome(PathBuf);
+
+    #[cfg(target_os = "linux")]
+    impl LinuxHome {
+        fn new() -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|time| time.as_nanos())
+                .unwrap_or_default();
+            let path =
+                std::env::temp_dir().join(format!("ncui-protocol-{}-{nonce}", std::process::id()));
+            std::fs::create_dir_all(&path).expect("the scratch home is created");
+            Self(path)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for LinuxHome {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_linux_registration_restores_or_removes_the_platform_association() {
+        if std::env::var("NCUI_PROTOCOL_TEST_CHILD").as_deref() != Ok("1") {
+            let home = LinuxHome::new();
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "tests::a_linux_registration_restores_or_removes_the_platform_association",
+                    "--exact",
+                    "--nocapture",
+                ])
+                .env("NCUI_PROTOCOL_TEST_CHILD", "1")
+                .env("HOME", &home.0)
+                .env("XDG_CONFIG_HOME", home.0.join("config"))
+                .env("XDG_DATA_HOME", home.0.join("data"))
+                .output()
+                .expect("the isolated test process starts");
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let scheme = "ncui-test-linux-protocol";
+        let name = linux_desktop_name(scheme);
+        let applications = linux_applications_dir().expect("applications directory");
+        let previous_name = "ncui-previous.desktop";
+        std::fs::write(
+            applications.join(previous_name),
+            format!(
+                "[Desktop Entry]\nType=Application\nName=Previous\nExec=true\nNoDisplay=true\nMimeType=x-scheme-handler/{scheme};\n"
+            ),
+        )
+        .expect("the previous handler exists");
+        linux_set_default(scheme, previous_name).expect("the previous handler is the default");
+        let program = std::env::current_exe().expect("the test binary has a path");
+
+        register(
+            scheme,
+            &program,
+            &["--app".to_owned(), "somewhere".to_owned()],
+        )
+        .expect("the scheme registers");
+        assert_eq!(
+            linux_default(scheme).expect("default is readable"),
+            Some(name.clone())
+        );
+        assert!(
+            registered(scheme)
+                .expect("registration is readable")
+                .expect("registration is there")
+                .contains(&program.display().to_string())
+        );
+        unregister(scheme).expect("the scheme is removed");
+        assert_eq!(
+            linux_default(scheme).expect("default is readable"),
+            Some(previous_name.to_owned())
+        );
+        assert_eq!(registered(scheme).expect("still readable"), None);
+
+        let config = linux_config_dir().expect("config directory");
+        let _ = std::fs::remove_file(config.join("mimeapps.list"));
+        let _ = std::fs::remove_file(applications.join("mimeapps.list"));
+        let _ = std::fs::remove_file(applications.join("defaults.list"));
+        register(scheme, &program, &[]).expect("the scheme registers without a previous handler");
+        unregister(scheme).expect("the scheme and its association are removed");
+        assert_eq!(linux_default(scheme).expect("default is readable"), None);
+        assert_eq!(registered(scheme).expect("still readable"), None);
     }
 
     #[cfg(windows)]

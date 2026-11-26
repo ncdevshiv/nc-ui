@@ -207,16 +207,17 @@ fn a_destructive_call_without_consent_is_refused_through_the_adapter_too() {
         json!(true),
         "consent is required for a destructive operation: {without}"
     );
-    // And a minted consent token serves it, which is what proves the argument reached the
-    // gate rather than being dropped by the translation. The legacy `consent: true`
-    // authorizes nothing destructive; the token is the consent.
+    // The token must reach the gate through translation, bound to this session and the
+    // operation's empty parameters.
     let correlation = ncui_core::CorrelationId::new();
     let token = harness
         .runtime
         .mint_consent(
             correlation,
+            "mcp-test",
             "ncui.logs.purge",
             CapabilitySet::empty().with(Capability::ReadLogs),
+            &json!({}),
         )
         .expect("mint");
     let with = harness.call(

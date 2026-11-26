@@ -3,20 +3,18 @@
 //! A child webview is a real browser surface that lives inside a parent
 //! window's frame, positioned over a rectangle the page chooses. This crate is
 //! the *policy* half of that: what a child is, who may create one, where its
-//! rectangle may point, and how live children are recorded. The engine half —
-//! actually building the surface and moving it — is implemented by a host
-//! binding (the wry host, behind its `wry-engine` feature) through the
-//! [`ChildWebviewEngine`] seam.
+//! rectangle may point. Production live state belongs to the parent `Window`;
+//! this crate supplies its engine-neutral DTOs and validation. The engine half —
+//! actually building the surface and moving it — is implemented by the wry host
+//! behind its `wry-engine` feature.
 //!
 //! # The contract in one paragraph
 //!
 //! A caller describes a child with a [`ChildWebviewRequest`]: the URL its page
-//! starts at, and the rectangle of logical pixels — relative to the parent
-//! window's client area — the child should occupy. The registry asks the
-//! engine to build it, records the live child, and hands back a
-//! [`ChildWebviewHandle`]. Geometry is explicit: the page re-issues the bounds
-//! it wants (for example when the parent resizes), and the engine applies
-//! them. Nothing here invents a layout.
+//! starts at, and the rectangle of logical pixels relative to the parent window's
+//! client area. The parent `Window` records the engine-issued identity and owns
+//! the live child. Geometry is explicit: the page re-issues the bounds it wants,
+//! and the engine applies them. Nothing here invents a layout.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -48,8 +46,8 @@ pub enum ChildWebviewError {
     /// The parent window's engine has no child surface — a headless backend,
     /// or a build whose binding does not implement embedding.
     NotSupported { reason: String },
-    /// The parent window is not open, so there is nothing to embed into.
-    ParentUnavailable { window: WindowId },
+    /// The parent engine surface is unavailable, so there is nothing to embed into.
+    ParentUnavailable,
     /// The request was malformed: a URL over the bound, or a rectangle outside
     /// the parent's client area.
     InvalidRequest { field: String, reason: String },
@@ -64,7 +62,7 @@ impl ChildWebviewError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::NotSupported { .. } => "child_not_supported",
-            Self::ParentUnavailable { .. } => "child_parent_unavailable",
+            Self::ParentUnavailable => "child_parent_unavailable",
             Self::InvalidRequest { .. } => "child_request_invalid",
             Self::EngineFailed { .. } => "child_engine_failed",
         }
@@ -77,8 +75,8 @@ impl core::fmt::Display for ChildWebviewError {
             Self::NotSupported { reason } => {
                 write!(f, "child webviews are not supported here: {reason}")
             }
-            Self::ParentUnavailable { window } => {
-                write!(f, "the parent window {window} is not open")
+            Self::ParentUnavailable => {
+                write!(f, "the parent engine surface is unavailable")
             }
             Self::InvalidRequest { field, reason } => {
                 write!(f, "invalid child webview `{field}`: {reason}")
@@ -97,7 +95,7 @@ impl core::fmt::Display for ChildWebviewError {
 /// the runtime invented rather than one the application asked for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChildWebviewRequest {
-    /// Where the child's page starts.
+    /// Where the child's page starts. May be empty for a bounds-only update.
     pub url: String,
     /// The child's rectangle in logical pixels, relative to the parent
     /// window's client area: x, y, width, height.
@@ -108,23 +106,45 @@ pub struct ChildWebviewRequest {
 }
 
 impl ChildWebviewRequest {
-    /// Validates the request against the surface's own rules.
+    /// Validates both the URL and geometry for a creation request.
     ///
     /// The URL is bounded, and the rectangle must sit inside the parent's
     /// client area: a child with a negative origin or a zero/oversized extent
     /// is a request the runtime refuses rather than one the engine has to
-    /// interpret.
+    /// interpret. Bounds-only updates can use [`Self::validate_bounds`] instead,
+    /// leaving the URL empty.
     ///
     /// # Errors
     ///
     /// [`ChildWebviewError::InvalidRequest`] naming the offending field.
     pub fn validate(&self) -> Result<(), ChildWebviewError> {
+        self.validate_url()?;
+        self.validate_bounds()
+    }
+
+    /// Validates only the child's starting URL.
+    ///
+    /// # Errors
+    ///
+    /// [`ChildWebviewError::InvalidRequest`] when the URL is empty or over its
+    /// byte bound.
+    pub fn validate_url(&self) -> Result<(), ChildWebviewError> {
         if self.url.is_empty() || self.url.len() > MAX_CHILD_URL_BYTES {
             return Err(ChildWebviewError::InvalidRequest {
                 field: "url".to_owned(),
                 reason: format!("must be a non-empty URL of at most {MAX_CHILD_URL_BYTES} bytes"),
             });
         }
+        Ok(())
+    }
+
+    /// Validates only the child's rectangle geometry.
+    ///
+    /// # Errors
+    ///
+    /// [`ChildWebviewError::InvalidRequest`] naming the offending geometry
+    /// field.
+    pub fn validate_bounds(&self) -> Result<(), ChildWebviewError> {
         if self.x < MIN_CHILD_COORDINATE || self.y < MIN_CHILD_COORDINATE {
             return Err(ChildWebviewError::InvalidRequest {
                 field: "x,y".to_owned(),
@@ -158,16 +178,25 @@ impl ChildWebviewRequest {
 pub struct ChildWebviewId(u64);
 
 impl ChildWebviewId {
-    /// Wraps a raw counter value as an identity. The registry mints these.
+    /// Wraps the raw identity issued by the child webview engine.
     #[must_use]
     pub const fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
 
-    /// The raw counter value, for the registry's own bookkeeping.
+    /// The engine-issued raw identity used to address the child.
     #[must_use]
     pub const fn raw(self) -> u64 {
         self.0
+    }
+
+    /// Parses the canonical `child-` plus sixteen-hex-digit wire identity.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let digits = text.strip_prefix("child-").filter(|digits| {
+            digits.len() == 16 && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })?;
+        u64::from_str_radix(digits, 16).ok().map(Self)
     }
 }
 
@@ -218,22 +247,19 @@ pub trait ChildWebviewEngine: Send + Sync {
         child: u64,
     ) -> std::result::Result<(), ChildWebviewError>;
 
-    /// Every live child this engine holds, oldest first.
+    /// Every live child this engine holds.
     fn list_children(&self) -> Vec<ChildWebviewEntry> {
         Vec::new()
     }
 }
 
-/// The process-wide record of live child webviews, plus the engine that builds them.
+/// An explicit record of live child webviews, plus the engine that builds them.
 ///
-/// One registry per runtime. Children are keyed by their own identity; the
-/// parent's identity is recorded with them so enumeration can show the tree
-/// and so a caller cannot move a child through the wrong parent's handle.
+/// Engine-neutral registry utility; the embedded runtime's live authority is the parent `Window`.
 #[derive(Clone)]
 pub struct ChildWebviewRegistry {
     engine: Arc<dyn ChildWebviewEngine>,
     children: Arc<Mutex<BTreeMap<ChildWebviewId, ChildWebviewEntry>>>,
-    counter: Arc<Mutex<u64>>,
 }
 
 impl core::fmt::Debug for ChildWebviewRegistry {
@@ -244,7 +270,6 @@ impl core::fmt::Debug for ChildWebviewRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         f.debug_struct("ChildWebviewRegistry")
             .field("children", &children.keys().collect::<Vec<_>>())
-            .field("next_counter", &self.counter)
             .field("engine", &"dyn ChildWebviewEngine")
             .finish()
     }
@@ -257,7 +282,6 @@ impl ChildWebviewRegistry {
         Self {
             engine,
             children: Arc::new(Mutex::new(BTreeMap::new())),
-            counter: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -280,8 +304,7 @@ impl ChildWebviewRegistry {
         request: &ChildWebviewRequest,
     ) -> std::result::Result<ChildWebviewHandle, ChildWebviewError> {
         request.validate()?;
-        let child = self.next_id();
-        self.engine.create_child(parent, request)?;
+        let child = ChildWebviewId::from_raw(self.engine.create_child(parent, request)?);
         let entry = ChildWebviewEntry {
             id: child,
             parent,
@@ -300,9 +323,9 @@ impl ChildWebviewRegistry {
 
     /// Applies a new rectangle to a live child.
     ///
-    /// The request is validated the same way creation is, and the child must
-    /// still be live: moving a child that has been closed is a refusal, not a
-    /// silent no-op.
+    /// Only the request's geometry is validated, so a bounds-only update may
+    /// leave its URL empty. The child must still be live: moving a child that
+    /// has been closed is a refusal, not a silent no-op.
     ///
     /// # Errors
     ///
@@ -314,7 +337,7 @@ impl ChildWebviewRegistry {
         child: ChildWebviewId,
         request: &ChildWebviewRequest,
     ) -> std::result::Result<(), ChildWebviewError> {
-        request.validate()?;
+        request.validate_bounds()?;
         let entry = self.live_child(child)?;
         self.engine
             .set_child_bounds(entry.parent, child.raw(), request)?;
@@ -326,7 +349,10 @@ impl ChildWebviewRegistry {
                 ChildWebviewEntry {
                     id: child,
                     parent: entry.parent,
-                    bounds: request.clone(),
+                    bounds: ChildWebviewRequest {
+                        url: entry.bounds.url,
+                        ..request.clone()
+                    },
                 },
             );
         Ok(())
@@ -352,7 +378,7 @@ impl ChildWebviewRegistry {
         Ok(())
     }
 
-    /// Every live child, oldest first.
+    /// Every live child.
     #[must_use]
     pub fn list(&self) -> Vec<ChildWebviewEntry> {
         self.children
@@ -371,15 +397,6 @@ impl ChildWebviewRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&child)
             .cloned()
-    }
-
-    fn next_id(&self) -> ChildWebviewId {
-        let mut counter = self
-            .counter
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *counter = counter.wrapping_add(1);
-        ChildWebviewId::from_raw(*counter)
     }
 
     fn live_child(
@@ -496,6 +513,8 @@ pub fn headless_registry() -> ChildWebviewRegistry {
     reason = "test assertions must abort loudly on failure"
 )]
 mod tests {
+    use std::collections::VecDeque;
+
     use super::*;
 
     /// A recording engine: it answers the seam's calls and keeps what it was
@@ -503,9 +522,10 @@ mod tests {
     #[derive(Debug, Default)]
     struct RecordingEngine {
         created: Mutex<Vec<(WindowId, ChildWebviewRequest)>>,
-        moved: Mutex<Vec<(u64, ChildWebviewRequest)>>,
-        closed: Mutex<Vec<u64>>,
+        moved: Mutex<Vec<(WindowId, u64, ChildWebviewRequest)>>,
+        closed: Mutex<Vec<(WindowId, u64)>>,
         fail_creates: Mutex<bool>,
+        issued_ids: Mutex<VecDeque<u64>>,
     }
 
     impl ChildWebviewEngine for RecordingEngine {
@@ -524,11 +544,17 @@ mod tests {
                 });
             }
             let id = self
-                .created
+                .issued_ids
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .len() as u64
-                + 1;
+                .pop_front()
+                .unwrap_or_else(|| {
+                    self.created
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .len() as u64
+                        + 1
+                });
             self.created
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -538,26 +564,26 @@ mod tests {
 
         fn set_child_bounds(
             &self,
-            _parent: WindowId,
+            parent: WindowId,
             child: u64,
             request: &ChildWebviewRequest,
         ) -> std::result::Result<(), ChildWebviewError> {
             self.moved
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push((child, request.clone()));
+                .push((parent, child, request.clone()));
             Ok(())
         }
 
         fn close_child(
             &self,
-            _parent: WindowId,
+            parent: WindowId,
             child: u64,
         ) -> std::result::Result<(), ChildWebviewError> {
             self.closed
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(child);
+                .push((parent, child));
             Ok(())
         }
     }
@@ -572,10 +598,36 @@ mod tests {
         }
     }
 
+    fn bounds_at(x: i32, y: i32, width: u32, height: u32) -> ChildWebviewRequest {
+        let mut request = request_at(x, y, width, height);
+        request.url.clear();
+        request
+    }
+
     fn parent_id() -> WindowId {
         "11111111111111111111111111111111"
             .parse()
             .expect("window id")
+    }
+
+    #[test]
+    fn child_ids_round_trip_through_their_canonical_wire_form() {
+        for raw in [0, 1, 0x0123_4567_89ab_cdef, u64::MAX] {
+            let id = ChildWebviewId::from_raw(raw);
+            let text = id.to_string();
+            assert_eq!(ChildWebviewId::parse(&text), Some(id));
+        }
+        for malformed in [
+            "",
+            "1",
+            "child-1",
+            "child-00000000000000001",
+            "child-000000000000000g",
+            "child-+000000000000001",
+            "0000000000000001",
+        ] {
+            assert_eq!(ChildWebviewId::parse(malformed), None, "{malformed}");
+        }
     }
 
     #[test]
@@ -589,6 +641,116 @@ mod tests {
         let entry = registry.get(handle.id).expect("recorded");
         assert_eq!(entry.bounds.width, 400);
         assert_eq!(registry.list().len(), 1);
+    }
+
+    #[test]
+    fn failed_and_interleaved_creations_preserve_engine_issued_ids() {
+        let engine = Arc::new(RecordingEngine::default());
+        engine
+            .issued_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend([0, u64::MAX]);
+        let registry = ChildWebviewRegistry::new(engine.clone());
+        let first_parent = parent_id();
+        let second_parent = "22222222222222222222222222222222"
+            .parse()
+            .expect("window id");
+
+        let first = registry
+            .create(first_parent, &request_at(10, 20, 400, 300))
+            .expect("first creation succeeds");
+        assert_eq!(first.id, ChildWebviewId::from_raw(0));
+        assert_eq!(first.parent, first_parent);
+
+        *engine
+            .fail_creates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        let error = registry
+            .create(second_parent, &request_at(30, 40, 500, 350))
+            .expect_err("interleaved creation fails");
+        assert_eq!(error.code(), "child_engine_failed");
+        *engine
+            .fail_creates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+
+        let second = registry
+            .create(second_parent, &request_at(30, 40, 500, 350))
+            .expect("creation after the failure succeeds");
+        assert_eq!(second.id, ChildWebviewId::from_raw(u64::MAX));
+        assert_eq!(second.parent, second_parent);
+        assert_eq!(
+            registry
+                .list()
+                .into_iter()
+                .map(|entry| (entry.id, entry.parent))
+                .collect::<Vec<_>>(),
+            vec![
+                (ChildWebviewId::from_raw(0), first_parent),
+                (ChildWebviewId::from_raw(u64::MAX), second_parent),
+            ]
+        );
+        assert_eq!(
+            engine
+                .created
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn interleaved_bounds_and_close_use_engine_issued_ids() {
+        const FIRST_ID: u64 = 0x0102_0304_0506_0708;
+        const SECOND_ID: u64 = 0xfedc_ba98_7654_3210;
+        let engine = Arc::new(RecordingEngine::default());
+        engine
+            .issued_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend([FIRST_ID, SECOND_ID]);
+        let registry = ChildWebviewRegistry::new(engine.clone());
+        let first_parent = parent_id();
+        let second_parent = "22222222222222222222222222222222"
+            .parse()
+            .expect("window id");
+        let first = registry
+            .create(first_parent, &request_at(0, 0, 400, 300))
+            .expect("first creation succeeds");
+        let second = registry
+            .create(second_parent, &request_at(0, 0, 500, 350))
+            .expect("second creation succeeds");
+        let first_bounds = request_at(40, 50, 640, 480);
+        let second_bounds = request_at(60, 70, 720, 540);
+
+        first.set_bounds(&first_bounds).expect("first child moves");
+        second
+            .set_bounds(&second_bounds)
+            .expect("second child moves");
+        second.close().expect("second child closes");
+        first.close().expect("first child closes");
+
+        assert_eq!(
+            *engine
+                .moved
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![
+                (first_parent, FIRST_ID, first_bounds),
+                (second_parent, SECOND_ID, second_bounds),
+            ]
+        );
+        assert_eq!(
+            *engine
+                .closed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![(second_parent, SECOND_ID), (first_parent, FIRST_ID)]
+        );
+        assert!(registry.list().is_empty());
     }
 
     #[test]
@@ -628,17 +790,84 @@ mod tests {
     }
 
     #[test]
-    fn set_bounds_moves_a_live_child_and_is_recorded() {
-        let registry = ChildWebviewRegistry::new(Arc::new(RecordingEngine::default()));
-        let handle = registry
-            .create(parent_id(), &request_at(0, 0, 400, 300))
-            .expect("created");
-        handle
-            .set_bounds(&request_at(40, 50, 640, 480))
-            .expect("moved");
+    fn url_and_bounds_validation_are_independent() {
+        let request = bounds_at(0, 0, 400, 300);
+        let error = request
+            .validate_url()
+            .expect_err("bounds-only request has no URL");
+        assert_eq!(error.code(), "child_request_invalid");
+        assert!(error.to_string().contains("url"));
+        request
+            .validate_bounds()
+            .expect("bounds-only geometry is valid");
+        assert!(request.validate().is_err(), "creation still needs a URL");
+
+        let mut invalid_bounds = request;
+        invalid_bounds.x = -1;
+        let error = invalid_bounds
+            .validate_bounds()
+            .expect_err("negative origin is invalid");
+        assert_eq!(error.code(), "child_request_invalid");
+        assert!(error.to_string().contains("x,y"));
+    }
+
+    #[test]
+    fn creation_validates_both_url_and_bounds() {
+        let engine = Arc::new(RecordingEngine::default());
+        let registry = ChildWebviewRegistry::new(engine.clone());
+        let error = registry
+            .create(parent_id(), &bounds_at(0, 0, 400, 300))
+            .expect_err("creation requires a URL");
+        assert_eq!(error.code(), "child_request_invalid");
+        assert!(error.to_string().contains("url"));
+        assert!(
+            engine
+                .created
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "invalid creation never reached the engine"
+        );
+    }
+
+    #[test]
+    fn set_bounds_moves_a_live_child_with_only_bounds_validation() {
+        let engine = Arc::new(RecordingEngine::default());
+        let registry = ChildWebviewRegistry::new(engine.clone());
+        let parent = parent_id();
+        let created = request_at(0, 0, 400, 300);
+        let handle = registry.create(parent, &created).expect("created");
+        let bounds = bounds_at(40, 50, 640, 480);
+        handle.set_bounds(&bounds).expect("moved without a URL");
         let entry = registry.get(handle.id).expect("still live");
-        assert_eq!(entry.bounds.x, 40);
-        assert_eq!(entry.bounds.height, 480);
+        assert_eq!(
+            entry.bounds,
+            ChildWebviewRequest {
+                url: created.url,
+                ..bounds
+            }
+        );
+        assert_eq!(
+            *engine
+                .moved
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![(parent, handle.id.raw(), bounds)]
+        );
+
+        let error = handle
+            .set_bounds(&bounds_at(-1, 0, 640, 480))
+            .expect_err("bounds-only update still validates geometry");
+        assert_eq!(error.code(), "child_request_invalid");
+        assert_eq!(
+            engine
+                .moved
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1,
+            "invalid geometry never reached the engine"
+        );
     }
 
     #[test]

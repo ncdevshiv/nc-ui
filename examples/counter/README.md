@@ -72,9 +72,9 @@ the runtime's process. It is the whole component story in one small artifact.
 ## Why the button asks for consent
 
 `run.components` is a destructive capability: it is permission to execute code nobody in this
-project wrote. Every call that loads or drives a component therefore states `consent: true`, and
-a call that does not state it is treated as withholding it. Remove `run.components` from
-`ncui.app.json` and the `component.*` commands do not exist at all — the page gets a refusal
+project wrote. Every call that loads or drives a component therefore needs host confirmation for
+that exact operation; the page cannot authorize itself with a boolean. Remove `run.components`
+from `ncui.app.json` and the `component.*` commands do not exist at all — the page gets a refusal
 naming an unknown action rather than a surface that refuses.
 
 ## Shipping it

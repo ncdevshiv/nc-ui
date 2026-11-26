@@ -613,6 +613,11 @@ where
 /// Whether a variable's name marks it as a secret.
 #[must_use]
 pub fn is_secret_shaped(name: &str) -> bool {
+    // A session-bus address is a local IPC endpoint, not a session credential. Platform tools
+    // such as notify-send cannot reach the user's notification service without it.
+    if name == "DBUS_SESSION_BUS_ADDRESS" {
+        return false;
+    }
     let upper = name.to_ascii_uppercase();
     SECRET_NAME_PATTERNS
         .iter()
@@ -1064,13 +1069,21 @@ mod tests {
         let kept = scrubbed_from([
             ("PATH".to_owned(), "/usr/bin".to_owned()),
             ("HOME".to_owned(), "/home/someone".to_owned()),
+            (
+                "DBUS_SESSION_BUS_ADDRESS".to_owned(),
+                "unix:path=/run/user/1000/bus".to_owned(),
+            ),
             ("GITHUB_TOKEN".to_owned(), "ghp_example".to_owned()),
             ("AWS_SECRET_ACCESS_KEY".to_owned(), "aws_example".to_owned()),
             ("HTTP_COOKIE".to_owned(), "session=example".to_owned()),
             ("DATABASE_PASSWORD".to_owned(), "db_example".to_owned()),
         ]);
         let names: Vec<&str> = kept.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(names, ["PATH", "HOME"], "only the ordinary names survive");
+        assert_eq!(
+            names,
+            ["PATH", "HOME", "DBUS_SESSION_BUS_ADDRESS"],
+            "ordinary variables and the local session-bus endpoint survive"
+        );
         assert!(
             kept.iter().all(|(_, value)| !value.contains("example")),
             "no secret value may survive the scrub"
@@ -1093,7 +1106,15 @@ mod tests {
         ] {
             assert!(is_secret_shaped(name), "{name} must be treated as a secret");
         }
-        for name in ["PATH", "HOME", "USERPROFILE", "SystemRoot", "LANG", "TEMP"] {
+        for name in [
+            "PATH",
+            "HOME",
+            "USERPROFILE",
+            "SystemRoot",
+            "LANG",
+            "TEMP",
+            "DBUS_SESSION_BUS_ADDRESS",
+        ] {
             assert!(!is_secret_shaped(name), "{name} must survive the scrub");
         }
     }

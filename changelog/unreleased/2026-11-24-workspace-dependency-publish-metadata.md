@@ -1,0 +1,1 @@
+- **Public workspace crates now declare explicit versions for internal dependencies.** The versioned workspace metadata removes the first-party `cargo deny` skip list without suppressing wildcard errors, so published manifests can resolve registry dependencies and the supply-chain gate runs without warnings.

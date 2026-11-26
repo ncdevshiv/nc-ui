@@ -19,10 +19,57 @@
 )]
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ncui_core::Limits;
+use ncui_core::{Capability, CapabilitySet, Limits};
 use ncui_runtime::application::Application;
+use ncui_runtime::consent::{ConsentPrompter, ConsentRequest};
+
+/// The harness is the host for these runs and explicitly approves only setup and result writes.
+/// The measured rounds are `list_windows` calls and never pass through this policy.
+#[derive(Debug)]
+struct PortApprovalPrompter;
+
+impl ConsentPrompter for PortApprovalPrompter {
+    fn confirm(&self, request: &ConsentRequest) -> ncui_core::Result<bool> {
+        let params = request.params().as_object();
+        let allowed = match request.method() {
+            "fs.write_text" => {
+                request.capabilities() == CapabilitySet::empty().with(Capability::FilesystemWrite)
+                    && params.is_some_and(|params| {
+                        params.len() == 2
+                            && params.get("path").and_then(serde_json::Value::as_str)
+                                == Some("bench-result.json")
+                            && params
+                                .get("text")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some()
+                    })
+            }
+            "component.open" => {
+                request.capabilities() == CapabilitySet::empty().with(Capability::RunComponents)
+                    && params.is_some_and(|params| {
+                        params.len() == 2
+                            && params.get("name").and_then(serde_json::Value::as_str)
+                                == Some("word_signal")
+                            && params.get("artifact").and_then(serde_json::Value::as_str)
+                                == Some("plugins/word_signal.wat")
+                    })
+            }
+            _ => false,
+        };
+        Ok(request.subject().starts_with("page:") && allowed)
+    }
+}
+
+fn launch_port(path: &Path) -> Application {
+    Application::launch_with(path, Limits::default(), None, None, |runtime| {
+        runtime.set_consent_prompter(Arc::new(PortApprovalPrompter));
+        Ok(())
+    })
+    .expect("the port launches")
+}
 
 /// Skips a test when this machine cannot open a real window.
 macro_rules! require_real_window {
@@ -130,8 +177,7 @@ fn the_electron_quick_start_port_runs_its_page_and_measures_ipc() {
     let port = PortCopy::new("electron-quick-start");
     write_bench_config(port.path(), 20);
 
-    let mut application =
-        Application::launch(port.path(), Limits::default()).expect("the port launches");
+    let mut application = launch_port(port.path());
     assert!(application.is_running(), "the window is open");
     assert!(
         application.url().starts_with("http://127.0.0.1:"),
@@ -160,8 +206,7 @@ fn the_tauri_word_signal_port_loads_its_component_and_measures_ipc() {
     let port = PortCopy::new("tauri-word-signal");
     write_bench_config(port.path(), 20);
 
-    let mut application =
-        Application::launch(port.path(), Limits::default()).expect("the port launches");
+    let mut application = launch_port(port.path());
     assert!(application.is_running(), "the window is open");
 
     let result = pump_until_result(&mut application, &port.path().join("bench-result.json"));

@@ -1,0 +1,1 @@
+- **The locked cookie dependency now uses the patched 0.18.3 release.** `cargo deny check` identified RUSTSEC-2026-0594 in 0.18.2; the patch draws private-cookie nonces from operating-system randomness, and advisories, bans, licences and sources now pass without an exemption.

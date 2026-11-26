@@ -18,6 +18,7 @@ const islandMirror = document.getElementById("island-mirror");
 const islandStatus = document.getElementById("island-status");
 const linkElement = document.getElementById("link");
 const shortcutStatus = document.getElementById("shortcut-status");
+const menuStatus = document.getElementById("menu-status");
 
 let fullscreen = false;
 
@@ -104,12 +105,25 @@ window.ncui.on("shortcut", (event) => {
   }
 });
 
+window.ncui.on("menu", (event) => {
+  if (!event || typeof event.command !== "string") { return; }
+  if (event.command === "increment") {
+    increment();
+  } else if (event.command === "notes") {
+    notesButton.click();
+  } else if (event.command === "fullscreen") {
+    fullscreenButton.click();
+  } else {
+    return;
+  }
+  menuStatus.textContent = `The native menu selected “${event.command}”, and this page handled it.`;
+});
+
 // The plugin is a WebAssembly component: code this page did not write, running in the
 // runtime's process under a grant the runtime negotiated rather than the one the page holds.
 //
-// `consent: true` is required and is not a formality. Running components is a destructive
-// capability — it is permission to execute code nobody here wrote — so the runtime asks on
-// every call, and a call that does not state its consent is treated as withholding it.
+// Running components is a destructive capability — permission to execute code nobody here
+// wrote — so the host asks for confirmation on every call. The page cannot approve itself.
 //
 // The component reads notes.txt itself, through `fs.read_text`. It cannot read the file
 // directly: it declares that service in its own manifest, and the runtime serves it only
@@ -121,7 +135,6 @@ pluginButton.addEventListener("click", () => {
     .invoke("component.open", {
       name: "greeter",
       artifact: "plugins/greeter.wat",
-      consent: true,
     })
     .then((opened) => {
       pluginElement.textContent =
@@ -132,7 +145,6 @@ pluginButton.addEventListener("click", () => {
       return window.ncui.invoke("component.invoke", {
         name: "greeter",
         method: "greet",
-        consent: true,
       });
     })
     .then((answer) => {

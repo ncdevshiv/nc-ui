@@ -10,10 +10,12 @@ headless backend says so by name); the wry host implements them; the runtime gai
 `ncui.window.zoom` (factor 0.25–5.0), `ncui.window.devtools.open/close/state` (state answers
 `open`/`closed`/`unknown`, because wry's Windows backend cannot report the inspector's
 state), and `ncui.cdp.send` now returns the endpoint's `result` instead of a relay receipt.
+WebKitGTK does not publish Chromium's `DevToolsActivePort` file or speak CDP, so non-Windows
+engines return `cdp_platform_unsupported` by name rather than waiting for an endpoint that cannot
+exist; Linux's native inspector remains available through the devtools methods.
 
 Tested: `cdp.rs` unit tests (endpoint parsing with and without a bearer path, a missing or
-junk port file refused by name, a refused upgrade reported as `cdp_connect_failed`); the
-dispatch parity test covers the new methods; the full `cargo test --workspace` suite passes
-(1497 tests) and `cargo clippy --workspace --all-targets` is clean. Recorded rather than
-claimed: a live WebView2 exchange is not exercised by the suite — the transport is proven to
-the endpoint boundary, and the one real engine conversation is the next human verification.
+junk port file refused by name, a refused upgrade reported as `cdp_connect_failed`); dispatch
+parity covers the methods; the live Windows host exchanges `Browser.getVersion` with WebView2;
+the live Linux host opens, observes and closes the real WebKitGTK inspector and verifies that
+the named CDP refusal leaves its engine alive.

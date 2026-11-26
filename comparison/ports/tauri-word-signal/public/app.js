@@ -21,7 +21,6 @@ function openComponent() {
       .invoke("component.open", {
         name: "word_signal",
         artifact: "plugins/word_signal.wat",
-        consent: true,
       })
       .catch((error) => {
         opening = null;
@@ -37,7 +36,6 @@ function invokeReturnString(payload) {
       name: "word_signal",
       method: "return_string",
       payload,
-      consent: true,
     }),
   );
 }
@@ -61,6 +59,26 @@ function triggerAction() {
 }
 
 triggerButton.addEventListener("click", triggerAction);
+
+window.ncui.on("menu", (event) => {
+  if (!event || typeof event.command !== "string") { return; }
+  const command = event.command;
+  if (command !== "maximize" && command !== "minimize") { return; }
+
+  status.textContent = `The native menu selected “${command}”.`;
+  const change = command === "maximize" ? { maximized: true } : { minimized: true };
+  window.ncui
+    .invoke("window_state", change)
+    .then((answer) => {
+      const state = answer.state;
+      status.textContent =
+        `The native menu selected “${command}”; the platform reports ` +
+        `maximized ${state.maximized}, minimized ${state.minimized}.`;
+    })
+    .catch((error) => {
+      status.textContent = `The runtime refused the menu action: ${error.code} — ${error.message}`;
+    });
+});
 
 // The harness writes `bench-config.json` into the application directory before launching.
 // Its absence is the normal case, not an error.
@@ -90,8 +108,7 @@ function runBench(config) {
         .then(() => {
           completed += 1;
           return step(index + 1);
-        })
-        .catch(() => step(index + 1));
+        });
     };
 
     return step(0);
@@ -101,7 +118,7 @@ function runBench(config) {
     const text = JSON.stringify(result);
     benchElement.textContent = text;
     return window.ncui
-      .invoke("fs.write_text", { path: output, text, consent: true })
+      .invoke("fs.write_text", { path: output, text })
       .then(() => result)
       .catch((error) => {
         benchElement.textContent = `${text}\n(write refused: ${error.message})`;

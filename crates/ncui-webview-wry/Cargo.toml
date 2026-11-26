@@ -8,14 +8,46 @@ license.workspace = true
 repository.workspace = true
 authors = ["NC-UI Contributors"]
 
-[lints]
-workspace = true
+# Cargo cannot override one inherited lint. This list mirrors the workspace lints; keep it in
+# sync when the workspace policy changes. The package override lets src/lib.rs deny unsafe_code
+# while ADR-012's ninth exception allows only the Windows native-menu attachment function.
+[lints.rust]
+unsafe_code = "allow"
+missing_debug_implementations = "warn"
+unused_qualifications = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+nonstandard_style = { level = "warn", priority = -1 }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny" # ncui-allow-placeholder: Cargo's lint identifier, not unfinished work
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+allow_attributes_without_reason = "warn"
+too_many_lines = "warn"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+similar_names = "allow"
+struct_excessive_bools = "allow"
+fn_params_excessive_bools = "allow"
+single_match_else = "allow"
 
 [features]
 default = []
 # Enables the real wry/tao engine binding. Enable on a machine/host that can build it;
 # Linux needs webkit2gtk-dev. Off by default so the crate always compiles.
-wry-engine = ["dep:wry", "dep:tao"]
+wry-engine = ["dep:wry", "dep:tao", "dep:gtk"]
 # Enables the GPU surface inside the host window. Pulls in wgpu; the host creates a
 # surface from its window and presents a frame, which is the adapter half of the
 # composition boundary ADR-002 requires. Off by default so the crate still compiles
@@ -24,6 +56,9 @@ gpu-surface = ["wry-engine", "dep:wgpu"]
 # Enables the tray icon. Implies the engine, because a tray icon without an event loop is
 # not a thing: it is created on the engine's own thread and lives beside the loop.
 tray-icon = ["wry-engine", "dep:tray-icon"]
+# Enables manifest-declared native menu bars. The menu is built and attached on the engine's
+# thread, beside the native window it belongs to.
+native-menu = ["wry-engine", "dep:muda"]
 [dependencies]
 ncui-webview = { workspace = true }
 ncui-webview-child = { workspace = true }
@@ -36,3 +71,7 @@ wry = { version = "0.57", optional = true, default-features = false, features = 
 tao = { version = "0.33", optional = true, default-features = false, features = ["rwh_06"] }
 wgpu = { workspace = true, optional = true }
 tray-icon = { workspace = true, optional = true }
+muda = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = { version = "0.18", optional = true }

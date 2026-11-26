@@ -10,5 +10,14 @@
     "width": 800,
     "height": 600
   },
-  "capabilities": ["run.components", "filesystem.read", "filesystem.write"]
+  "menus": [
+    {
+      "label": "Menu",
+      "items": [
+        { "type": "item", "label": "Hello", "command": "maximize" },
+        { "type": "item", "label": "Goodbye", "command": "minimize" }
+      ]
+    }
+  ],
+  "capabilities": ["run.components", "filesystem.read", "filesystem.write", "window"]
 }

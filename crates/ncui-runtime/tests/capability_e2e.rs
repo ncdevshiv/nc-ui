@@ -1,6 +1,4 @@
-//! End-to-end tests for the capabilities added in this session:
-//! `ncui.app.emit`, `ncui.consent.mint`, `ncui.window.create.child`,
-//! and `ncui.cdp.send`.
+//! End-to-end tests for application events, child windows, CDP, and consent binding.
 //!
 //! Each test drives the real dispatch pipeline — the same pipeline an
 //! agent's request or a page's bridge message goes through — and
@@ -15,7 +13,7 @@
 
 use std::time::Duration;
 
-use ncui_core::Limits;
+use ncui_core::{Capability, CapabilitySet, CorrelationId, Limits};
 use ncui_runtime::Runtime;
 use ncui_runtime::agent::AgentSession;
 use ncui_runtime::dispatch::dispatch;
@@ -99,9 +97,7 @@ fn app_emit_broadcasts_when_no_window_is_named() {
 }
 
 #[test]
-fn consent_mint_produces_a_valid_token() {
-    // ncui.consent.mint should mint a token bound to the session,
-    // the method, and the capability.
+fn a_client_cannot_mint_its_own_consent() {
     let mut rt = runtime();
     let mut admin = session(AgentRole::Administrator);
     let response = call(
@@ -109,45 +105,58 @@ fn consent_mint_produces_a_valid_token() {
         &mut admin,
         "ncui.consent.mint",
         json!({
-            "method": "fs.write_text",
-            "capability": "filesystem.write"
+            "method": "ncui.logs.purge",
+            "capability": "read.logs"
         }),
     );
-    let result = response.expect("response");
+    let error = response.expect("response").error.expect("an error");
+    assert_eq!(error.data.ncui_code, "not_found");
     assert!(
-        result.error.is_none(),
-        "consent.mint should succeed: {:?}",
-        result.error
+        ncui_runtime::dispatch::method_table()
+            .iter()
+            .all(|method| method.name != "ncui.consent.mint"),
+        "a self-service mint method must not be advertised"
     );
-    let payload = result.result.expect("payload");
-    assert!(
-        payload.get("consent_token").is_some(),
-        "must return a consent_token"
-    );
-    assert_eq!(payload["method"], "fs.write_text");
 }
 
 #[test]
-fn consent_token_is_consume_once() {
-    // A minted consent token should be spendable exactly once.
+fn a_host_issued_consent_token_is_bound_to_its_subject_and_operation() {
     let mut rt = runtime();
     let mut admin = session(AgentRole::Administrator);
+    let params = json!({});
+    let token = rt
+        .mint_consent(
+            CorrelationId::new(),
+            "test-agent",
+            "ncui.logs.purge",
+            CapabilitySet::empty().with(Capability::ReadLogs),
+            &params,
+        )
+        .expect("mint");
 
-    // Mint a token
-    let mint_response = call(
+    let refused = call(
         &mut rt,
         &mut admin,
-        "ncui.consent.mint",
-        json!({
-            "method": "fs.write_text",
-            "capability": "filesystem.write"
-        }),
+        "ncui.logs.purge",
+        json!({ "reason": "not approved", "consent_token": token.to_value() }),
     );
-    let mint_result = mint_response.expect("response");
-    let token = mint_result.result.expect("payload")["consent_token"].to_string();
+    assert_eq!(
+        refused
+            .expect("response")
+            .error
+            .expect("altered parameters must be refused")
+            .data
+            .ncui_code,
+        "capability_denied"
+    );
 
-    // The token exists in the minted ledger
-    assert!(!token.is_empty(), "token must not be empty");
+    let mut allowed_params = params;
+    allowed_params["consent_token"] = token.to_value();
+    let allowed = call(&mut rt, &mut admin, "ncui.logs.purge", allowed_params);
+    assert!(
+        allowed.expect("response").error.is_none(),
+        "the refused alteration must not spend the exact operation's token"
+    );
 }
 
 #[test]
@@ -197,34 +206,30 @@ fn cdp_send_refuses_an_unknown_window() {
     let mut rt = runtime();
     let mut admin = session(AgentRole::Administrator);
 
-    // Mint a consent token for cdp.send
-    let mint = call(
-        &mut rt,
-        &mut admin,
-        "ncui.consent.mint",
-        json!({
-            "method": "ncui.cdp.send",
-            "capability": "cdp"
-        }),
-    );
-    let token = mint.expect("response").result.expect("payload")["consent_token"].clone();
+    let mut params = json!({
+        "window": "00000000000000000000000000000001",
+        "method": "Page.navigate",
+        "params": { "url": "https://example.com" }
+    });
+    let token = rt
+        .mint_consent(
+            CorrelationId::new(),
+            "test-agent",
+            "ncui.cdp.send",
+            CapabilitySet::empty().with(Capability::Cdp),
+            &params,
+        )
+        .expect("mint for the exact command");
+    params["consent_token"] = token.to_value();
 
-    let response = call(
-        &mut rt,
-        &mut admin,
-        "ncui.cdp.send",
-        json!({
-            "window": "00000000000000000000000000000001",
-            "method": "Page.navigate",
-            "params": { "url": "https://example.com" },
-            "consent_token": token
-        }),
-    );
-    let result = response.expect("response");
-    assert!(
-        result.error.is_some(),
-        "cdp.send to an unknown window must be refused, got: {:?}",
-        result.result
+    let result = call(&mut rt, &mut admin, "ncui.cdp.send", params).expect("response");
+    assert_eq!(
+        result
+            .error
+            .expect("cdp.send to an unknown window must be refused")
+            .data
+            .ncui_code,
+        "not_found"
     );
 }
 
@@ -236,27 +241,28 @@ fn cdp_send_requires_window_and_method() {
     let mut rt = runtime();
     let mut admin = session(AgentRole::Administrator);
 
-    let mint = call(
-        &mut rt,
-        &mut admin,
-        "ncui.consent.mint",
-        json!({
-            "method": "ncui.cdp.send",
-            "capability": "cdp"
-        }),
-    );
-    let token = mint.expect("response").result.expect("payload")["consent_token"].clone();
-
-    for params in [
-        json!({ "method": "Page.navigate", "consent_token": token.clone() }),
-        json!({ "window": "00000000000000000000000000000001", "consent_token": token }),
+    for mut params in [
+        json!({ "method": "Page.navigate" }),
+        json!({ "window": "00000000000000000000000000000001" }),
     ] {
-        let response = call(&mut rt, &mut admin, "ncui.cdp.send", params);
-        let result = response.expect("response");
-        assert!(
-            result.error.is_some(),
-            "cdp.send without window and method must be refused: {:?}",
-            result.result
+        let token = rt
+            .mint_consent(
+                CorrelationId::new(),
+                "test-agent",
+                "ncui.cdp.send",
+                CapabilitySet::empty().with(Capability::Cdp),
+                &params,
+            )
+            .expect("mint for this exact malformed operation");
+        params["consent_token"] = token.to_value();
+        let result = call(&mut rt, &mut admin, "ncui.cdp.send", params).expect("response");
+        assert_eq!(
+            result
+                .error
+                .expect("cdp.send without window and method must be refused")
+                .data
+                .ncui_code,
+            "validation"
         );
     }
 }
@@ -370,24 +376,48 @@ fn app_emit_is_gated_by_window_capability() {
 }
 
 #[test]
-fn consent_mint_is_gated_by_inspect_runtime() {
-    // ncui.consent.mint requires Capability::InspectRuntime.
-    // An observer has this capability, so consent.mint should succeed.
+fn a_consent_token_cannot_move_to_another_agent() {
     let mut rt = runtime();
-    let mut observer = session(AgentRole::Observer);
-    let response = call(
+    let mut owner = session(AgentRole::Administrator);
+    let token = rt
+        .mint_consent(
+            CorrelationId::new(),
+            "test-agent",
+            "ncui.logs.purge",
+            CapabilitySet::empty().with(Capability::ReadLogs),
+            &json!({}),
+        )
+        .expect("mint");
+    let credential = test_token();
+    let mut other =
+        AgentSession::new("other-agent", AgentRole::Administrator, 100, 100).expect("session");
+    other
+        .authenticate(&credential, &credential)
+        .expect("authenticate");
+
+    let refused = call(
         &mut rt,
-        &mut observer,
-        "ncui.consent.mint",
-        json!({
-            "method": "fs.write_text",
-            "capability": "filesystem.write"
-        }),
+        &mut other,
+        "ncui.logs.purge",
+        json!({ "consent_token": token.to_value() }),
     );
-    let result = response.expect("response");
+    assert_eq!(
+        refused
+            .expect("response")
+            .error
+            .expect("another subject must be refused")
+            .data
+            .ncui_code,
+        "capability_denied"
+    );
+    let allowed = call(
+        &mut rt,
+        &mut owner,
+        "ncui.logs.purge",
+        json!({ "consent_token": token.to_value() }),
+    );
     assert!(
-        result.error.is_none(),
-        "observer with inspect.runtime should reach consent.mint: {:?}",
-        result.error
+        allowed.expect("response").error.is_none(),
+        "the failed transfer must not spend the owner's token"
     );
 }

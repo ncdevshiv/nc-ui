@@ -48,6 +48,19 @@ TOOLS_BIN = f"{TOOLS_TARGET}/release"
 # overwrite cleanly. The Windows build keeps its own `target/`; the Linux build keeps this one.
 TARGET = "/var/tmp/ncui-target-linux"
 
+# Clipboard and notification tools were unpacked user-locally because this WSL image has no
+# root package manager. Their transitive libraries live beside them; a gate that proves only
+# that the binaries exist would still miss the runtime failure this environment exposed.
+LINUX_TOOLS = "/home/shiv/.local/ncui-linux-tools"
+PLATFORM_ENV = (
+    "env GDK_BACKEND=x11 DISPLAY=:0 WAYLAND_DISPLAY= LIBGL_ALWAYS_SOFTWARE=1 "
+    f"PATH={LINUX_TOOLS}/usr/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin "
+    f"LD_LIBRARY_PATH={LINUX_TOOLS}/usr/lib/x86_64-linux-gnu "
+)
+# WSLg exposes a device node without granting this user access. Mesa's software Vulkan driver
+# still executes the real render, readback and island-route assertions without a silent skip.
+GPU_ENV = "VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json WGPU_BACKEND=vulkan "
+
 GATES = [
     # The policy tools live in one target directory shared with the Windows build, so a
     # Windows `cargo build --release` leaves a PE binary at the extensionless path and this
@@ -61,8 +74,7 @@ GATES = [
     # compiled on this host: an earlier revision of this file claimed the GTK and WebKit
     # development libraries were unavailable, and they are present. This is the stage that
     # makes the shipped configuration a compiled one on Linux rather than a Windows-only
-    # assumption. The real-window *tests* still cannot run here — there is no display — so
-    # a feature whose evidence opens a window stays `unverified` on Linux.
+    # assumption. The real-window tests run in a later stage once the session has a display.
     (
         "release configuration compiles",
         f"CARGO_TARGET_DIR={TARGET} cargo check -p ncui-cli --features ncui-cli/wry-host",
@@ -74,19 +86,41 @@ GATES = [
     (
         "release configuration tests",
         f"CARGO_TARGET_DIR={TARGET} cargo test -p ncui-runtime --features wry-host --lib"
-        f" && CARGO_TARGET_DIR={TARGET} cargo test -p ncui-webview-wry --features wry-engine --lib"
+        f" && CARGO_TARGET_DIR={TARGET} cargo test -p ncui-webview-wry --features wry-engine,native-menu --lib"
         f" && CARGO_TARGET_DIR={TARGET} cargo test -p ncui-gpu-renderer --features text-shaping,wgpu-device --lib"
         f" && CARGO_TARGET_DIR={TARGET} cargo test -p ncui-cli --features wry-host --lib",
     ),
-    # The real-window integration tests. WSLg supplies an X server and Wayland socket, so
-    # the host opens genuine windows here: the two comparison ports launch, serve their
-    # assets and measure IPC through the bridge, and the page bridge's whole path runs
-    # against the real engine. The islands test stays out — it needs a GPU device, which
-    # this session does not have — and a feature whose evidence needs one stays
-    # `unverified` on Linux.
+    # The real-window integration tests. Pin the X11 session rather than inheriting WSLg's
+    # ambient display: the runtime's application suite opens genuine windows, while the
+    # runtime page bridge uses a fake engine and the wry page bridge exercises the browser.
+    # Naming both targets keeps a policy-only pass from being reported as browser evidence.
     (
         "real-window integration tests",
-        f"CARGO_TARGET_DIR={TARGET} cargo test -p ncui-runtime --features wry-host --test page_bridge --test ports",
+        f"{PLATFORM_ENV}CARGO_TARGET_DIR={TARGET} cargo test -p ncui-runtime "
+        "--features wry-host --test application --test page_bridge --test ports"
+        f" && {PLATFORM_ENV}CARGO_TARGET_DIR={TARGET} cargo test -p ncui-webview-wry "
+        "--features wry-engine --test page_bridge",
+    ),
+    (
+        "platform capability integration tests",
+        f"{PLATFORM_ENV}NCUI_REQUIRE_CLIPBOARD=1 CARGO_TARGET_DIR={TARGET} cargo test "
+        "-p ncui-native --lib clipboard::tests::text_written_to_the_clipboard_is_read_back "
+        "-- --exact"
+        f" && {PLATFORM_ENV}python3 tools/with_notification_daemon.py -- env "
+        f"NCUI_REQUIRE_NOTIFICATION=1 CARGO_TARGET_DIR={TARGET} cargo test -p ncui-native "
+        "--lib notify::tests::a_real_notification_is_accepted_by_the_platform -- --exact",
+    ),
+    # GPU integration tests normally return early on a machine without an adapter. That is
+    # useful for a developer's default suite, but it is not platform evidence: libtest counts
+    # the early return as a pass. This stage turns adapter absence into a failure and runs
+    # both the renderer's pixel readback and the runtime's live island route.
+    (
+        "GPU integration tests",
+        f"{PLATFORM_ENV}{GPU_ENV}NCUI_REQUIRE_GPU=1 CARGO_TARGET_DIR={TARGET} cargo test "
+        "-p ncui-gpu-renderer --features text-shaping,wgpu-device "
+        "--test render_offscreen --test island_pixels"
+        f" && {PLATFORM_ENV}{GPU_ENV}NCUI_REQUIRE_GPU=1 CARGO_TARGET_DIR={TARGET} cargo test "
+        "-p ncui-runtime --features wry-host,gpu-islands --test islands",
     ),
     ("tests", f"CARGO_TARGET_DIR={TARGET} cargo test --workspace --all-targets"),
     (

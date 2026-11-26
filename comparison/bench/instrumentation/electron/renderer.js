@@ -33,7 +33,6 @@ if (benchOutput && window.bench) {
         completed += 1
         return step(index + 1)
       })
-      .catch(() => step(index + 1))
   }
 
   step(0).then((result) => window.bench.invoke('write-bench', JSON.stringify(result)))

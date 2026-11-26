@@ -1,6 +1,7 @@
 //! CDP command forwarding handler.
 
 use ncui_core::{ErrorKind, NcError, Result};
+use ncui_webview::CdpError;
 use serde_json::{Value, json};
 
 use super::json_error;
@@ -67,9 +68,7 @@ pub(crate) fn invoke_cdp_send(runtime: &mut Runtime, params: &Value) -> Result<V
             })
             .operation("dispatch::cdp_send")
         })?
-        .map_err(|reason| {
-            NcError::new(ErrorKind::Conflict { reason }).operation("dispatch::cdp_send")
-        })?;
+        .map_err(|error| cdp_error(&error, "dispatch::cdp_send"))?;
 
     serde_json::to_value(json!({
         "sent": true,
@@ -78,4 +77,13 @@ pub(crate) fn invoke_cdp_send(runtime: &mut Runtime, params: &Value) -> Result<V
         "result": answer.get("result").cloned().unwrap_or(Value::Null),
     }))
     .map_err(|e| json_error(&e))
+}
+
+/// Preserves the backend's stable `cdp_*` code through the runtime error model.
+pub(crate) fn cdp_error(error: &CdpError, operation: &'static str) -> NcError {
+    NcError::new(ErrorKind::Cdp {
+        code: error.code(),
+        reason: error.to_string(),
+    })
+    .operation(operation)
 }

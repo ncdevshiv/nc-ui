@@ -25,29 +25,37 @@
 //! thread; the default build (feature off) is a small, honest fallback so the crate still
 //! compiles everywhere, including Linux CI without `webkit2gtk`.
 
+use std::collections::HashMap;
 #[cfg(all(feature = "wry-engine", target_os = "macos"))]
 use std::sync::atomic::AtomicI32;
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 #[cfg(feature = "wry-engine")]
 use std::sync::{OnceLock, atomic::AtomicU64};
-use std::time::Duration;
-
-#[cfg(feature = "wry-engine")]
-use crate::child::{ChildWebviewError, child_bounds};
-use ncui_core::WindowId;
-use ncui_webview::{HostSeam, PageMessage, WebViewBackend};
-
-#[cfg(feature = "wry-engine")]
-use crate::host_scripts::{DRAG_REGION_SCRIPT, dropped_files_script, moved_script, resized_script};
-
-#[cfg(feature = "wry-engine")]
-use std::collections::HashMap;
 #[cfg(feature = "wry-engine")]
 use std::thread;
+use std::time::Duration;
+#[cfg(any(target_os = "linux", test))]
+use std::time::Instant;
+
+#[cfg(feature = "wry-engine")]
+use crate::cdp_target::PageTargetBinding;
+#[cfg(all(feature = "wry-engine", target_os = "windows"))]
+use crate::cdp_target::{bind_page_target_after_window, page_targets_before_window};
+#[cfg(feature = "wry-engine")]
+use crate::child::{EngineChild, build_child};
+#[cfg(feature = "wry-engine")]
+use crate::geometry::{Geometry, WindowOptions};
+#[cfg(feature = "wry-engine")]
+use crate::host_scripts::{DRAG_REGION_SCRIPT, dropped_files_script, moved_script, resized_script};
+use ncui_core::WindowId;
+use ncui_webview::{ChildPageMessage, HostSeam, PageMessage, WebViewBackend};
+#[cfg(feature = "wry-engine")]
+use ncui_webview_child::ChildWebviewError;
+use ncui_webview_child::ChildWebviewRequest;
 
 #[cfg(feature = "wry-engine")]
 use tao::event::{Event, WindowEvent};
@@ -57,44 +65,6 @@ use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWi
 use tao::window::{Window, WindowBuilder};
 #[cfg(feature = "wry-engine")]
 use wry::{WebView, WebViewBuilder};
-
-/// The properties a window is created with, gathered so the builder reads in one place.
-#[cfg(feature = "wry-engine")]
-#[derive(Debug, Clone, Copy, Default)]
-struct WindowOptions {
-    /// Whether the window floats above other windows.
-    always_on_top: bool,
-    /// Whether the window carries its own frame.
-    decorations: bool,
-    /// Whether the window's background may be see-through.
-    transparent: bool,
-    /// Whether the user may resize the window.
-    resizable: bool,
-    /// The floor the user may drag the window to.
-    minimum: Option<(u32, u32)>,
-    /// Whether the window is created filling its display.
-    fullscreen: bool,
-    /// Whether the window is created maximised.
-    maximized: bool,
-}
-
-/// A window's geometry, in logical pixels.
-///
-/// Logical rather than physical because that is what a caller stores and asks for: a remembered
-/// geometry in physical pixels would be wrong by the scale factor on every run after the display
-/// changed.
-#[cfg(feature = "wry-engine")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Geometry {
-    /// The left edge.
-    pub x: i32,
-    /// The top edge.
-    pub y: i32,
-    /// The width.
-    pub width: u32,
-    /// The height.
-    pub height: u32,
-}
 
 /// The payload carried on the in-process IPC channel bridged from the `wry` IPC handler.
 ///
@@ -116,7 +86,7 @@ pub type HostIpcEvent = String;
 /// the runtime injects the same bytes the package ships. One file, so the two halves
 /// cannot drift.
 #[cfg(feature = "wry-engine")]
-const BRIDGE_SCRIPT: &str = include_str!("../../../packages/ncui-client/src/bridge.js");
+pub(super) const BRIDGE_SCRIPT: &str = include_str!("../../../packages/ncui-client/src/bridge.js");
 
 /// One instruction to the process-wide engine.
 /// How long a host waits for the engine to report a window's geometry.
@@ -139,6 +109,31 @@ const GEOMETRY_TIMEOUT: Duration = Duration::from_secs(2);
 /// given wrongly: it reads as a platform limitation rather than as contention.
 #[cfg(feature = "wry-engine")]
 const ENGINE_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long a Linux window request waits for the window manager to report the applied state.
+#[cfg(all(feature = "wry-engine", target_os = "linux"))]
+const LINUX_WINDOW_SETTLE_TIMEOUT: Duration = Duration::from_millis(1_500);
+
+/// How often a deferred Linux window request re-reads the platform's state.
+#[cfg(all(feature = "wry-engine", target_os = "linux"))]
+const LINUX_WINDOW_POLL_INTERVAL: Duration = Duration::from_millis(16);
+
+/// How long a host waits for the engine to answer a child-webview request.
+///
+/// Building a child starts another browser surface, which can take substantially longer than a
+/// window presentation request. The wait remains bounded so a stopped engine cannot hang a caller.
+#[cfg(feature = "wry-engine")]
+const CHILD_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// A page exchange attaches, sends, and detaches, with a 30-second bound on each exchange.
+#[cfg(feature = "wry-engine")]
+const CDP_REPLY_TIMEOUT: Duration = Duration::from_secs(95);
+
+/// First-start target discovery can include a cold browser launch and a 90-second readiness wait.
+#[cfg(all(feature = "wry-engine", target_os = "windows"))]
+const WINDOW_CREATE_TIMEOUT: Duration = Duration::from_secs(150);
+#[cfg(all(feature = "wry-engine", not(target_os = "windows")))]
+const WINDOW_CREATE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How long a factory waits for the engine to report its displays.
 ///
@@ -190,37 +185,58 @@ pub enum HostEvent {
     },
     /// Build a child webview inside a parent window's frame.
     CreateChild {
-        /// The parent window's engine identity, as its display string.
-        parent: String,
+        /// The parent window's internal engine identity.
+        parent: u64,
+        /// The caller-issued child identity, reserved before the platform build.
+        id: u64,
         /// The child's starting URL and rectangle.
-        request: Box<ncui_webview_child::ChildWebviewRequest>,
+        request: Box<ChildWebviewRequest>,
+        /// The isolated seam the child's page speaks through.
+        seam: Arc<HostSeam>,
+        /// Where the child's tagged IPC messages are delivered.
+        ipc_tx: SyncSender<ChildPageMessage>,
+        /// Where child IPC is delivered when the caller's receiver has disconnected.
+        host_ipc_tx: SyncSender<ChildPageMessage>,
         /// Where the child's engine identity, or the failure, is delivered.
         reply: Sender<Result<u64, ChildWebviewError>>,
     },
     /// Move a live child webview to a new rectangle.
     ChildBounds {
+        /// The parent window's internal engine identity.
+        parent: u64,
         /// The child's engine identity.
         child: u64,
         /// The new rectangle.
-        request: Box<ncui_webview_child::ChildWebviewRequest>,
+        request: Box<ChildWebviewRequest>,
         /// Where the acceptance is delivered.
         reply: Sender<Result<(), ChildWebviewError>>,
     },
     /// Close a live child webview.
     CloseChild {
+        /// The parent window's internal engine identity.
+        parent: u64,
         /// The child's engine identity.
         child: u64,
         /// Where the acceptance is delivered.
         reply: Sender<Result<(), ChildWebviewError>>,
     },
+    /// Run a script in one child webview's page.
+    ChildEval {
+        /// The parent window's internal engine identity.
+        parent: u64,
+        /// The child's engine identity.
+        child: u64,
+        /// The script.
+        script: String,
+    },
     /// Run one CDP command against a window's `DevTools` endpoint.
     CdpRequest {
-        /// The window whose endpoint is targeted.
-        window: String,
+        /// This window's identity inside the engine, never a runtime `WindowId`.
+        window: u64,
         /// The CDP command (id/method/params).
         command: serde_json::Value,
-        /// Where the endpoint's answer, or the failure, is delivered.
-        reply: Sender<Result<serde_json::Value, String>>,
+        /// Where the page target's answer, or the typed failure, is delivered.
+        reply: Sender<Result<serde_json::Value, crate::cdp::CdpError>>,
     },
     /// Scale one window's page by a zoom factor.
     Zoom {
@@ -230,6 +246,14 @@ pub enum HostEvent {
         factor: f64,
         /// Where the acceptance is reported.
         reply: Sender<bool>,
+    },
+    /// Reads WebKit's applied zoom level for the live host regression.
+    #[cfg(all(test, target_os = "linux"))]
+    ZoomLevel {
+        /// The window whose page is scaled.
+        window: u64,
+        /// Where the platform's applied level is reported.
+        reply: Sender<Option<f64>>,
     },
     /// Open, close, or query the platform's web inspector for one window.
     DevTools {
@@ -258,6 +282,22 @@ pub enum HostEvent {
     /// The user clicked the tray icon.
     #[cfg(feature = "tray-icon")]
     TrayClicked,
+    /// Attach or remove one window's manifest-declared native menu.
+    #[cfg(feature = "native-menu")]
+    SetMenu {
+        /// The window whose menu is changing.
+        window: u64,
+        /// The menu to attach, or `None` to remove the current one.
+        request: Option<ncui_webview::MenuRequest>,
+        /// Where the platform's answer goes.
+        reply: Sender<Result<(), String>>,
+    },
+    /// The user selected an item in a native menu.
+    #[cfg(feature = "native-menu")]
+    MenuActivated {
+        /// The engine-scoped native item identity.
+        id: String,
+    },
     /// Report whether the platform is drawing its interface light or dark.
     Theme {
         /// The window whose platform theme is wanted.
@@ -315,6 +355,8 @@ pub(crate) struct CreateRequest {
     seam: Arc<HostSeam>,
     /// Where the page's messages are delivered.
     ipc_tx: Sender<HostIpcEvent>,
+    /// Where native menu selections for this window are delivered.
+    menu_tx: Sender<ncui_webview::MenuEvent>,
     /// Set while the window is alive.
     alive: Arc<AtomicBool>,
     /// Where the engine's own failure is recorded.
@@ -469,20 +511,21 @@ fn build_tray(
 
 /// One live window inside the engine.
 #[cfg(feature = "wry-engine")]
-struct EngineWindow {
+pub(super) struct EngineWindow {
+    /// The immutable page-target binding, including a typed failure if binding was ambiguous.
+    pub(super) cdp: PageTargetBinding,
+    /// The native menu, dropped before the window so Windows detaches it from a live HWND.
+    #[cfg(feature = "native-menu")]
+    pub(super) menu: Option<crate::menu::NativeMenuState>,
     /// The platform window. Kept alive for as long as the entry is.
-    window: Window,
+    pub(super) window: Window,
     /// The page inside it.
     webview: WebView,
     /// Set while the window has not been closed.
     alive: Arc<AtomicBool>,
-}
-
-/// One live child webview inside a parent window's frame.
-#[cfg(feature = "wry-engine")]
-struct EngineChild {
-    /// The wry webview, built as a child of the parent's HWND.
-    webview: WebView,
+    /// Where this window's native menu selections are delivered.
+    #[cfg(feature = "native-menu")]
+    pub(super) menu_tx: Sender<ncui_webview::MenuEvent>,
 }
 
 /// The engine's proxy, installed before the application's work begins.
@@ -549,26 +592,6 @@ fn engine() -> Option<&'static EventLoopProxy<HostEvent>> {
             }
         })
         .as_ref()
-}
-
-/// The process-wide user-data directory the engine's browsers use, recorded when a window
-/// is built so the CDP transport can find the port file without guessing.
-#[cfg(feature = "wry-engine")]
-static CDP_USER_DATA_DIR: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
-
-/// The `DevTools` endpoint the engine published, resolved from the recorded
-/// user-data directory.
-///
-/// Engine-gated: the static and the data-root helper below exist only when the
-/// engine does, and the only caller sits inside the engine's own loop.
-#[cfg(feature = "wry-engine")]
-pub(crate) fn cdp_endpoint() -> crate::cdp::DevToolsEndpoint {
-    let dir = CDP_USER_DATA_DIR
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
-        .unwrap_or_else(webview_data_root);
-    crate::cdp::read_devtools_endpoint(&dir).expect("the engine published its DevTools port")
 }
 
 /// Where this application's `WebView2` data lives: under the local data root, in a directory
@@ -651,20 +674,20 @@ pub fn run_on_main_thread(app: impl FnOnce() -> i32 + Send + 'static) -> ! {
 /// is created on, and with the tray feature off nothing else does.
 #[cfg(feature = "wry-engine")]
 #[cfg_attr(
-    not(feature = "tray-icon"),
-    allow(unused_variables, reason = "only the tray sends events to the loop")
-)]
-#[cfg_attr(
-    not(feature = "tray-icon"),
+    not(any(feature = "tray-icon", feature = "native-menu")),
     allow(
-        clippy::needless_pass_by_value,
-        reason = "the tray consumes the proxy and nothing else does without it; one signature \
-                  across both configurations keeps the call site from being conditional"
+        unused_variables,
+        reason = "only tray and menu events need to send into the loop"
     )
 )]
 #[allow(
     clippy::too_many_lines,
     reason = "the event loop match arms are each a distinct window event; splitting them would obscure the event flow"
+)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "the proxy is retained by the process-lifetime menu handler and the event-loop closure; \
+              taking it by reference would require a second owner with the same lifetime"
 )]
 fn run_engine(
     event_loop: tao::event_loop::EventLoop<HostEvent>,
@@ -677,6 +700,14 @@ fn run_engine(
     // may need to reach.
     #[cfg(feature = "tray-icon")]
     let mut tray: Option<tray_icon::TrayIcon> = None;
+    #[cfg(feature = "native-menu")]
+    let menu_proxy = proxy.clone();
+    #[cfg(feature = "native-menu")]
+    muda::MenuEvent::set_event_handler(Some(move |event: muda::MenuEvent| {
+        let _ = menu_proxy.send_event(HostEvent::MenuActivated {
+            id: event.id.as_ref().to_owned(),
+        });
+    }));
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
         match event {
@@ -689,6 +720,7 @@ fn run_engine(
                 }
             }
             Event::UserEvent(HostEvent::Close { window }) => {
+                children.retain(|_, child| child.parent != window);
                 if let Some(entry) = windows.remove(&window) {
                     entry.alive.store(false, Ordering::SeqCst);
                 }
@@ -699,74 +731,103 @@ fn run_engine(
                 }
             }
             Event::UserEvent(HostEvent::CdpRequest {
-                window: _,
+                window,
                 command,
                 reply,
             }) => {
-                // The transport targets this process's engine endpoint; the
-                // window id is carried for auditability.
-                let answer = crate::cdp::send_command(&cdp_endpoint(), &command)
-                    .map_err(|error| error.to_string());
+                let answer = windows.get(&window).map_or_else(
+                    || {
+                        Err(crate::cdp::CdpError::TargetBindFailed {
+                            reason: format!("engine window {window} is not live"),
+                        })
+                    },
+                    |entry| entry.cdp.send(&command),
+                );
                 let _ = reply.send(answer);
             }
             Event::UserEvent(HostEvent::CreateChild {
                 parent,
+                id,
                 request,
+                seam,
+                ipc_tx,
+                host_ipc_tx,
                 reply,
             }) => {
-                let parsed_parent = parent.parse::<u64>().ok();
-                let answer = match parsed_parent.as_ref().and_then(|id| windows.get(id)) {
+                let answer = match windows.get(&parent) {
                     Some(entry) => {
-                        let built = WebViewBuilder::new()
-                            .with_url(request.url.clone())
-                            .with_bounds(child_bounds(&request))
-                            .build_as_child(&entry.window);
-                        match built {
-                            Ok(webview) => {
-                                let id = NEXT_CHILD.fetch_add(1, Ordering::SeqCst);
-                                children.insert(id, EngineChild { webview });
+                        // The caller reserved the identity before sending this event, so a timed-out
+                        // build can be closed by a later event even before its reply arrives.
+                        match build_child(
+                            id,
+                            parent,
+                            &entry.window,
+                            &request,
+                            &seam,
+                            ipc_tx,
+                            host_ipc_tx,
+                        ) {
+                            Ok(child) => {
+                                children.insert(id, child);
                                 Ok(id)
                             }
-                            Err(error) => Err(ChildWebviewError::EngineFailed {
-                                reason: error.to_string(),
-                            }),
+                            Err(reason) => Err(ChildWebviewError::EngineFailed { reason }),
                         }
                     }
-                    None => Err(ChildWebviewError::ParentUnavailable {
-                        window: parent
-                            .parse::<WindowId>()
-                            .unwrap_or_else(|_| WindowId::new()),
-                    }),
+                    None => Err(ChildWebviewError::ParentUnavailable),
                 };
                 let _ = reply.send(answer);
             }
             Event::UserEvent(HostEvent::ChildBounds {
+                parent,
                 child,
                 request,
                 reply,
             }) => {
-                let answer =
-                    match children.get_mut(&child) {
-                        Some(surface) => surface
-                            .webview
-                            .set_bounds(child_bounds(&request))
-                            .map_err(|error| ChildWebviewError::EngineFailed {
-                                reason: error.to_string(),
-                            }),
-                        None => Err(ChildWebviewError::EngineFailed {
-                            reason: format!("child webview {child} is not live"),
-                        }),
-                    };
-                let _ = reply.send(answer);
-            }
-            Event::UserEvent(HostEvent::CloseChild { child, reply }) => {
-                let answer = match children.remove(&child) {
-                    Some(_) => Ok(()),
+                let answer = match children.get_mut(&child) {
+                    Some(surface) if surface.parent == parent => surface.set_bounds(&request),
+                    Some(_) => Err(ChildWebviewError::EngineFailed {
+                        reason: format!(
+                            "child webview {child} belongs to a different parent than {parent}"
+                        ),
+                    }),
                     None => Err(ChildWebviewError::EngineFailed {
                         reason: format!("child webview {child} is not live"),
                     }),
                 };
                 let _ = reply.send(answer);
+            }
+            Event::UserEvent(HostEvent::CloseChild {
+                parent,
+                child,
+                reply,
+            }) => {
+                let answer = match children.get(&child) {
+                    Some(surface) if surface.parent == parent => {
+                        let _ = children.remove(&child);
+                        Ok(())
+                    }
+                    Some(_) => Err(ChildWebviewError::EngineFailed {
+                        reason: format!(
+                            "child webview {child} belongs to a different parent than {parent}"
+                        ),
+                    }),
+                    None => Err(ChildWebviewError::EngineFailed {
+                        reason: format!("child webview {child} is not live"),
+                    }),
+                };
+                let _ = reply.send(answer);
+            }
+            Event::UserEvent(HostEvent::ChildEval {
+                parent,
+                child,
+                script,
+            }) => {
+                if let Some(surface) = children.get(&child)
+                    && surface.parent == parent
+                {
+                    let _ = surface.webview.evaluate_script(&script);
+                }
             }
             Event::UserEvent(HostEvent::Zoom {
                 window,
@@ -777,6 +838,24 @@ fn run_engine(
                     .get(&window)
                     .is_some_and(|entry| entry.webview.zoom(factor).is_ok());
                 let _ = reply.send(accepted);
+            }
+            #[cfg(all(test, target_os = "linux"))]
+            Event::UserEvent(HostEvent::ZoomLevel { window, reply }) => {
+                let level = windows.get(&window).and_then(|entry| {
+                    #[cfg(target_os = "linux")]
+                    {
+                        use gtk::prelude::*;
+                        use wry::WebViewExtUnix as _;
+
+                        Some(entry.webview.webview().property::<f64>("zoom-level"))
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        let _ = entry;
+                        None
+                    }
+                });
+                let _ = reply.send(level);
             }
             Event::UserEvent(HostEvent::DevTools {
                 window,
@@ -810,6 +889,18 @@ fn run_engine(
             Event::UserEvent(HostEvent::TrayClicked) => {
                 tray_was_clicked(&mut windows, tray.is_some());
             }
+            #[cfg(feature = "native-menu")]
+            Event::UserEvent(HostEvent::SetMenu {
+                window,
+                request,
+                reply,
+            }) => {
+                let _ = reply.send(crate::menu::set_window_menu(&mut windows, window, request));
+            }
+            #[cfg(feature = "native-menu")]
+            Event::UserEvent(HostEvent::MenuActivated { id }) => {
+                crate::menu::menu_was_activated(&windows, &id);
+            }
             Event::UserEvent(HostEvent::Theme { window, reply }) => {
                 answer_theme(&windows, window, &reply);
             }
@@ -827,10 +918,7 @@ fn run_engine(
                 shape,
                 reply,
             }) => {
-                let applied = windows
-                    .get(&window)
-                    .map(|entry| apply_window_shape(&entry.window, &shape));
-                let _ = reply.send(applied.is_some());
+                answer_window_shape(&windows, window, &shape, &reply);
             }
             // The user changed the machine's theme. The page is told rather than left to ask: it is
             // the user's setting for the whole machine, and a page that kept its own copy would keep
@@ -887,10 +975,11 @@ fn run_engine(
                     .iter()
                     .find(|(_, entry)| entry.window.id() == window_id)
                     .map(|(id, _)| *id);
-                if let Some(id) = closed
-                    && let Some(entry) = windows.remove(&id)
-                {
-                    entry.alive.store(false, Ordering::SeqCst);
+                if let Some(id) = closed {
+                    children.retain(|_, child| child.parent != id);
+                    if let Some(entry) = windows.remove(&id) {
+                        entry.alive.store(false, Ordering::SeqCst);
+                    }
                 }
             }
             _ => {}
@@ -907,20 +996,23 @@ fn answer_monitors(
     target: &EventLoopWindowTarget<HostEvent>,
     reply: &Sender<Vec<ncui_webview::MonitorRect>>,
 ) {
-    let monitors = target
-        .available_monitors()
-        .map(|monitor| {
-            let scale = monitor.scale_factor();
-            let position = monitor.position().to_logical::<f64>(scale);
-            let size = monitor.size().to_logical::<f64>(scale);
-            ncui_webview::MonitorRect {
-                x: position.x.round() as i32,
-                y: position.y.round() as i32,
-                width: size.width.round() as u32,
-                height: size.height.round() as u32,
-            }
-        })
-        .collect();
+    let monitor_rect = |monitor: tao::monitor::MonitorHandle| {
+        let scale = monitor.scale_factor();
+        let position = monitor.position().to_logical::<f64>(scale);
+        let size = monitor.size().to_logical::<f64>(scale);
+        ncui_webview::MonitorRect {
+            x: position.x.round() as i32,
+            y: position.y.round() as i32,
+            width: size.width.round() as u32,
+            height: size.height.round() as u32,
+        }
+    };
+    let mut monitors: Vec<_> = target.available_monitors().map(&monitor_rect).collect();
+    if monitors.is_empty() {
+        // Windows can fail display enumeration while still identifying the primary display.
+        // Leaving the list empty would keep a remembered off-screen window unreachable.
+        monitors.extend(target.primary_monitor().map(&monitor_rect));
+    }
     let _ = reply.send(monitors);
 }
 
@@ -937,18 +1029,27 @@ fn answer_geometry(
     reply: &Sender<Option<Geometry>>,
 ) {
     let answer = windows.get(&window).map(|entry| {
-        let scale = entry.window.scale_factor();
-        let size = entry.window.inner_size().to_logical::<f64>(scale);
-        let position = entry
-            .window
-            .outer_position()
-            .ok()
-            .map(|point| point.to_logical::<f64>(scale));
-        Geometry {
-            x: position.map_or(0, |point| point.x.round() as i32),
-            y: position.map_or(0, |point| point.y.round() as i32),
-            width: size.width.round() as u32,
-            height: size.height.round() as u32,
+        #[cfg(target_os = "linux")]
+        {
+            use tao::platform::unix::WindowExtUnix as _;
+
+            gtk_geometry(entry.window.gtk_window())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let scale = entry.window.scale_factor();
+            let size = entry.window.inner_size().to_logical::<f64>(scale);
+            let position = entry
+                .window
+                .outer_position()
+                .ok()
+                .map(|point| point.to_logical::<f64>(scale));
+            Geometry {
+                x: position.map_or(0, |point| point.x.round() as i32),
+                y: position.map_or(0, |point| point.y.round() as i32),
+                width: size.width.round() as u32,
+                height: size.height.round() as u32,
+            }
         }
     });
     let _ = reply.send(answer);
@@ -968,19 +1069,27 @@ fn create_window(
         request,
         seam,
         ipc_tx,
+        menu_tx,
         alive,
         error,
         reply,
     } = create;
+    #[cfg(not(feature = "native-menu"))]
+    let _ = menu_tx;
     let id = NEXT_WINDOW.fetch_add(1, Ordering::SeqCst);
     match build_window(target, request.as_ref(), &seam, ipc_tx, &error) {
-        Ok((window, webview)) => {
+        Ok((window, webview, cdp)) => {
             windows.insert(
                 id,
                 EngineWindow {
+                    #[cfg(feature = "native-menu")]
+                    menu: None,
                     window,
                     webview,
+                    cdp,
                     alive: Arc::clone(&alive),
+                    #[cfg(feature = "native-menu")]
+                    menu_tx,
                 },
             );
             alive.store(true, Ordering::SeqCst);
@@ -1086,13 +1195,84 @@ fn answer_window_state(
     change: Option<ncui_webview::WindowChange>,
     reply: &Sender<Option<ncui_webview::WindowState>>,
 ) {
-    let answer = windows.get(&window).map(|entry| {
-        if let Some(change) = change {
-            apply_window_change(&entry.window, change);
+    let Some(entry) = windows.get(&window) else {
+        let _ = reply.send(None);
+        return;
+    };
+    if let Some(change) = change {
+        apply_window_change(&entry.window, change);
+        #[cfg(target_os = "linux")]
+        {
+            use tao::platform::unix::WindowExtUnix as _;
+
+            let gtk_window = (*entry.window.gtk_window()).clone();
+            let alive = Arc::clone(&entry.alive);
+            let reply = (*reply).clone();
+            let deadline = Instant::now() + LINUX_WINDOW_SETTLE_TIMEOUT;
+            let _ = gtk::glib::timeout_add_local(LINUX_WINDOW_POLL_INTERVAL, move || {
+                use gtk::glib::ControlFlow;
+
+                if !alive.load(Ordering::Acquire) {
+                    let _ = reply.send(None);
+                    return ControlFlow::Break;
+                }
+                let state = read_gtk_window_state(&gtk_window);
+                if window_change_applied(state, change) || Instant::now() >= deadline {
+                    let _ = reply.send(Some(state));
+                    ControlFlow::Break
+                } else {
+                    ControlFlow::Continue
+                }
+            });
+            return;
         }
-        read_window_state(&entry.window)
-    });
-    let _ = reply.send(answer);
+    }
+    let _ = reply.send(Some(read_window_state(&entry.window)));
+}
+
+/// Applies a shape and, on Linux, acknowledges it after the window manager has had a chance to
+/// report the resulting geometry and state.
+#[cfg(feature = "wry-engine")]
+fn answer_window_shape(
+    windows: &HashMap<u64, EngineWindow>,
+    window: u64,
+    shape: &ncui_webview::WindowShape,
+    reply: &Sender<bool>,
+) {
+    let Some(entry) = windows.get(&window) else {
+        let _ = reply.send(false);
+        return;
+    };
+    apply_window_shape(&entry.window, shape);
+    #[cfg(target_os = "linux")]
+    {
+        use tao::platform::unix::WindowExtUnix as _;
+
+        let gtk_window = (*entry.window.gtk_window()).clone();
+        let alive = Arc::clone(&entry.alive);
+        let reply = (*reply).clone();
+        let deadline = Instant::now() + LINUX_WINDOW_SETTLE_TIMEOUT;
+        let shape = (*shape).clone();
+        let _ = gtk::glib::timeout_add_local(LINUX_WINDOW_POLL_INTERVAL, move || {
+            use gtk::glib::ControlFlow;
+
+            if !alive.load(Ordering::Acquire) {
+                let _ = reply.send(false);
+                return ControlFlow::Break;
+            }
+            if window_shape_applied(&gtk_window, &shape) || Instant::now() >= deadline {
+                let _ = reply.send(true);
+                ControlFlow::Break
+            } else {
+                ControlFlow::Continue
+            }
+        });
+        return;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = reply.send(true);
+    }
 }
 
 /// Asks the platform for one change to a window's presentation.
@@ -1101,6 +1281,28 @@ fn answer_window_state(
 /// fullscreen window takes the display away from the user's other windows.
 #[cfg(feature = "wry-engine")]
 fn apply_window_change(window: &Window, change: ncui_webview::WindowChange) {
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::prelude::*;
+        use tao::platform::unix::WindowExtUnix as _;
+
+        let window = window.gtk_window();
+        match change {
+            ncui_webview::WindowChange::Fullscreen(true) => window.fullscreen(),
+            ncui_webview::WindowChange::Fullscreen(false) => window.unfullscreen(),
+            ncui_webview::WindowChange::Maximized(maximized) => window.set_maximized(maximized),
+            ncui_webview::WindowChange::Minimized(true) => window.iconify(),
+            ncui_webview::WindowChange::Minimized(false) => window.deiconify(),
+            ncui_webview::WindowChange::Visible(true) => window.show_all(),
+            ncui_webview::WindowChange::Visible(false) => {
+                window.hide();
+            }
+            ncui_webview::WindowChange::Focus => {
+                window.present_with_time(gtk::gdk::ffi::GDK_CURRENT_TIME as _);
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
     match change {
         ncui_webview::WindowChange::Fullscreen(true) => {
             window.set_fullscreen(Some(tao::window::Fullscreen::Borderless(None)));
@@ -1120,23 +1322,51 @@ fn apply_window_change(window: &Window, change: ncui_webview::WindowChange) {
 /// and resized lands where it was asked for rather than being pushed by its own frame.
 #[cfg(feature = "wry-engine")]
 fn apply_window_shape(window: &Window, shape: &ncui_webview::WindowShape) {
-    if let Some(title) = &shape.title {
-        window.set_title(title);
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::prelude::*;
+        use tao::platform::unix::WindowExtUnix as _;
+
+        let gtk_window = window.gtk_window();
+        if let Some(title) = &shape.title {
+            gtk_window.set_title(title);
+        }
+        if let (Some(x), Some(y)) = (shape.x, shape.y) {
+            gtk_window.move_(x, y);
+        }
+        if let (Some(width), Some(height)) = (shape.width, shape.height) {
+            gtk_window.resize(
+                i32::try_from(width).unwrap_or(i32::MAX),
+                i32::try_from(height).unwrap_or(i32::MAX),
+            );
+        }
+        if let Some(always_on_top) = shape.always_on_top {
+            gtk_window.set_keep_above(always_on_top);
+        }
+        if let Some(resizable) = shape.resizable {
+            gtk_window.set_resizable(resizable);
+        }
     }
-    if let (Some(x), Some(y)) = (shape.x, shape.y) {
-        window.set_outer_position(tao::dpi::LogicalPosition::new(f64::from(x), f64::from(y)));
-    }
-    if let (Some(width), Some(height)) = (shape.width, shape.height) {
-        window.set_inner_size(tao::dpi::LogicalSize::new(
-            f64::from(width),
-            f64::from(height),
-        ));
-    }
-    if let Some(always_on_top) = shape.always_on_top {
-        window.set_always_on_top(always_on_top);
-    }
-    if let Some(resizable) = shape.resizable {
-        window.set_resizable(resizable);
+    #[cfg(not(target_os = "linux"))]
+    {
+        if let Some(title) = &shape.title {
+            window.set_title(title);
+        }
+        if let (Some(x), Some(y)) = (shape.x, shape.y) {
+            window.set_outer_position(tao::dpi::LogicalPosition::new(f64::from(x), f64::from(y)));
+        }
+        if let (Some(width), Some(height)) = (shape.width, shape.height) {
+            window.set_inner_size(tao::dpi::LogicalSize::new(
+                f64::from(width),
+                f64::from(height),
+            ));
+        }
+        if let Some(always_on_top) = shape.always_on_top {
+            window.set_always_on_top(always_on_top);
+        }
+        if let Some(resizable) = shape.resizable {
+            window.set_resizable(resizable);
+        }
     }
 }
 
@@ -1146,6 +1376,13 @@ fn apply_window_shape(window: &Window, shape: &ncui_webview::WindowShape) {
 /// windows by hand, and a runtime that reported what it asked for would disagree with the screen.
 #[cfg(feature = "wry-engine")]
 fn read_window_state(window: &Window) -> ncui_webview::WindowState {
+    #[cfg(target_os = "linux")]
+    {
+        use tao::platform::unix::WindowExtUnix as _;
+
+        read_gtk_window_state(window.gtk_window())
+    }
+    #[cfg(not(target_os = "linux"))]
     ncui_webview::WindowState {
         fullscreen: window.fullscreen().is_some(),
         maximized: window.is_maximized(),
@@ -1156,6 +1393,89 @@ fn read_window_state(window: &Window) -> ncui_webview::WindowState {
         always_on_top: window.is_always_on_top(),
         focused: window.is_focused(),
     }
+}
+
+#[cfg(all(feature = "wry-engine", target_os = "linux"))]
+fn read_gtk_window_state(window: &gtk::ApplicationWindow) -> ncui_webview::WindowState {
+    use gtk::prelude::*;
+
+    let state = window
+        .window()
+        .map_or_else(gtk::gdk::WindowState::empty, |window| window.state());
+    ncui_webview::WindowState {
+        fullscreen: state.contains(gtk::gdk::WindowState::FULLSCREEN),
+        maximized: state.contains(gtk::gdk::WindowState::MAXIMIZED),
+        minimized: state.contains(gtk::gdk::WindowState::ICONIFIED),
+        visible: window.get_visible(),
+        decorated: window.is_decorated(),
+        resizable: window.is_resizable(),
+        always_on_top: state.contains(gtk::gdk::WindowState::ABOVE),
+        focused: window.is_active(),
+    }
+}
+
+#[cfg(all(feature = "wry-engine", target_os = "linux"))]
+fn gtk_geometry(window: &gtk::ApplicationWindow) -> Geometry {
+    use gtk::prelude::*;
+
+    let allocation = window.allocation();
+    let position = window.position();
+    Geometry {
+        x: position.0,
+        y: position.1,
+        width: u32::try_from(allocation.width()).unwrap_or(0),
+        height: u32::try_from(allocation.height()).unwrap_or(0),
+    }
+}
+
+#[cfg(all(feature = "wry-engine", target_os = "linux"))]
+fn window_change_applied(
+    state: ncui_webview::WindowState,
+    change: ncui_webview::WindowChange,
+) -> bool {
+    match change {
+        ncui_webview::WindowChange::Fullscreen(value) => state.fullscreen == value,
+        ncui_webview::WindowChange::Maximized(value) => state.maximized == value,
+        ncui_webview::WindowChange::Minimized(value) => state.minimized == value,
+        ncui_webview::WindowChange::Visible(value) => state.visible == value,
+        ncui_webview::WindowChange::Focus => state.focused,
+    }
+}
+
+#[cfg(all(feature = "wry-engine", target_os = "linux"))]
+fn window_shape_applied(
+    window: &gtk::ApplicationWindow,
+    shape: &ncui_webview::WindowShape,
+) -> bool {
+    use gtk::prelude::*;
+
+    if shape
+        .title
+        .as_ref()
+        .is_some_and(|title| window.title().as_deref() != Some(title.as_str()))
+    {
+        return false;
+    }
+    let geometry = gtk_geometry(window);
+    if let (Some(x), Some(y)) = (shape.x, shape.y)
+        && (geometry.x != x || geometry.y != y)
+    {
+        return false;
+    }
+    if shape
+        .width
+        .is_some_and(|width| geometry.width.abs_diff(width) > 1)
+        || shape
+            .height
+            .is_some_and(|height| geometry.height.abs_diff(height) > 1)
+    {
+        return false;
+    }
+    let state = read_gtk_window_state(window);
+    shape
+        .always_on_top
+        .is_none_or(|value| state.always_on_top == value)
+        && shape.resizable.is_none_or(|value| state.resizable == value)
 }
 
 /// Builds one window and its webview on the engine's thread.
@@ -1170,7 +1490,7 @@ fn build_window(
     seam: &Arc<HostSeam>,
     ipc_tx: Sender<HostIpcEvent>,
     error: &Arc<Mutex<Option<String>>>,
-) -> Result<(Window, WebView), String> {
+) -> Result<(Window, WebView, PageTargetBinding), String> {
     // The window's shape comes from the request, not from the host's own defaults. A host
     // that invented its own title and size would show the user something the application
     // never asked for.
@@ -1288,10 +1608,9 @@ fn build_window(
     // context outlives the builder because the builder only borrows it.
     let dir = webview_data_root();
     let _ = std::fs::create_dir_all(&dir);
-    *CDP_USER_DATA_DIR
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(dir.clone());
-    let mut web_context = wry::WebContext::new(Some(dir));
+    #[cfg(target_os = "windows")]
+    let before_targets = page_targets_before_window(&dir);
+    let mut web_context = wry::WebContext::new(Some(dir.clone()));
     let builder = WebViewBuilder::new_with_web_context(&mut web_context)
         .with_ipc_handler(move |request: wry::http::Request<String>| {
             // Bridge the page's IPC payload into the in-process channel so the runtime can
@@ -1358,6 +1677,16 @@ fn build_window(
         message
     })?;
 
+    // The browser endpoint is shared; the page identity is not. Bind this window to the
+    // exactly-one page target that appeared while the event loop was serialized in this build.
+    #[cfg(target_os = "windows")]
+    let cdp = match before_targets {
+        Ok(before) => bind_page_target_after_window(&dir, &before),
+        Err(error) => PageTargetBinding::Failed(error),
+    };
+    #[cfg(not(target_os = "windows"))]
+    let cdp = PageTargetBinding::Failed(crate::cdp::platform_unsupported());
+
     // Adapter half of the composition boundary: create a wgpu surface from the window and
     // present one frame, proving the renderer can draw into the window the page lives in.
     // The DOM side (telling the page which pixels the GPU owns) is a separate step; this
@@ -1371,7 +1700,7 @@ fn build_window(
     #[cfg(feature = "gpu-surface")]
     present_one_gpu_frame_once(&window);
 
-    Ok((window, webview))
+    Ok((window, webview, cdp))
 }
 
 /// Presents one frame into the first window this process creates, and no other.
@@ -1481,6 +1810,15 @@ pub struct WindowHost {
     /// Behind a mutex because the trait requires `Send` and a `Receiver` is `Send` but not
     /// `Sync`; the lock is only ever held for the length of one `try_recv`.
     ipc_rx: Mutex<Receiver<HostIpcEvent>>,
+    /// Child-page receivers, keyed by the canonical identities issued by the engine.
+    ///
+    /// Each child has its own channel so a parent can poll one child without consuming another's
+    /// messages. The mutex supplies the `Sync` required by the backend trait.
+    child_ipc_rx: Mutex<HashMap<u64, Receiver<ChildPageMessage>>>,
+    /// Producer retained so the menu channel stays connected while the engine owns the window.
+    menu_tx: Sender<ncui_webview::MenuEvent>,
+    /// Consumer for native selections routed to this window by the engine.
+    menu_rx: Mutex<Receiver<ncui_webview::MenuEvent>>,
     /// The seam the page speaks through, shared with the window that owns this host.
     seam: Arc<HostSeam>,
     /// The process-wide engine this window lives in.
@@ -1489,10 +1827,6 @@ pub struct WindowHost {
     /// This window's identity inside the engine.
     #[cfg(feature = "wry-engine")]
     window: Option<u64>,
-    /// Where the engine publishes its `DevTools` endpoint (`DevToolsActivePort`), when the
-    /// application set one. Absent means the CDP transport cannot find the port and says
-    /// so rather than searching the disk.
-    cdp_user_data_dir: Mutex<Option<std::path::PathBuf>>,
 }
 
 impl Default for WindowHost {
@@ -1516,6 +1850,7 @@ impl WindowHost {
         #[cfg(not(feature = "wry-engine"))]
         {
             let (ipc_tx, ipc_rx) = mpsc::channel::<HostIpcEvent>();
+            let (menu_tx, menu_rx) = mpsc::channel::<ncui_webview::MenuEvent>();
             Self {
                 alive: Arc::new(AtomicBool::new(false)),
                 last_error: Arc::new(Mutex::new(Some(
@@ -1523,8 +1858,10 @@ impl WindowHost {
                 ))),
                 ipc_tx,
                 ipc_rx: Mutex::new(ipc_rx),
+                child_ipc_rx: Mutex::new(HashMap::new()),
+                menu_tx,
+                menu_rx: Mutex::new(menu_rx),
                 seam: Arc::new(HostSeam::disabled()),
-                cdp_user_data_dir: Mutex::new(None),
             }
         }
     }
@@ -1605,6 +1942,46 @@ impl WindowHost {
             return false;
         }
         matches!(answers.recv_timeout(ENGINE_REQUEST_TIMEOUT), Ok(Ok(())))
+    }
+
+    /// Attaches or removes this window's native menu, reporting whether the engine accepted it.
+    #[cfg(feature = "native-menu")]
+    #[must_use]
+    pub fn menu(&self, request: Option<ncui_webview::MenuRequest>) -> bool {
+        let (Some(engine), Some(window)) = (&self.engine, self.window) else {
+            return false;
+        };
+        let (reply, answers) = mpsc::channel();
+        if engine
+            .send_event(HostEvent::SetMenu {
+                window,
+                request,
+                reply,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        matches!(answers.recv_timeout(ENGINE_REQUEST_TIMEOUT), Ok(Ok(())))
+    }
+
+    /// Takes the next native menu selection routed to this window.
+    #[must_use]
+    pub fn poll_menu_event(&self) -> Option<ncui_webview::MenuEvent> {
+        #[cfg(feature = "native-menu")]
+        {
+            let _ = &self.menu_tx;
+            self.menu_rx
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .try_recv()
+                .ok()
+        }
+        #[cfg(not(feature = "native-menu"))]
+        {
+            let _ = (&self.menu_tx, &self.menu_rx);
+            None
+        }
     }
 
     /// Where this window is and how big it is, as the platform reports it.
@@ -1713,55 +2090,48 @@ impl WindowHost {
         }
     }
 
-    /// Sends one CDP command to this window's own `DevTools` endpoint (ADR-017 Phase 2).
+    /// Sends one CDP command through this window's engine identity (ADR-017 Phase 2).
     ///
-    /// The engine was created with `--remote-debugging-port=0`; the port it picked is read
-    /// from the user-data directory set with [`WindowHost::set_cdp_user_data_dir`]. A host
-    /// with no directory set, or an engine that never exposed the port, refuses by name
-    /// rather than inventing an answer.
-    #[cfg(feature = "wry-engine")]
+    /// The engine owns the immutable page-target binding established during serialized window
+    /// creation. A caller never supplies an engine id, and the process-wide browser endpoint is
+    /// not treated as a page identity. The reply wait is bounded because a stopped engine must
+    /// not hang an application request.
     pub fn cdp_send(
         &self,
         command: &serde_json::Value,
     ) -> Result<serde_json::Value, crate::cdp::CdpError> {
-        // The window's own directory wins; the process-wide one recorded when the window
-        // was built is the fallback, and it is the one a normally-constructed host has.
-        let owned = self
-            .cdp_user_data_dir
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let dir = owned
-            .or_else(|| {
-                CDP_USER_DATA_DIR
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone()
+        crate::cdp::command_id(command)?;
+        #[cfg(feature = "wry-engine")]
+        {
+            let (Some(engine), Some(window)) = (&self.engine, self.window) else {
+                return Err(crate::cdp::CdpError::TargetBindFailed {
+                    reason: "this host has no live engine window".to_owned(),
+                });
+            };
+            let (reply, answers) = mpsc::channel();
+            engine
+                .send_event(HostEvent::CdpRequest {
+                    window,
+                    command: command.clone(),
+                    reply,
+                })
+                .map_err(|error| crate::cdp::CdpError::TransportFailed {
+                    reason: format!("cannot post the CDP request to the engine: {error}"),
+                })?;
+            answers.recv_timeout(CDP_REPLY_TIMEOUT).map_err(|error| {
+                crate::cdp::CdpError::TransportFailed {
+                    reason: format!("the engine did not answer the CDP request in time: {error}"),
+                }
+            })?
+        }
+        #[cfg(not(feature = "wry-engine"))]
+        {
+            let _ = self;
+            Err(crate::cdp::CdpError::UnsupportedPlatform {
+                reason: "this build has no WebView engine, so there is no DevTools endpoint"
+                    .to_owned(),
             })
-            .ok_or_else(|| crate::cdp::CdpError::PortUnavailable {
-                reason: "no user-data directory was set for this window's engine".to_owned(),
-            })?;
-        let endpoint = crate::cdp::read_devtools_endpoint(&dir)?;
-        crate::cdp::send_command(&endpoint, command)
-    }
-
-    /// The no-engine form of [`WindowHost::cdp_send`]: without an engine there is no
-    /// browser and no `DevTools` endpoint, so the command is refused by name.
-    #[cfg(not(feature = "wry-engine"))]
-    pub fn cdp_send(&self, _command: &serde_json::Value) -> Result<serde_json::Value, String> {
-        Err("this build has no WebView engine, so there is no DevTools endpoint".to_owned())
-    }
-
-    /// Sets where this window's engine publishes its `DevTools` endpoint.
-    ///
-    /// Must be set before the window's browser starts to be effective: the file is written
-    /// at engine startup. Setting it late is not an error, but the transport will report
-    /// the file as missing until the engine next starts.
-    pub fn set_cdp_user_data_dir(&self, dir: std::path::PathBuf) {
-        *self
-            .cdp_user_data_dir
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(dir);
+        }
     }
 
     /// Scales this window's page by `factor`, where `1.0` is the platform default.
@@ -1794,6 +2164,18 @@ impl WindowHost {
             let _ = (self, factor);
             false
         }
+    }
+
+    #[cfg(all(test, target_os = "linux", feature = "wry-engine"))]
+    fn applied_zoom_level(&self) -> Option<f64> {
+        let (Some(engine), Some(window)) = (&self.engine, self.window) else {
+            return None;
+        };
+        let (reply, answers) = mpsc::channel();
+        engine
+            .send_event(HostEvent::ZoomLevel { window, reply })
+            .ok()?;
+        answers.recv_timeout(ENGINE_REQUEST_TIMEOUT).ok().flatten()
     }
 
     /// Opens the platform's web inspector for this window.
@@ -1898,49 +2280,85 @@ impl WindowHost {
     }
 }
 
+#[cfg(feature = "wry-engine")]
+impl WindowHost {
+    fn create_child_webview_with_timeout(
+        &self,
+        id: u64,
+        request: &ChildWebviewRequest,
+        seam: &Arc<HostSeam>,
+        ipc_tx: SyncSender<ChildPageMessage>,
+        timeout: Duration,
+    ) -> Result<u64, String> {
+        let (Some(engine), Some(window)) = (&self.engine, self.window) else {
+            return Err("this window's engine is not running".to_owned());
+        };
+        let (host_ipc_tx, child_ipc_rx) = mpsc::sync_channel(ncui_webview::MAX_CHILD_IPC_MESSAGES);
+        let (reply, answers) = mpsc::channel();
+        engine
+            .send_event(HostEvent::CreateChild {
+                parent: window,
+                id,
+                request: Box::new(request.clone()),
+                seam: Arc::clone(seam),
+                ipc_tx,
+                host_ipc_tx,
+                reply,
+            })
+            .map_err(|error| error.to_string())?;
+        match answers.recv_timeout(timeout) {
+            Ok(Ok(child)) => {
+                self.child_ipc_rx
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(child, child_ipc_rx);
+                Ok(child)
+            }
+            Ok(Err(error)) => Err(error.to_string()),
+            Err(error) => {
+                // The engine processes events in order. This close runs after the timed-out
+                // build and removes a child that completed after its caller stopped waiting.
+                let (reply, _answers) = mpsc::channel();
+                let _ = engine.send_event(HostEvent::CloseChild {
+                    parent: window,
+                    child: id,
+                    reply,
+                });
+                Err(error.to_string())
+            }
+        }
+    }
+}
+
 impl WebViewBackend for WindowHost {
     fn as_any(&self) -> &dyn core::any::Any {
         self
     }
 
-    fn cdp_send(&self, command: &serde_json::Value) -> Result<serde_json::Value, String> {
-        #[cfg(feature = "wry-engine")]
-        {
-            WindowHost::cdp_send(self, command).map_err(|error| error.to_string())
-        }
-        #[cfg(not(feature = "wry-engine"))]
-        {
-            let _ = (self, command);
-            Err("this backend has no CDP transport".to_owned())
-        }
+    fn cdp_send(
+        &self,
+        command: &serde_json::Value,
+    ) -> Result<serde_json::Value, crate::cdp::CdpError> {
+        WindowHost::cdp_send(self, command)
     }
 
     #[cfg(feature = "wry-engine")]
     fn create_child_webview(
         &self,
-        request: &ncui_webview_child::ChildWebviewRequest,
+        request: &ChildWebviewRequest,
+        seam: &Arc<HostSeam>,
+        ipc_tx: SyncSender<ChildPageMessage>,
     ) -> Result<u64, String> {
-        let (Some(engine), Some(window)) = (&self.engine, self.window) else {
-            return Err("this window's engine is not running".to_owned());
-        };
-        let (reply, answers) = mpsc::channel();
-        engine
-            .send_event(HostEvent::CreateChild {
-                parent: window.to_string(),
-                request: Box::new(request.clone()),
-                reply,
-            })
-            .map_err(|error| error.to_string())?;
-        answers
-            .recv_timeout(ENGINE_REQUEST_TIMEOUT)
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())
+        let id = NEXT_CHILD.fetch_add(1, Ordering::SeqCst);
+        self.create_child_webview_with_timeout(id, request, seam, ipc_tx, CHILD_REQUEST_TIMEOUT)
     }
 
     #[cfg(not(feature = "wry-engine"))]
     fn create_child_webview(
         &self,
-        _request: &ncui_webview_child::ChildWebviewRequest,
+        _request: &ChildWebviewRequest,
+        _seam: &Arc<HostSeam>,
+        _ipc_tx: SyncSender<ChildPageMessage>,
     ) -> Result<u64, String> {
         Err("this build has no window engine".to_owned())
     }
@@ -1949,21 +2367,22 @@ impl WebViewBackend for WindowHost {
     fn set_child_webview_bounds(
         &self,
         child: u64,
-        request: &ncui_webview_child::ChildWebviewRequest,
+        request: &ChildWebviewRequest,
     ) -> Result<(), String> {
-        let (Some(engine), Some(_)) = (&self.engine, self.window) else {
+        let (Some(engine), Some(window)) = (&self.engine, self.window) else {
             return Err("this window's engine is not running".to_owned());
         };
         let (reply, answers) = mpsc::channel();
         engine
             .send_event(HostEvent::ChildBounds {
+                parent: window,
                 child,
                 request: Box::new(request.clone()),
                 reply,
             })
             .map_err(|error| error.to_string())?;
         answers
-            .recv_timeout(ENGINE_REQUEST_TIMEOUT)
+            .recv_timeout(CHILD_REQUEST_TIMEOUT)
             .map_err(|error| error.to_string())?
             .map_err(|error| error.to_string())
     }
@@ -1972,29 +2391,88 @@ impl WebViewBackend for WindowHost {
     fn set_child_webview_bounds(
         &self,
         _child: u64,
-        _request: &ncui_webview_child::ChildWebviewRequest,
+        _request: &ChildWebviewRequest,
     ) -> Result<(), String> {
         Err("this build has no window engine".to_owned())
     }
 
     #[cfg(feature = "wry-engine")]
     fn close_child_webview(&self, child: u64) -> Result<(), String> {
-        let (Some(engine), Some(_)) = (&self.engine, self.window) else {
+        let (Some(engine), Some(window)) = (&self.engine, self.window) else {
             return Err("this window's engine is not running".to_owned());
         };
         let (reply, answers) = mpsc::channel();
         engine
-            .send_event(HostEvent::CloseChild { child, reply })
+            .send_event(HostEvent::CloseChild {
+                parent: window,
+                child,
+                reply,
+            })
             .map_err(|error| error.to_string())?;
         answers
-            .recv_timeout(ENGINE_REQUEST_TIMEOUT)
+            .recv_timeout(CHILD_REQUEST_TIMEOUT)
             .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        self.child_ipc_rx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&child);
+        Ok(())
     }
 
     #[cfg(not(feature = "wry-engine"))]
     fn close_child_webview(&self, _child: u64) -> Result<(), String> {
         Err("this build has no window engine".to_owned())
+    }
+
+    fn poll_child_webview_message(&self, child: u64) -> Option<ChildPageMessage> {
+        self.child_ipc_rx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&child)?
+            .try_recv()
+            .ok()
+    }
+
+    fn wait_child_webview_message(
+        &self,
+        child: u64,
+        timeout: Duration,
+    ) -> Option<ChildPageMessage> {
+        self.child_ipc_rx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&child)?
+            .recv_timeout(timeout)
+            .ok()
+    }
+
+    #[cfg(feature = "wry-engine")]
+    fn evaluate_child_script(&self, child: u64, script: &str) -> bool {
+        let (Some(engine), Some(window)) = (&self.engine, self.window) else {
+            return false;
+        };
+        if !self.alive.load(Ordering::SeqCst)
+            || !self
+                .child_ipc_rx
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&child)
+        {
+            return false;
+        }
+        engine
+            .send_event(HostEvent::ChildEval {
+                parent: window,
+                child,
+                script: script.to_owned(),
+            })
+            .is_ok()
+    }
+
+    #[cfg(not(feature = "wry-engine"))]
+    fn evaluate_child_script(&self, _child: u64, _script: &str) -> bool {
+        false
     }
 
     fn last_error(&self) -> Option<String> {
@@ -2040,6 +2518,15 @@ impl WebViewBackend for WindowHost {
     #[cfg(feature = "tray-icon")]
     fn set_tray(&self, tray: Option<ncui_webview::TrayRequest>) -> bool {
         self.tray(tray)
+    }
+
+    #[cfg(feature = "native-menu")]
+    fn set_menu(&self, menu: Option<ncui_webview::MenuRequest>) -> bool {
+        self.menu(menu)
+    }
+
+    fn poll_menu_event(&self) -> Option<ncui_webview::MenuEvent> {
+        self.poll_menu_event()
     }
 
     fn window_theme(&self) -> Option<ncui_webview::Theme> {
@@ -2200,6 +2687,7 @@ fn spawn_real(request: Option<ncui_webview::WindowRequest>, seam: Arc<HostSeam>)
     let alive = Arc::new(AtomicBool::new(false));
     let last_error = Arc::new(Mutex::new(None));
     let (ipc_tx, ipc_rx) = mpsc::channel::<HostIpcEvent>();
+    let (menu_tx, menu_rx) = mpsc::channel::<ncui_webview::MenuEvent>();
 
     let Some(engine) = engine() else {
         if let Ok(mut guard) = last_error.lock() {
@@ -2210,10 +2698,12 @@ fn spawn_real(request: Option<ncui_webview::WindowRequest>, seam: Arc<HostSeam>)
             last_error,
             ipc_tx,
             ipc_rx: Mutex::new(ipc_rx),
+            child_ipc_rx: Mutex::new(HashMap::new()),
+            menu_tx,
+            menu_rx: Mutex::new(menu_rx),
             seam,
             engine: None,
             window: None,
-            cdp_user_data_dir: Mutex::new(None),
         };
     };
 
@@ -2222,6 +2712,7 @@ fn spawn_real(request: Option<ncui_webview::WindowRequest>, seam: Arc<HostSeam>)
         request,
         seam: Arc::clone(&seam),
         ipc_tx: ipc_tx.clone(),
+        menu_tx: menu_tx.clone(),
         alive: Arc::clone(&alive),
         error: Arc::clone(&last_error),
         reply: reply_tx,
@@ -2238,14 +2729,16 @@ fn spawn_real(request: Option<ncui_webview::WindowRequest>, seam: Arc<HostSeam>)
             last_error,
             ipc_tx,
             ipc_rx: Mutex::new(ipc_rx),
+            child_ipc_rx: Mutex::new(HashMap::new()),
+            menu_tx,
+            menu_rx: Mutex::new(menu_rx),
             seam,
             engine: None,
             window: None,
-            cdp_user_data_dir: Mutex::new(None),
         };
     }
 
-    let window = match reply_rx.recv_timeout(Duration::from_secs(15)) {
+    let window = match reply_rx.recv_timeout(WINDOW_CREATE_TIMEOUT) {
         Ok(Ok(id)) => Some(id),
         Ok(Err(message)) => {
             if let Ok(mut guard) = last_error.lock() {
@@ -2266,10 +2759,12 @@ fn spawn_real(request: Option<ncui_webview::WindowRequest>, seam: Arc<HostSeam>)
         last_error,
         ipc_tx,
         ipc_rx: Mutex::new(ipc_rx),
+        child_ipc_rx: Mutex::new(HashMap::new()),
+        menu_tx,
+        menu_rx: Mutex::new(menu_rx),
         seam,
         engine: Some(engine.clone()),
         window,
-        cdp_user_data_dir: Mutex::new(None),
     }
 }
 
@@ -2482,43 +2977,485 @@ mod tests {
         drop(host);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
-    fn a_child_webview_embeds_into_a_live_parent_and_stays_live() {
+    fn a_live_webkit_inspector_opens_reports_and_closes() {
         if !require_display() {
             return;
         }
         let host = WindowHost::new();
         assert!(
             host.is_alive(),
+            "the window did not come up: {:?}",
+            host.last_error()
+        );
+        assert!(host.open_devtools(), "the inspector open was refused");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while host.is_devtools_open() != Some(true) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(host.is_devtools_open(), Some(true), "the inspector is open");
+        assert!(host.close_devtools(), "the inspector close was refused");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while host.is_devtools_open() != Some(false) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            host.is_devtools_open(),
+            Some(false),
+            "the inspector is closed"
+        );
+    }
+
+    fn running_child_seam() -> Arc<HostSeam> {
+        let child_lifecycle = ncui_webview::WindowLifecycle::new();
+        for state in [
+            ncui_webview::HostState::Created,
+            ncui_webview::HostState::Attaching,
+            ncui_webview::HostState::Running,
+        ] {
+            child_lifecycle
+                .transition(state)
+                .expect("the child lifecycle reaches running");
+        }
+        assert!(child_lifecycle.is_serving(), "the child seam is running");
+        let child_policy =
+            NavigationPolicy::new(&[Origin::new(Scheme::Https, "example.com", None)]);
+        let child_parent = HostSeam::new(
+            ncui_webview::WindowLifecycle::new(),
+            CapabilityGrant::none(),
+            child_policy,
+        );
+        Arc::new(child_parent.isolated_child(child_lifecycle))
+    }
+
+    fn live_child() -> (
+        WindowHost,
+        ChildWebviewRequest,
+        u64,
+        Receiver<ChildPageMessage>,
+    ) {
+        let host = spawn_real(
+            Some(ncui_webview::WindowRequest::new("about:blank")),
+            seam(),
+        );
+        assert!(
+            host.is_alive(),
             "the parent window did not come up: {:?}",
             host.last_error()
         );
-
-        // The backend-level child op: embeds a real child HWND inside the
-        // parent's frame (WebView2 composition on Windows).
-        let child_id = host
-            .create_child_webview(&ncui_webview_child::ChildWebviewRequest {
-                url: "https://app.example.com".to_owned(),
-                x: 10,
-                y: 10,
-                width: 320,
-                height: 240,
-            })
+        let child_seam = running_child_seam();
+        let (ipc_tx, ipc_rx) =
+            mpsc::sync_channel::<ChildPageMessage>(ncui_webview::MAX_CHILD_IPC_MESSAGES);
+        let request = ChildWebviewRequest {
+            url: "https://example.com/".to_owned(),
+            x: 10,
+            y: 10,
+            width: 320,
+            height: 240,
+        };
+        let initial_navigation =
+            ncui_webview::NavigationRequest::from_url(&request.url, true).expect("a readable URL");
+        assert!(
+            child_seam
+                .evaluate_navigation(&initial_navigation)
+                .is_allowed(),
+            "the test URL is allowed by the child's isolated policy"
+        );
+        let child = host
+            .create_child_webview(&request, &child_seam, ipc_tx)
             .expect("the child webview was embedded");
+        (host, request, child, ipc_rx)
+    }
+
+    fn assert_other_parent_cannot_reach_child(child: u64, request: &ChildWebviewRequest) {
+        let other = WindowHost::new();
+        assert!(
+            other.is_alive(),
+            "the second parent did not come up: {:?}",
+            other.last_error()
+        );
+        assert!(
+            other.set_child_webview_bounds(child, request).is_err(),
+            "a child cannot be moved through a different parent"
+        );
+        assert!(
+            other.close_child_webview(child).is_err(),
+            "a child cannot be closed through a different parent"
+        );
+        assert!(
+            !other.evaluate_child_script(child, "window.ipc.postMessage('wrong parent')"),
+            "a child cannot be evaluated through a different parent"
+        );
+    }
+
+    #[test]
+    fn a_timed_out_child_build_is_closed_before_later_requests() {
+        if !require_display() {
+            return;
+        }
+        let host = spawn_real(
+            Some(ncui_webview::WindowRequest::new("about:blank")),
+            seam(),
+        );
+        assert!(host.is_alive(), "the parent window did not come up");
+        let request = ChildWebviewRequest {
+            url: "https://example.com/".to_owned(),
+            x: 10,
+            y: 10,
+            width: 320,
+            height: 240,
+        };
+        let child_seam = running_child_seam();
+        let (ipc_tx, _ipc_rx) =
+            mpsc::sync_channel::<ChildPageMessage>(ncui_webview::MAX_CHILD_IPC_MESSAGES);
+        let id = u64::MAX;
+        let timeout = host
+            .create_child_webview_with_timeout(id, &request, &child_seam, ipc_tx, Duration::ZERO)
+            .expect_err("the zero budget times out while the engine builds the child");
+        assert!(timeout.contains("timed out"), "{timeout}");
+
+        // This request is queued after the timeout cleanup. Seeing `not live` proves the engine
+        // processed the late build and its close instead of retaining an invisible orphan.
+        let closed = host
+            .set_child_webview_bounds(id, &request)
+            .expect_err("the timed-out child is no longer live");
+        assert!(closed.contains("not live"), "{closed}");
+    }
+
+    #[test]
+    fn a_child_webview_embeds_into_a_live_parent_and_stays_live() {
+        if !require_display() {
+            return;
+        }
+        let (host, request, child_id, ipc_rx) = live_child();
+        assert_other_parent_cannot_reach_child(child_id, &request);
 
         // The child is a live surface: moving it must succeed.
         host.set_child_webview_bounds(
             child_id,
-            &ncui_webview_child::ChildWebviewRequest {
-                url: "https://app.example.com".to_owned(),
+            &ChildWebviewRequest {
                 x: 20,
                 y: 20,
-                width: 320,
-                height: 240,
+                ..request
             },
         )
         .expect("the child webview was moved");
+
+        // The injected bridge and the child eval route carry real IPC, tagged with the canonical
+        // engine id. The caller's channel is primary; eval is retried until the new document is
+        // ready rather than assuming a cold navigation finishes within one fixed delay.
+        let deadline = Instant::now() + CHILD_REQUEST_TIMEOUT;
+        let message = loop {
+            assert!(
+                host.evaluate_child_script(
+                    child_id,
+                    "window.ncui.invoke('describe', { from: 'child' });",
+                ),
+                "the child eval was accepted"
+            );
+            if let Ok(message) = ipc_rx.recv_timeout(Duration::from_millis(250)) {
+                break message;
+            }
+            assert!(Instant::now() < deadline, "the child page posted IPC");
+            thread::sleep(Duration::from_millis(50));
+        };
+        assert_eq!(message.child, child_id);
+        let body: serde_json::Value =
+            serde_json::from_str(&message.body).expect("child IPC must be valid JSON");
+        assert_eq!(body["action"], "perform");
+        assert_eq!(body["name"], "describe");
+        assert_eq!(body["payload"], serde_json::json!({ "from": "child" }));
+
+        // Once the caller's receiver disconnects, the parent's retained receiver becomes the
+        // fallback instead of allowing an unbounded duplicate queue to accumulate.
+        drop(ipc_rx);
+        let deadline = Instant::now() + CHILD_REQUEST_TIMEOUT;
+        let fallback = loop {
+            assert!(
+                host.evaluate_child_script(
+                    child_id,
+                    "window.ncui.invoke('describe', { from: 'host-poll' });",
+                ),
+                "the fallback child eval was accepted"
+            );
+            if let Some(message) =
+                host.wait_child_webview_message(child_id, Duration::from_millis(250))
+            {
+                let body: serde_json::Value =
+                    serde_json::from_str(&message.body).expect("child IPC must be valid JSON");
+                if body["payload"] == serde_json::json!({ "from": "host-poll" }) {
+                    break message;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the child page posted fallback IPC"
+            );
+            thread::sleep(Duration::from_millis(50));
+        };
+        assert_eq!(fallback.child, child_id);
+        let body: serde_json::Value =
+            serde_json::from_str(&fallback.body).expect("fallback IPC must be valid JSON");
+        assert_eq!(body["action"], "perform");
+        assert_eq!(body["name"], "describe");
+        assert_eq!(body["payload"], serde_json::json!({ "from": "host-poll" }));
+
+        host.close_child_webview(child_id)
+            .expect("the child webview was closed");
         assert!(host.is_alive(), "the parent must stay alive");
+        assert!(
+            host.close_child_webview(child_id).is_err(),
+            "a closed child is no longer live"
+        );
+        assert!(
+            host.poll_child_webview_message(child_id).is_none(),
+            "closing removes the child's receiver"
+        );
+        assert!(
+            !host.evaluate_child_script(child_id, "window.ipc.postMessage('closed')"),
+            "a closed child cannot be evaluated"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_live_engine_zoom_changes_the_rendered_page() {
+        if !require_display() {
+            return;
+        }
+        let host = spawn_real(
+            Some(ncui_webview::WindowRequest::new("about:blank")),
+            seam(),
+        );
+        assert!(host.is_alive(), "the window did not come up");
+        host.eval("document.body.innerHTML='<div style=\"width:200px;height:200px;background:rgb(255,0,0)\"></div>'; window.ipc.postMessage('ready');");
+        let ready_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if host.try_recv_ipc().is_ok_and(|body| body == "ready") {
+                break;
+            }
+            assert!(
+                Instant::now() < ready_deadline,
+                "the static zoom probe page became ready"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+        let capture = || -> String {
+            host.cdp_send(&serde_json::json!({
+                "id": 1,
+                "method": "Page.captureScreenshot",
+            }))
+            .expect("the live page captures")["result"]["data"]
+                .as_str()
+                .expect("the screenshot is base64 data")
+                .to_owned()
+        };
+        let before = capture();
+        assert!(host.set_zoom(2.0), "the engine accepted the zoom request");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let after = loop {
+            let screenshot = capture();
+            if screenshot != before {
+                break screenshot;
+            }
+            assert!(Instant::now() < deadline, "zoom changes the rendered page");
+            thread::sleep(Duration::from_millis(50));
+        };
+        assert_ne!(after, before, "zoom changes the rendered pixels");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_live_engine_zoom_changes_webkits_applied_level() {
+        if !require_display() {
+            return;
+        }
+        let host = spawn_real(
+            Some(ncui_webview::WindowRequest::new("about:blank")),
+            seam(),
+        );
+        assert!(host.is_alive(), "the window did not come up");
+        let before = host
+            .applied_zoom_level()
+            .expect("WebKit reports its zoom level");
+        assert!(host.set_zoom(2.0), "the engine accepted the zoom request");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let after = loop {
+            let level = host
+                .applied_zoom_level()
+                .expect("WebKit keeps reporting its zoom level");
+            if level > before {
+                break level;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "WebKit applies the requested zoom level"
+            );
+            thread::sleep(Duration::from_millis(50));
+        };
+        assert!(
+            (after - 2.0).abs() < 0.001,
+            "WebKit applied 2x zoom: {after}"
+        );
+    }
+
+    #[cfg(feature = "native-menu")]
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one live test proves attachment, replacement routing, refusal retention and removal"
+    )]
+    fn a_native_menu_attaches_routes_replaces_and_removes_on_a_live_window() {
+        if !require_display() {
+            return;
+        }
+        let host = WindowHost::new();
+        assert!(
+            host.is_alive(),
+            "the window did not come up: {:?}",
+            host.last_error()
+        );
+        let request = ncui_webview::MenuRequest {
+            menus: vec![ncui_webview::MenuSubmenu {
+                label: "File".to_owned(),
+                enabled: true,
+                items: vec![
+                    ncui_webview::MenuEntry::Item {
+                        label: "Open".to_owned(),
+                        command: "open".to_owned(),
+                        enabled: true,
+                    },
+                    ncui_webview::MenuEntry::Separator,
+                    ncui_webview::MenuEntry::Submenu(ncui_webview::MenuSubmenu {
+                        label: "More".to_owned(),
+                        enabled: false,
+                        items: vec![ncui_webview::MenuEntry::Item {
+                            label: "Close".to_owned(),
+                            command: "close".to_owned(),
+                            enabled: false,
+                        }],
+                    }),
+                ],
+            }],
+        };
+        assert!(host.set_menu(Some(request.clone())), "the menu attaches");
+        let window = host.window.expect("the live window has an identity");
+        let selected_id = format!("ncui.menu.item.{window}.root.0.0");
+        host.engine
+            .as_ref()
+            .expect("the live window has an engine")
+            .send_event(HostEvent::MenuActivated {
+                id: selected_id.clone(),
+            })
+            .expect("the engine accepts a native selection");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let selected = loop {
+            if let Some(event) = host.poll_menu_event() {
+                break event;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the selection reached its window"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(selected.command, "open");
+        let replacement = ncui_webview::MenuRequest {
+            menus: vec![
+                ncui_webview::MenuSubmenu {
+                    label: "Empty".to_owned(),
+                    enabled: true,
+                    items: vec![ncui_webview::MenuEntry::Separator],
+                },
+                ncui_webview::MenuSubmenu {
+                    label: "Edit".to_owned(),
+                    enabled: true,
+                    items: vec![ncui_webview::MenuEntry::Item {
+                        label: "Replace".to_owned(),
+                        command: "replace".to_owned(),
+                        enabled: true,
+                    }],
+                },
+            ],
+        };
+        assert!(
+            host.set_menu(Some(replacement)),
+            "the menu is replaced by a different command layout"
+        );
+        host.engine
+            .as_ref()
+            .expect("the live window has an engine")
+            .send_event(HostEvent::MenuActivated { id: selected_id })
+            .expect("the engine accepts the old item identity");
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            host.poll_menu_event().is_none(),
+            "an item removed by replacement must no longer route"
+        );
+        let replacement_id = format!("ncui.menu.item.{window}.root.1.0");
+        host.engine
+            .as_ref()
+            .expect("the live window has an engine")
+            .send_event(HostEvent::MenuActivated {
+                id: replacement_id.clone(),
+            })
+            .expect("the engine accepts the replacement item identity");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let replaced = loop {
+            if let Some(event) = host.poll_menu_event() {
+                break event;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the replacement selection reached its window"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(replaced.command, "replace");
+
+        let duplicate = ncui_webview::MenuRequest {
+            menus: vec![ncui_webview::MenuSubmenu {
+                label: "Invalid".to_owned(),
+                enabled: true,
+                items: vec![
+                    ncui_webview::MenuEntry::Item {
+                        label: "One".to_owned(),
+                        command: "duplicate".to_owned(),
+                        enabled: true,
+                    },
+                    ncui_webview::MenuEntry::Item {
+                        label: "Two".to_owned(),
+                        command: "duplicate".to_owned(),
+                        enabled: true,
+                    },
+                ],
+            }],
+        };
+        assert!(!host.set_menu(Some(duplicate)), "duplicates are refused");
+        host.engine
+            .as_ref()
+            .expect("the live window has an engine")
+            .send_event(HostEvent::MenuActivated { id: replacement_id })
+            .expect("the retained menu accepts a selection after refusal");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let retained = loop {
+            if let Some(event) = host.poll_menu_event() {
+                break event;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the retained selection reached its window"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(retained.command, "replace");
+        assert!(
+            host.set_menu(Some(request)),
+            "a valid menu can follow a refusal"
+        );
+        assert!(host.set_menu(None), "the menu is removed");
+        assert!(host.is_alive(), "menu changes leave the window alive");
     }
 
     #[test]
@@ -2575,13 +3512,13 @@ mod tests {
 
 #[cfg(all(test, feature = "wry-engine", not(target_os = "macos")))]
 mod cdp_live {
-    //! The live CDP exchange: ADR-017 Phase 2's recorded human verification, automated.
-    //! A real `WebView2` is created with remote debugging on, the transport reads the port
-    //! the engine published, and `Browser.getVersion` is sent to the endpoint and answered.
+    //! Windows exchanges a real CDP command; other engines must refuse by name.
 
     use super::*;
+    #[cfg(target_os = "windows")]
     use std::time::Instant;
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn a_live_engine_answers_a_cdp_command_over_the_transport() {
         if !tests::require_display() {
@@ -2628,5 +3565,28 @@ mod cdp_live {
             "the product string should name the engine: {version}"
         );
         // The product string is asserted below; nothing needs printing.
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn a_live_engine_without_cdp_refuses_by_name() {
+        if !tests::require_display() {
+            return;
+        }
+        let host = WindowHost::new();
+        assert!(
+            host.is_alive(),
+            "the window did not come up: {:?}",
+            host.last_error()
+        );
+        let error = host
+            .cdp_send(&serde_json::json!({
+                "id": 1,
+                "method": "Browser.getVersion",
+            }))
+            .expect_err("this engine has no CDP endpoint");
+        assert_eq!(error.code(), "cdp_platform_unsupported");
+        assert!(error.to_string().contains("does not expose"));
+        assert!(host.is_alive(), "the refusal must not stop the engine");
     }
 }

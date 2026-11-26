@@ -213,46 +213,6 @@ impl AgentSession {
         Authorizer.authorize(&self.agent_id, required, self.granted)
     }
 
-    /// Authorizes a request that may include destructive capabilities.
-    ///
-    /// Holding a destructive capability authorises the *possibility* of the operation, not
-    /// this call. `consent` must come from a real signal — a user confirmation or an
-    /// explicit agent argument — never from a constant.
-    ///
-    /// # Errors
-    ///
-    /// As [`AgentSession::authorize`], and additionally [`ErrorKind::CapabilityDenied`]
-    /// when `required` contains a destructive capability and `consent` is `false`.
-    pub fn authorize_destructive(&self, required: CapabilitySet, consent: bool) -> Result<()> {
-        self.require_authenticated()?;
-        Authorizer.require_destructive(&self.agent_id, required, self.granted, consent)
-    }
-
-    /// Requires explicit consent for a method the registry declares destructive.
-    ///
-    /// This is deliberately separate from [`AgentSession::authorize_destructive`]. That
-    /// method asks whether a *capability* is destructive, which is the wrong question at
-    /// dispatch: purging the log ring destroys data while requiring only `read.logs` to
-    /// request, so a capability-keyed gate never fires. Destructiveness is a property of
-    /// the operation, so this gate is keyed on the method's declared flag.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ErrorKind::CapabilityDenied`] when the method is destructive and the
-    /// caller did not state consent. A request that omits the consent parameter is
-    /// treated as withholding it, so the default is to refuse.
-    pub fn require_consent(&self, destructive: bool, consent: bool) -> Result<()> {
-        self.require_authenticated()?;
-        if destructive && !consent {
-            return Err(NcError::new(ErrorKind::CapabilityDenied {
-                capability: "destructive authorization".to_owned(),
-                subject: self.agent_id.clone(),
-            })
-            .operation("agent::require_consent"));
-        }
-        Ok(())
-    }
-
     /// A fresh correlation id for one request handled by this session.
     #[must_use]
     pub fn next_correlation(&self) -> CorrelationId {
@@ -327,12 +287,7 @@ mod tests {
             .authorize(CapabilitySet::empty().with(Capability::ReadLogs))
             .expect_err("an unauthenticated session must be refused");
         assert_eq!(err.code(), "capability_denied");
-        assert!(session.require_consent(false, true).is_err());
-        assert!(
-            session
-                .authorize_destructive(CapabilitySet::empty(), true)
-                .is_err()
-        );
+        assert!(session.authorize(CapabilitySet::empty()).is_err());
     }
 
     #[test]
@@ -381,35 +336,6 @@ mod tests {
     }
 
     #[test]
-    fn a_destructive_call_needs_consent_even_when_the_capability_is_held() {
-        let session = session(AgentRole::Administrator);
-        let required = CapabilitySet::empty().with(Capability::DeleteData);
-        assert!(
-            session.authorize(required).is_ok(),
-            "the capability is held"
-        );
-
-        let err = session
-            .authorize_destructive(required, false)
-            .expect_err("consent must be required for a destructive call");
-        assert_eq!(err.code(), "capability_denied");
-        assert!(
-            session.authorize_destructive(required, true).is_ok(),
-            "consent plus the capability must succeed"
-        );
-    }
-
-    #[test]
-    fn consent_never_manufactures_authority_that_was_never_granted() {
-        let session = session(AgentRole::Observer);
-        let required = CapabilitySet::empty().with(Capability::DeleteData);
-        let err = session
-            .authorize_destructive(required, true)
-            .expect_err("consent must not substitute for the capability");
-        assert_eq!(err.code(), "capability_denied");
-    }
-
-    #[test]
     fn each_session_keeps_its_own_budget() {
         let small = |id: &str| {
             let mut session = AgentSession::new(id, AgentRole::Observer, 1, 2).expect("session");
@@ -428,16 +354,6 @@ mod tests {
             second.rate_limit(Duration::from_secs(0), 1).is_ok(),
             "one agent must not exhaust another's budget"
         );
-    }
-
-    #[test]
-    fn consent_is_required_for_a_destructive_method_even_with_read_only_authority() {
-        let session = session(AgentRole::Administrator);
-        // The administrator holds `read.logs`, but purging the log ring destroys data, so
-        // capability alone must not be enough.
-        assert!(session.require_consent(true, false).is_err());
-        assert!(session.require_consent(true, true).is_ok());
-        assert!(session.require_consent(false, false).is_ok());
     }
 
     #[test]

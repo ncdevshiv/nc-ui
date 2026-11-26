@@ -50,6 +50,7 @@ pub mod agent;
 pub mod application;
 pub mod commands;
 pub mod components;
+pub mod consent;
 pub mod describe;
 pub mod devtools;
 pub mod dispatch;
@@ -75,7 +76,7 @@ use ncui_observability::logring::LogRing;
 use ncui_observability::metrics::MetricsRegistry;
 use ncui_scheduler::Scheduler;
 use ncui_security::audit::AuditLog;
-use ncui_security::authz::ConsentToken;
+use ncui_security::authz::{ConsentToken, consent_payload_digest, validate_consent_binding};
 use ncui_security::ratelimit::RateLimiter;
 use ncui_security::token::SecretToken;
 use ncui_workers::WorkerPool;
@@ -149,6 +150,8 @@ pub struct Runtime {
     /// budget refills on the same timeline an agent's does. It is read from a monotonic
     /// clock, so it cannot go backwards.
     started: std::time::Instant,
+    /// The host surface that obtains real approval for destructive operations.
+    consent_prompter: Option<Arc<dyn consent::ConsentPrompter>>,
     /// Minted consent tokens by nonce. The ledger is the authority: a token whose
     /// nonce is absent here was not minted by this runtime and is refused, however
     /// well-formed its JSON is.
@@ -161,8 +164,10 @@ pub struct Runtime {
 #[derive(Debug, Clone)]
 struct ConsentTokenBinding {
     correlation: CorrelationId,
+    subject: String,
     method: String,
     capability: CapabilitySet,
+    payload_digest: [u8; 32],
 }
 
 impl Runtime {
@@ -226,6 +231,7 @@ impl Runtime {
             bench_allowed: std::env::var("NCUI_RUN_BENCH").as_deref() == Ok("1"),
             page_limiter: Arc::new(Mutex::new(page_limiter)),
             started: std::time::Instant::now(),
+            consent_prompter: None,
             consent_minted: HashMap::new(),
             consent_spent: HashSet::new(),
         })
@@ -398,6 +404,23 @@ impl Runtime {
         self
     }
 
+    /// Installs the host surface that obtains real approval for destructive operations.
+    ///
+    /// Without one, destructive calls without a valid host-issued token fail closed.
+    #[must_use]
+    pub fn with_consent_prompter(mut self, prompter: Arc<dyn consent::ConsentPrompter>) -> Self {
+        self.set_consent_prompter(prompter);
+        self
+    }
+
+    /// Installs or replaces the host surface that obtains real approval for destructive operations.
+    ///
+    /// Call this from [`crate::application::Application::launch_with`] setup to install the
+    /// surface before the window opens and its page can make its first request.
+    pub fn set_consent_prompter(&mut self, prompter: Arc<dyn consent::ConsentPrompter>) {
+        self.consent_prompter = Some(prompter);
+    }
+
     /// Installs a real window host, over the origins given.
     ///
     /// The origins are the pages this runtime will load. A page that navigates anywhere
@@ -440,86 +463,115 @@ impl Runtime {
         self.workers.shutdown();
     }
 
-    /// Mints a [`ConsentToken`] for `method`, bound to `correlation` and `capability`.
+    /// Mints a host-issued [`ConsentToken`] for one exact subject, method and operation.
     ///
-    /// Called **only by the runtime** at user-confirmation time. The nonce is 128
-    /// bits of OS entropy. The binding is recorded in the ledger before the token
-    /// is returned, so a token that was never minted here is refused even if its
-    /// JSON parses.
+    /// Host issuance alone is not proof of human approval. The request pipeline obtains real
+    /// approval, then mints and immediately spends the token; an embedder may pre-mint only when
+    /// it already holds an explicit approval signal for the exact operation. The nonce is 128 bits
+    /// of OS entropy and its complete binding is recorded before the token is returned.
     ///
     /// # Errors
     ///
-    /// Returns [`ErrorKind::Io`] when the OS entropy source is unavailable.
+    /// Returns [`ErrorKind::Validation`] for an invalid binding or parameter shape, and
+    /// [`ErrorKind::Io`] when the OS entropy source is unavailable.
     pub fn mint_consent(
         &mut self,
         correlation: CorrelationId,
+        subject: &str,
         method: &str,
         capability: CapabilitySet,
+        params: &serde_json::Value,
     ) -> Result<ConsentToken> {
-        let secret = SecretToken::from_os_entropy(16)?;
-        let bytes = secret.expose_secret();
-        let mut nonce: u128 = 0;
-        for byte in bytes {
-            nonce = (nonce << 8) | u128::from(*byte);
-        }
-        let token = ConsentToken::mint(correlation, method, capability, nonce);
+        validate_consent_binding(subject, method)?;
+        let payload_digest = consent_payload_digest(params)?;
+        let nonce = loop {
+            let secret = SecretToken::from_os_entropy(16)?;
+            let bytes = secret.expose_secret();
+            let mut candidate: u128 = 0;
+            for byte in bytes {
+                candidate = (candidate << 8) | u128::from(*byte);
+            }
+            if !self.consent_minted.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        let token = ConsentToken::mint(
+            correlation,
+            subject,
+            method,
+            capability,
+            payload_digest,
+            nonce,
+        );
         self.consent_minted.insert(
             nonce,
             ConsentTokenBinding {
                 correlation,
+                subject: subject.to_owned(),
                 method: method.to_owned(),
                 capability,
+                payload_digest,
             },
         );
         Ok(token)
     }
 
-    /// Validates `token` against `method`/`correlation`/`required` and spends it.
+    /// Validates `token` against the exact operation and spends it once.
     ///
-    /// The nonce must be in the minted ledger, unspent, and bound to the same
-    /// correlation, method, and capability the call asserts. The nonce is marked
-    /// spent on success, so a second use is refused. The ledger entry is retained
-    /// (rather than removed) so replays are distinguishable from forgeries in
-    /// diagnostics.
+    /// The ledger entry is retained after spending so a replay remains distinguishable from a
+    /// forged nonce in diagnostics.
     ///
     /// # Errors
     ///
-    /// Returns [`ErrorKind::CapabilityDenied`] when the token was not minted here,
-    /// was already spent, or is bound to a different correlation/method/capability.
+    /// Returns [`ErrorKind::CapabilityDenied`] when the token was not minted here, was already
+    /// spent, or differs in subject, correlation, method, capability or normalized parameters.
     pub fn consume_consent(
         &mut self,
         token: &ConsentToken,
+        subject: &str,
         correlation: CorrelationId,
         method: &str,
         required: CapabilitySet,
+        params: &serde_json::Value,
+    ) -> Result<()> {
+        let payload_digest = consent_payload_digest(params)?;
+        self.validate_consent(
+            token,
+            subject,
+            correlation,
+            method,
+            required,
+            payload_digest,
+        )?;
+        self.consent_spent.insert(token.nonce());
+        Ok(())
+    }
+
+    pub(crate) fn validate_consent(
+        &self,
+        token: &ConsentToken,
+        subject: &str,
+        correlation: CorrelationId,
+        method: &str,
+        required: CapabilitySet,
+        payload_digest: [u8; 32],
     ) -> Result<()> {
         let nonce = token.nonce();
-        if self.consent_spent.contains(&nonce) {
+        let bound = self.consent_minted.get(&nonce).is_some_and(|binding| {
+            binding.correlation == correlation
+                && binding.subject == subject
+                && binding.method == method
+                && required.is_subset_of(binding.capability)
+                && binding.payload_digest == payload_digest
+                && token.matches(subject, correlation, method, required, payload_digest)
+        });
+        if self.consent_spent.contains(&nonce) || !bound {
             return Err(NcError::new(ErrorKind::CapabilityDenied {
                 capability: "consent_token".to_owned(),
-                subject: "agent".to_owned(),
+                subject: subject.to_owned(),
             })
-            .operation("runtime::consume_consent"));
+            .operation("runtime::validate_consent"));
         }
-        let Some(binding) = self.consent_minted.get(&nonce) else {
-            return Err(NcError::new(ErrorKind::CapabilityDenied {
-                capability: "consent_token".to_owned(),
-                subject: "agent".to_owned(),
-            })
-            .operation("runtime::consume_consent"));
-        };
-        let bound = binding.correlation == correlation
-            && binding.method == method
-            && required.is_subset_of(binding.capability)
-            && token.matches(correlation, method, required);
-        if !bound {
-            return Err(NcError::new(ErrorKind::CapabilityDenied {
-                capability: "consent_token".to_owned(),
-                subject: "agent".to_owned(),
-            })
-            .operation("runtime::consume_consent"));
-        }
-        self.consent_spent.insert(nonce);
         Ok(())
     }
 }

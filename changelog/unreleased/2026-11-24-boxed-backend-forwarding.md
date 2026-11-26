@@ -1,0 +1,1 @@
+- **Boxed webview backends now preserve their optional capabilities.** Blocking page waits, zoom, inspector open/close/state, and CDP calls reach the underlying engine instead of silently selecting trait defaults; a regression test exercises every forwarded operation through `Box<dyn WebViewBackend>`.

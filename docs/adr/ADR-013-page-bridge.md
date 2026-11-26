@@ -53,9 +53,9 @@ no second copy to drift.
   or an audit record.
 - The bridge bounds its own queue and times out a call that is never answered, so a
   stalled host cannot leave a page waiting forever.
-- A command's consent is still a boolean the page supplies, which the same class of gap
-  already recorded against the agent API. `docs/known-gaps.md` records it, and it is
-  closed by the confirmation surface the application story has to add.
+- A destructive command needs host approval for the exact operation. The page cannot approve
+  itself with a boolean; the runtime validates a subject-, command-, capability- and
+  parameter-bound token or obtains approval from the installed native prompter before it runs.
 - The page bridge carries JSON. The runtime's binary framing is not on this path, and
   `docs/known-gaps.md` records what that costs and what would change it.
 

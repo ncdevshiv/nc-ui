@@ -7,9 +7,11 @@ composition root by calling `register_all()` before the runtime serves.
 ## Providers and props
 
 All props are JSON objects. Top-level `null` is accepted as the empty object for
-providers whose fields all have defaults; a field-level `null` is a type error rather
-than a synonym for omission. Unknown fields are refused, because a mistyped field should
-surface where the mistake was made rather than silently changing a control's meaning.
+providers whose fields all have defaults. Otherwise a field-level `null` is valid only
+where the schema explicitly says so — the dialog's nullable `description` — rather than
+acting as a general synonym for omission. Unknown fields are refused, because a mistyped
+field should surface where the mistake was made rather than silently changing a control's
+meaning.
 Strings and arrays have the bounds listed below in addition to the runtime's outer
 64 KiB props bound.
 
@@ -19,22 +21,33 @@ Strings and arrays have the bounds listed below in addition to the runtime's out
 | `nc-ui-kit::input` | `value` string up to 4096 bytes (default empty); `placeholder` string 1–256 bytes (default `"Type here…"`); `numeric`, `disabled`, `invalid` booleans (default `false`) | source `input`, action `changed`, payload `{value, origin}` | `clear`, `focus`, each with null or `{}`; `focus` is refused while disabled |
 | `nc-ui-kit::dropdown` | `options` required array of 1–32 non-empty strings, each up to 128 bytes; `selected` zero-based integer default `0`; `placeholder` string 1–128 bytes (default `"Select…"`) | source `dropdown`, action `selected`, payload `{index, option, origin}` | `open`, `close`, `focus` with null or `{}`; `select` with `{index}` |
 | `nc-ui-kit::checkbox` | `checked` boolean (default `false`); `label` string 1–256 bytes (default `"Enabled"`); `disabled` boolean (default `false`) | source `checkbox`, action `toggled`, payload `{checked, origin}` | `toggle` with null or `{}`; `set_checked` with `{checked}`; `focus` with null or `{}` |
-| `nc-ui-kit::dialog` | `title` string 1–128 bytes (default `"Confirmation"`); `description` optional string up to 2048 bytes; `trigger_label` string 1–128 bytes (default `"Open dialog"`); `open` boolean (default `true`); `width` number 240–560 (default `420`) | source `dialog`, actions `opened` and `closed`, payload `{title, origin}` | `open` and `close`, each with null or `{}` |
-| `nc-ui-kit::settings-tabs` | `active` one of `general`, `appearance`, `advanced` (default `general`); `panels` optional object whose `general`, `appearance` and `advanced` strings are each 1–2048 bytes | source `settings-tabs`, action `selected`, payload `{tab, origin}` | `select` with `{tab}` |
+| `nc-ui-kit::dialog` | `title` string 1–128 bytes (default `"Confirmation"`); `description` string or null up to 2048 bytes (default null); `trigger_label` string 1–128 bytes (default `"Open dialog"`); `open` boolean (default `true`); `width` number 240–560 (default `420`) | source `dialog`, actions `opened` and `closed`, payload `{title, origin}` | `open` and `close`, each with null or `{}` |
+| `nc-ui-kit::settings-tabs` | `active` one of `general`, `appearance`, `advanced` (default `general`); `panels` optional object whose `general`, `appearance` and `advanced` strings are each up to 2048 bytes | source `settings-tabs`, action `selected`, payload `{tab, origin}` | `select` with `{tab}` |
 
 `origin` is `interaction` when the user produced the event inside the widget and
 `command` when an accepted provider command produced the state transition. Replacing
 props rebuilds the widget child inside the same root view; that is deliberate, because
 kit widgets do not expose a uniform partial-update contract.
 
+## Errors
+
+The native-provider trait boundary carries refusals as strings. This crate therefore
+prefixes every refusal with a stable machine-readable code in square brackets — one of
+`kit_props_not_object`, `kit_invalid_props`, `kit_unknown_action`,
+`kit_invalid_action_payload`, `kit_action_unavailable` or
+`kit_asset_path_outside_root` — followed by a human-readable message naming the provider,
+field or action that failed.
+
 ## Theme and DPI
 
 `apply_theme` maps NC-UI's binary light/dark platform theme onto the kit's global
 `Theme`, preferring `nc-light.json` or `nc-dark.json` from the resolved asset layout and
-falling back to the kit's built-in palettes when a file is absent or invalid. The kit
-exposes no independent scale factor: its dimensions are GPUI logical pixels, and Windows
-DPI behaviour comes from GPUI and the executable manifest. There is therefore no honest
-provider-level DPI handoff to implement.
+falling back to the kit's built-in palettes when a file is absent or invalid. Provider
+roots also read the GPUI window appearance at construction and observe appearance changes,
+so hosted views follow the same light/dark fact that `ncui-gpui` reports as the runtime
+window theme. The kit exposes no independent scale factor: its dimensions are GPUI logical
+pixels, and Windows DPI behaviour comes from GPUI and the executable manifest. There is
+therefore no honest provider-level DPI handoff to implement.
 
 ## Assets
 

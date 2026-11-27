@@ -32,3 +32,20 @@ pub fn apply_theme(theme: ncui_webview::Theme, cx: &mut gpui::App) -> KitTheme {
     kit_theme.set_global(cx);
     kit_theme
 }
+
+/// Applies the theme implied by one gpui window's current platform appearance.
+///
+/// This is the same light/dark fact `ncui-gpui` reports through `window_theme`; reading it
+/// inside the bridge is what lets an already-open native view follow an operating-system
+/// appearance change without requiring the runtime to know about kit-specific globals.
+pub(crate) fn apply_window_theme(window: &gpui::Window, cx: &mut gpui::App) -> KitTheme {
+    let theme = match window.appearance() {
+        gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark => {
+            ncui_webview::Theme::Dark
+        }
+        gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight => {
+            ncui_webview::Theme::Light
+        }
+    };
+    apply_theme(theme, cx)
+}

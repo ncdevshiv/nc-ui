@@ -398,10 +398,12 @@ mod tests {
         let command = NativeViewCommand::UpdateProps {
             props: serde_json::json!({"label": "Save"}),
         };
-        let text = serde_json::to_string(&command).expect("a command serializes");
-        let parsed: NativeViewCommand =
-            serde_json::from_str(&text).expect("a command deserializes");
-        assert_eq!(command, parsed);
+        // A failure in either direction surfaces as `None` against `Some(command)`,
+        // which still names the command that failed to round-trip.
+        let round_tripped = serde_json::to_string(&command)
+            .ok()
+            .and_then(|text| serde_json::from_str::<NativeViewCommand>(&text).ok());
+        assert_eq!(round_tripped, Some(command));
     }
 
     #[test]
@@ -415,7 +417,12 @@ mod tests {
         ));
         let spawned = router.spawn(ncui_core::WindowId::new(), &request, &seam);
         assert!(spawned.is_none());
-        let error = router.last_error().expect("a refusal carries a reason");
-        assert!(error.contains("native"), "the refusal names the kind: {error}");
+        let error = router.last_error();
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|reason| reason.contains("native")),
+            "a refusal carries a reason naming the kind: {error:?}"
+        );
     }
 }

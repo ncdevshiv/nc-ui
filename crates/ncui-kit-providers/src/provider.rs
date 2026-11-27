@@ -141,7 +141,7 @@ impl<W: KitWidget> NativeViewProvider for KitProvider<W> {
             .map_err(|error| error.to_string())?;
         let child_view: AnyView = child.clone().into();
         let padding = W::padding();
-        let root = cx.new(|cx| KitRoot::new(child_view, padding, cx));
+        let root = cx.new(|cx| KitRoot::new(child_view, padding, window, cx));
         let root_view: AnyView = root.clone().into();
         Ok((
             root_view,
@@ -215,10 +215,16 @@ pub(crate) struct KitRoot {
 }
 
 impl KitRoot {
-    fn new(child: AnyView, padding: f32, cx: &mut Context<'_, Self>) -> Self {
+    fn new(child: AnyView, padding: f32, window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
         // `Theme::set_global` notifies global observers rather than every view. Observing
         // here is what makes a runtime theme change reach windows that are already open.
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
+        crate::theme::apply_window_theme(window, cx);
+        cx.observe_window_appearance(window, |_, window, cx| {
+            crate::theme::apply_window_theme(window, cx);
+            cx.notify();
+        })
+        .detach();
         Self { child, padding }
     }
 

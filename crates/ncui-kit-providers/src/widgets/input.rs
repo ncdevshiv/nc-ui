@@ -23,7 +23,7 @@ const MAX_PLACEHOLDER_BYTES: usize = 256;
 #[serde(default, deny_unknown_fields)]
 pub struct InputProps {
     value: String,
-    placeholder: String,
+    placeholder: String, // ncui-allow-placeholder: the input hint-text prop — a UI domain term, not unfinished work
     numeric: bool,
     disabled: bool,
     invalid: bool,
@@ -33,7 +33,7 @@ impl Default for InputProps {
     fn default() -> Self {
         Self {
             value: String::new(),
-            placeholder: "Type here…".to_owned(),
+            placeholder: "Type here…".to_owned(), // ncui-allow-placeholder: the input hint-text prop — a UI domain term, not unfinished work
             numeric: false,
             disabled: false,
             invalid: false,
@@ -48,7 +48,7 @@ pub(crate) struct InputWidget;
 impl InputWidget {
     fn validate_shape(object: &props::Object) -> Result<(), KitProviderError> {
         props::check_string(ID, object, "value", MAX_VALUE_BYTES, true)?;
-        props::check_string(ID, object, "placeholder", MAX_PLACEHOLDER_BYTES, false)?;
+        props::check_string(ID, object, "placeholder", MAX_PLACEHOLDER_BYTES, false)?; // ncui-allow-placeholder: the input hint-text prop — a UI domain term, not unfinished work
         props::check_boolean(ID, object, "numeric")?;
         props::check_boolean(ID, object, "disabled")?;
         props::check_boolean(ID, object, "invalid")
@@ -74,7 +74,7 @@ impl KitWidget for InputWidget {
         props::decode(
             ID,
             value,
-            &["value", "placeholder", "numeric", "disabled", "invalid"],
+            &["value", "placeholder", "numeric", "disabled", "invalid"], // ncui-allow-placeholder: the input hint-text prop — a UI domain term, not unfinished work
             Self::validate_shape,
         )
     }
@@ -85,7 +85,7 @@ impl KitWidget for InputWidget {
         _window: &mut gpui::Window,
         cx: &mut gpui::App,
     ) -> Result<gpui::Entity<Self::View>, KitProviderError> {
-        let mut input = Input::new(props.placeholder.clone()).on_change(move |value, _cx| {
+        let mut input = Input::new(props.placeholder.clone()).on_change(move |value, _cx| { // ncui-allow-placeholder: the input hint-text prop — a UI domain term, not unfinished work
             Self::emit_change(&events, value, "interaction");
         });
         if props.numeric {
@@ -157,7 +157,7 @@ mod tests {
     fn null_props_produce_the_documented_defaults() {
         let props = parse(&serde_json::Value::Null).expect("null is the empty object shorthand");
         assert!(props.value.is_empty());
-        assert_eq!(props.placeholder, "Type here…");
+        assert_eq!(props.placeholder, "Type here…"); // ncui-allow-placeholder: the input hint-text prop — a UI domain term, not unfinished work
         assert!(!props.numeric);
     }
 
@@ -171,8 +171,8 @@ mod tests {
     #[test]
     fn an_empty_placeholder_is_refused() {
         let error =
-            parse(&json!({"placeholder": ""})).expect_err("an empty placeholder is invalid");
-        assert!(error.to_string().contains("placeholder"));
+            parse(&json!({"placeholder": ""})).expect_err("an empty placeholder is invalid"); // ncui-allow-placeholder: the input hint-text prop — a UI domain term, not unfinished work
+        assert!(error.to_string().contains("placeholder")); // ncui-allow-placeholder: the input hint-text prop — a UI domain term, not unfinished work
         assert!(error.to_string().contains("empty"));
     }
 

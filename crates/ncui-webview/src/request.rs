@@ -58,10 +58,11 @@ pub const MAX_NATIVE_PROPS_BYTES: usize = 65_536;
 /// webview. ADR-020 adds a second kind — a native view rendered by a host-linked
 /// provider — and the kind travels inside the request rather than beside it, so every
 /// validation and every host sees the whole of what was asked for in one place.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WindowContent {
     /// A web page at the request's URL, rendered by the embedded webview.
+    #[default]
     Page,
     /// A native view rendered by a host-linked provider.
     ///
@@ -79,12 +80,6 @@ pub enum WindowContent {
         #[serde(default)]
         props: serde_json::Value,
     },
-}
-
-impl Default for WindowContent {
-    fn default() -> Self {
-        Self::Page
-    }
 }
 
 impl WindowContent {

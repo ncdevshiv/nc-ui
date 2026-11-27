@@ -32,7 +32,7 @@ pub struct DropdownProps {
     #[serde(default)]
     selected: usize,
     #[serde(default = "default_placeholder")]
-    placeholder: String,
+    placeholder: String, // ncui-allow-placeholder: the input hint-text prop — a UI domain term, not unfinished work
 }
 
 /// The stateless implementation of `nc-ui-kit::dropdown`.
@@ -44,7 +44,7 @@ impl DropdownWidget {
         props::require_field(ID, object, "options")?;
         props::check_string_array(ID, object, "options", 1, MAX_OPTIONS, MAX_OPTION_BYTES)?;
         props::check_integer(ID, object, "selected", 0, MAX_OPTIONS - 1)?;
-        props::check_string(ID, object, "placeholder", MAX_PLACEHOLDER_BYTES, false)
+        props::check_string(ID, object, "placeholder", MAX_PLACEHOLDER_BYTES, false) // ncui-allow-placeholder: the input hint-text prop — a UI domain term, not unfinished work
     }
 
     fn validate_semantics(props: &DropdownProps) -> Result<(), KitProviderError> {
@@ -83,7 +83,7 @@ impl KitWidget for DropdownWidget {
         let props: Self::Props = props::decode(
             ID,
             value,
-            &["options", "selected", "placeholder"],
+            &["options", "selected", "placeholder"], // ncui-allow-placeholder: the input hint-text prop — a UI domain term, not unfinished work
             Self::validate_shape,
         )?;
         Self::validate_semantics(&props)?;
@@ -98,7 +98,7 @@ impl KitWidget for DropdownWidget {
     ) -> Result<gpui::Entity<Self::View>, KitProviderError> {
         let options_for_events = props.options.clone();
         let dropdown = Dropdown::new(props.options.clone())
-            .placeholder(props.placeholder.clone())
+            .placeholder(props.placeholder.clone()) // ncui-allow-placeholder: the input hint-text prop — a UI domain term, not unfinished work
             .selected(props.selected)
             .on_select(move |index, _window, _cx| {
                 let option = options_for_events.get(index).cloned().unwrap_or_default();
@@ -178,7 +178,7 @@ mod tests {
         let props = parse(&json!({"options": ["Alpha", "Beta"]})).expect("valid props decode");
         assert_eq!(props.options, ["Alpha", "Beta"]);
         assert_eq!(props.selected, 0);
-        assert_eq!(props.placeholder, "Select…");
+        assert_eq!(props.placeholder, "Select…"); // ncui-allow-placeholder: the input hint-text prop — a UI domain term, not unfinished work
     }
 
     #[test]

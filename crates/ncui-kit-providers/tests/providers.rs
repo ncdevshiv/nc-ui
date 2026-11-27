@@ -33,6 +33,14 @@ impl Render for Host {
     }
 }
 
+struct Empty;
+
+impl Render for Empty {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
+        gpui::div()
+    }
+}
+
 type BuiltParts = (AnyView, Box<dyn NativeViewInstance>);
 
 struct BuiltProvider {
@@ -84,6 +92,44 @@ fn build_registered(cx: &mut TestAppContext, id: &str, props: Value) -> BuiltPro
 }
 
 #[gpui::test]
+fn a_build_refusal_preserves_its_machine_readable_code(cx: &mut TestAppContext) {
+    assert_eq!(register_all(), PROVIDER_IDS.len());
+    let provider = providers()
+        .get("nc-ui-kit::button")
+        .expect("the button provider is registered");
+    let events = Arc::new(NativeEventSink::new());
+    let slot: Rc<RefCell<Option<Result<(), String>>>> = Rc::new(RefCell::new(None));
+    let closure_slot = Rc::clone(&slot);
+
+    cx.add_window(move |window, cx| {
+        let result = provider
+            .build(
+                NativeViewContext {
+                    window: WindowId::new(),
+                    props: json!({"label": 3}),
+                    events,
+                },
+                window,
+                cx,
+            )
+            .map(|_| ());
+        *closure_slot.borrow_mut() = Some(result);
+        Empty
+    });
+
+    let error = slot
+        .borrow_mut()
+        .take()
+        .expect("the window construction captured the build result")
+        .expect_err("a numeric label is refused");
+    assert!(
+        error.starts_with("[kit_invalid_props]"),
+        "the trait-boundary string keeps the stable code: {error}"
+    );
+    assert!(error.contains("label"));
+}
+
+#[gpui::test]
 fn every_provider_builds_updates_and_invokes_headlessly(cx: &mut TestAppContext) {
     let cases: [(&str, Value, &str, Value, &str, Value); 6] = [
         (
@@ -96,7 +142,7 @@ fn every_provider_builds_updates_and_invokes_headlessly(cx: &mut TestAppContext)
         ),
         (
             "nc-ui-kit::input",
-            json!({"value": "hello", "placeholder": "Name"}),
+            json!({"value": "hello", "placeholder": "Name"}), // ncui-allow-placeholder: the input hint-text prop — a UI domain term, not unfinished work
             "clear",
             json!({}),
             "changed",
@@ -139,6 +185,14 @@ fn every_provider_builds_updates_and_invokes_headlessly(cx: &mut TestAppContext)
     for (id, props, action, payload, event_action, event_payload) in cases {
         let mut built = build_registered(cx, id, props.clone());
         built.visual.run_until_parked();
+        let mode = built
+            .visual
+            .update(|_, cx| nc_ui_kit::theme::Theme::get(cx).mode);
+        assert_eq!(
+            mode,
+            nc_ui_kit::theme::ThemeMode::Light,
+            "{id} did not apply the test window's light appearance at construction"
+        );
         assert!(
             built.weak.upgrade().is_some(),
             "{id} did not keep a live root entity"
@@ -153,7 +207,6 @@ fn every_provider_builds_updates_and_invokes_headlessly(cx: &mut TestAppContext)
             updated.unwrap_err()
         );
         built.visual.run_until_parked();
-
         let invoked = built
             .visual
             .update(|window, cx| built.instance.invoke(action, &payload, window, cx));
@@ -207,7 +260,7 @@ fn a_button_click_emits_the_real_native_event(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn typing_in_the_input_emits_the_real_change_event(cx: &mut TestAppContext) {
-    let mut built = build_registered(cx, "nc-ui-kit::input", json!({"placeholder": "Name"}));
+    let mut built = build_registered(cx, "nc-ui-kit::input", json!({"placeholder": "Name"})); // ncui-allow-placeholder: the input hint-text prop — a UI domain term, not unfinished work
     built.visual.run_until_parked();
 
     built

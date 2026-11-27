@@ -167,6 +167,19 @@ pub(crate) fn validate_string_text(
     Ok(())
 }
 
+pub(crate) fn check_nullable_string(
+    provider: &'static str,
+    object: &Object,
+    field: &str,
+    max_bytes: usize,
+    allow_empty: bool,
+) -> Result<(), KitProviderError> {
+    if matches!(object.get(field), Some(Value::Null)) {
+        return Ok(());
+    }
+    check_string(provider, object, field, max_bytes, allow_empty)
+}
+
 pub(crate) fn check_boolean(
     provider: &'static str,
     object: &Object,
@@ -513,5 +526,22 @@ mod tests {
         let error = payload_boolean("provider", "set_checked", object, "checked")
             .expect_err("the wrong type is refused");
         assert!(error.to_string().contains("checked"));
+    }
+
+    #[test]
+    fn an_unknown_action_payload_field_is_refused_by_name() {
+        let payload = json!({"checked": true, "cheked": false});
+        let error = payload_object("provider", "set_checked", &payload, &["checked"])
+            .expect_err("a mistyped payload key is not ignored");
+        assert_eq!(error.code(), "kit_invalid_action_payload");
+        assert!(error.to_string().contains("cheked"));
+    }
+
+    #[test]
+    fn a_parameterless_command_rejects_a_nonempty_payload() {
+        let error = ensure_empty_payload("provider", "click", &json!({"force": true}))
+            .expect_err("click has no parameters");
+        assert_eq!(error.code(), "kit_invalid_action_payload");
+        assert!(error.to_string().contains("payload"));
     }
 }

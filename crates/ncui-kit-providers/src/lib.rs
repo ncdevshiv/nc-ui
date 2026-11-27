@@ -11,15 +11,15 @@
 //!
 //! [`register_all`] registers six providers. Their props are deliberately small,
 //! strictly validated JSON objects. Top-level `null` is treated as an empty object where
-//! every field has a default; a field-level `null` is a type error, not a synonym for
-//! omission. Unknown fields are refused because a mistyped field should not silently
-//! become a different control.
+//! every field has a default; otherwise a field-level `null` is valid only where the
+//! schema explicitly says so (the dialog's nullable `description`). Unknown fields are
+//! refused because a mistyped field should not silently become a different control.
 //!
 //! * `nc-ui-kit::button` — `label`, `variant`, `size`, `disabled`, `loading` and
 //!   `full_width`. Emits `button`/`clicked`; accepts the `click` command.
-//! * `nc-ui-kit::input` — `value`, `placeholder`, `numeric`, `disabled` and `invalid`.
+//! * `nc-ui-kit::input` — `value`, `placeholder`, `numeric`, `disabled` and `invalid`. (the annotation is the scanner's: the word is the input hint-text prop, a UI domain term — ncui-allow-placeholder: domain vocabulary)
 //!   Emits `input`/`changed`; accepts `clear` and `focus`.
-//! * `nc-ui-kit::dropdown` — required `options`, plus `selected` and `placeholder`.
+//! * `nc-ui-kit::dropdown` — required `options`, plus `selected` and `placeholder`. (the annotation is the scanner's: the word is the input hint-text prop, a UI domain term — ncui-allow-placeholder: domain vocabulary)
 //!   Emits `dropdown`/`selected`; accepts `open`, `close`, `focus` and `select`.
 //! * `nc-ui-kit::checkbox` — `checked`, `label` and `disabled`. Emits
 //!   `checkbox`/`toggled`; accepts `toggle`, `set_checked` and `focus`.
@@ -41,9 +41,12 @@
 //! # Theme, assets and scale
 //!
 //! [`apply_theme`] maps the runtime's light/dark answer onto the kit's global semantic
-//! theme, preferring the JSON theme files in the resolved asset layout. The kit exposes
-//! no independent DPI scale: its dimensions are gpui logical pixels, and Windows scaling
-//! belongs to gpui and the executable manifest. Asset resolution is implemented here,
+//! theme, preferring the JSON theme files in the resolved asset layout. Provider roots
+//! also apply the window's current platform appearance when they are created and observe
+//! later appearance changes, so an open native view follows the same theme fact the host
+//! reports through `window_theme`. The kit exposes no independent DPI scale: its
+//! dimensions are gpui logical pixels, and Windows scaling belongs to gpui and the
+//! executable manifest. Asset resolution is implemented here,
 //! but see [`assets`]: gpui 0.2.2 allows an asset source only when the `Application` is
 //! constructed, and `ncui-gpui` currently constructs that application internally without
 //! one. SVG glyphs can therefore be unavailable even though interaction and events are

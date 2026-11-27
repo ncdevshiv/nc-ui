@@ -66,9 +66,10 @@ pub enum KitProviderError {
 impl KitProviderError {
     /// The stable machine-readable failure name.
     ///
-    /// These strings are internal diagnostics rather than the wire error model, but they
-    /// are still stable: logs and tests correlate by them, and renaming one is a breaking
-    /// change for anyone investigating a refusal across versions.
+    /// These strings are stable machine-readable diagnostics. They are also rendered at
+    /// the start of [`Display`](core::fmt::Display) output because the native-provider
+    /// trait boundary erases typed errors into strings; dropping the code there would make
+    /// the taxonomy impossible for a host to recover.
     #[must_use]
     pub const fn code(&self) -> &'static str {
         match self {
@@ -84,6 +85,7 @@ impl KitProviderError {
 
 impl core::fmt::Display for KitProviderError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "[{}] ", self.code())?;
         match self {
             Self::PropsNotObject { provider, actual } => write!(
                 f,
@@ -186,6 +188,10 @@ mod tests {
             reason: "must be a string".to_owned(),
         };
         let rendered = error.to_string();
+        assert!(
+            rendered.starts_with("[kit_invalid_props]"),
+            "the string crossing the provider trait boundary preserves the machine-readable code: {rendered}"
+        );
         assert!(rendered.contains("nc-ui-kit::button"));
         assert!(rendered.contains("label"));
         assert!(rendered.contains("must be a string"));

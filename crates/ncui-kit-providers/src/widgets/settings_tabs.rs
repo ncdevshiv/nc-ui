@@ -148,7 +148,7 @@ impl SettingsTabsWidget {
                     format!("must be a string, not {}", kind_name(value)),
                 ));
             };
-            props::validate_string_text(ID, &field, text, MAX_PANEL_BYTES, false)?;
+            props::validate_string_text(ID, &field, text, MAX_PANEL_BYTES, true)?;
         }
         Ok(())
     }
@@ -282,6 +282,13 @@ mod tests {
         let error = parse(&json!({"active": "plugins"})).expect_err("unknown tabs are invalid");
         assert!(error.to_string().contains("active"));
         assert!(error.to_string().contains("plugins"));
+    }
+
+    #[test]
+    fn an_empty_panel_is_a_deliberate_blank_panel() {
+        let props = parse(&json!({"panels": {"advanced": ""}}))
+            .expect("panel copy is bounded by length, not required to be non-empty");
+        assert!(props.panels.advanced.is_empty());
     }
 
     #[test]

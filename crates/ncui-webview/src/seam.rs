@@ -93,17 +93,23 @@ impl SeamRequest {
     /// The id is read before the action so a malformed action can still be answered under
     /// the id the page used. An absent or invalid id cannot be echoed, because echoing an
     /// attacker-chosen unbounded string would put it in every log and audit record.
-    pub fn parse(raw: &str) -> Result<Self, SeamResponse> {
+    ///
+    /// The refusal is boxed for the same reason the response's own error is: a malformed
+    /// message is the cold path, and an unboxed [`SeamResponse`] in the `Err` variant
+    /// would tax every caller's success path with the size of the largest failure.
+    pub fn parse(raw: &str) -> Result<Self, Box<SeamResponse>> {
         let Ok(value) = serde_json::from_str::<Value>(raw) else {
-            return Err(SeamResponse::malformed("the message is not valid JSON"));
+            return Err(Box::new(SeamResponse::malformed(
+                "the message is not valid JSON",
+            )));
         };
         let Some(id) = value.get("id").and_then(Value::as_str) else {
-            return Err(SeamResponse::malformed("the message has no `id`"));
+            return Err(Box::new(SeamResponse::malformed("the message has no `id`")));
         };
         if !valid_request_id(id) {
-            return Err(SeamResponse::malformed(format!(
+            return Err(Box::new(SeamResponse::malformed(format!(
                 "`id` must be 1..={MAX_REQUEST_ID_BYTES} ASCII letters, digits, `-`, `_`, `.`, or `:`"
-            )));
+            ))));
         }
         let id = id.to_owned();
         match SeamMessage::parse_value(&value) {
@@ -121,22 +127,29 @@ impl SeamMessage {
     ///
     /// This is the parser for callers that own the request lifecycle themselves. The page
     /// bridge uses [`SeamRequest::parse`] because a page request without an id cannot be
-    /// answered unambiguously.
-    pub fn parse(raw: &str) -> Result<Self, SeamResponse> {
+    /// answered unambiguously. The refusal is boxed for the same reason the request
+    /// parser's is.
+    pub fn parse(raw: &str) -> Result<Self, Box<SeamResponse>> {
         let Ok(value) = serde_json::from_str::<Value>(raw) else {
-            return Err(SeamResponse::malformed("the message is not valid JSON"));
+            return Err(Box::new(SeamResponse::malformed(
+                "the message is not valid JSON",
+            )));
         };
         Self::parse_value(&value)
     }
 
-    fn parse_value(value: &Value) -> Result<Self, SeamResponse> {
+    fn parse_value(value: &Value) -> Result<Self, Box<SeamResponse>> {
         let Some(action) = value.get("action").and_then(Value::as_str) else {
-            return Err(SeamResponse::malformed("the message has no `action`"));
+            return Err(Box::new(SeamResponse::malformed(
+                "the message has no `action`",
+            )));
         };
         match action {
             "perform" => {
                 let Some(name) = value.get("name").and_then(Value::as_str) else {
-                    return Err(SeamResponse::malformed("`perform` needs a `name`"));
+                    return Err(Box::new(SeamResponse::malformed(
+                        "`perform` needs a `name`",
+                    )));
                 };
                 Ok(Self::Perform {
                     name: name.to_owned(),
@@ -149,7 +162,9 @@ impl SeamMessage {
                 .map(|url| Self::ProbeNavigation {
                     url: url.to_owned(),
                 })
-                .ok_or_else(|| SeamResponse::malformed("`probe_navigation` needs a `url`")),
+                .ok_or_else(|| {
+                    Box::new(SeamResponse::malformed("`probe_navigation` needs a `url`"))
+                }),
             "describe" => Ok(Self::Describe),
             "command_result" => {
                 let error = value.get("error").map(|error| {
@@ -165,7 +180,9 @@ impl SeamMessage {
                     error,
                 })
             }
-            other => Err(SeamResponse::malformed(format!("unknown action `{other}`"))),
+            other => Err(Box::new(SeamResponse::malformed(format!(
+                "unknown action `{other}`"
+            )))),
         }
     }
 }

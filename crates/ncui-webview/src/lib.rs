@@ -621,15 +621,12 @@ mod tests {
         page_wait: Mutex<Option<Duration>>,
     }
 
-    impl crate::native::NativeViewBackend for ForwardingBackend {
-        fn poll_native_event(&self) -> Option<crate::native::NativeViewEvent> {
+    impl NativeViewBackend for ForwardingBackend {
+        fn poll_native_event(&self) -> Option<NativeViewEvent> {
             None
         }
 
-        fn send_view_command(
-            &self,
-            command: crate::native::NativeViewCommand,
-        ) -> Result<(), crate::native::NativeViewError> {
+        fn send_view_command(&self, command: NativeViewCommand) -> Result<(), NativeViewError> {
             let _ = command;
             Ok(())
         }
@@ -691,7 +688,7 @@ mod tests {
             )
         }
 
-        fn native_view(&self) -> Option<&dyn crate::native::NativeViewBackend> {
+        fn native_view(&self) -> Option<&dyn NativeViewBackend> {
             Some(self)
         }
 

@@ -79,7 +79,7 @@ pub(crate) struct DialogWidget;
 impl DialogWidget {
     fn validate_shape(object: &props::Object) -> Result<(), KitProviderError> {
         props::check_string(ID, object, "title", MAX_TITLE_BYTES, false)?;
-        props::check_string(ID, object, "description", MAX_DESCRIPTION_BYTES, true)?;
+        props::check_nullable_string(ID, object, "description", MAX_DESCRIPTION_BYTES, true)?;
         props::check_string(ID, object, "trigger_label", MAX_TRIGGER_LABEL_BYTES, false)?;
         props::check_boolean(ID, object, "open")?;
         props::check_number(ID, object, "width", 240.0, 560.0)
@@ -231,6 +231,13 @@ mod tests {
             parse(&json!({"width": 100})).expect_err("a narrow dialog is outside the schema");
         assert!(error.to_string().contains("width"));
         assert!(error.to_string().contains("240"));
+    }
+
+    #[test]
+    fn an_explicit_null_description_means_no_description() {
+        let props = parse(&json!({"description": null}))
+            .expect("description is the schema's one explicitly nullable field");
+        assert_eq!(props.description, None);
     }
 
     #[test]

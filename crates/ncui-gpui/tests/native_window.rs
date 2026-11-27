@@ -49,7 +49,7 @@ const TEST_ASSET_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="
 
 /// The test binary's asset source: an in-memory answer rather than the filesystem,
 /// because what is being proved is the plumbing — that a source configured on the
-/// factory reaches the application — and a temporary directory would prove the
+/// factory reaches the application — and a scratch directory would prove the
 /// filesystem instead.
 #[derive(Debug)]
 struct TestAssets;

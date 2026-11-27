@@ -852,9 +852,9 @@ fn validate_provider_id(provider: &str) -> Result<(), WindowRequestError> {
     let valid = !bytes.is_empty()
         && bytes.len() <= MAX_PROVIDER_ID_BYTES
         && bytes[0].is_ascii_lowercase()
-        && bytes
-            .iter()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-' | b':'));
+        && bytes.iter().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-' | b':')
+        });
     if valid {
         Ok(())
     } else {

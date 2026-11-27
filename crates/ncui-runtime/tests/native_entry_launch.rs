@@ -173,7 +173,10 @@ fn a_native_entry_opens_a_native_root_window_without_touching_the_filesystem() {
     let ncui_webview::WindowContent::Native { props, .. } = &request.content else {
         panic!("the content is native");
     };
-    assert_eq!(props["initial_tab"], "audio", "the manifest's props reach the request");
+    assert_eq!(
+        props["initial_tab"], "audio",
+        "the manifest's props reach the request"
+    );
     assert!(
         request.url.is_empty(),
         "a native window carries no URL: there is nothing to navigate to"
@@ -201,8 +204,11 @@ fn a_page_entry_opens_a_page_root_window_exactly_as_before() {
     let scratch = Scratch::application(
         r#"{"name":"counter","version":"1.0.0","window":{"title":"Counter","width":800,"height":600}}"#,
     );
-    std::fs::write(scratch.path().join("public").join("index.html"), "<h1>hi</h1>")
-        .expect("the entry page is written");
+    std::fs::write(
+        scratch.path().join("public").join("index.html"),
+        "<h1>hi</h1>",
+    )
+    .expect("the entry page is written");
     let (application, recorded) = launch(&scratch);
 
     let request = the_request(&recorded);
@@ -216,7 +222,11 @@ fn a_page_entry_opens_a_page_root_window_exactly_as_before() {
         "the window opens at the loopback server: {}",
         request.url
     );
-    assert!(request.url.ends_with("/index.html"), "at the entry page: {}", request.url);
+    assert!(
+        request.url.ends_with("/index.html"),
+        "at the entry page: {}",
+        request.url
+    );
     assert_eq!(request.title, "Counter");
     assert_eq!(request.width, 800);
     assert_eq!(request.height, 600);
@@ -227,8 +237,7 @@ fn a_page_entry_opens_a_page_root_window_exactly_as_before() {
 fn a_missing_page_entry_is_still_refused_before_any_window_opens() {
     // The page half of the branch keeps the rule it always had: a window opened at a 404
     // is not an application running.
-    let scratch =
-        Scratch::application(r#"{"name":"a","version":"1.0.0","entry":"missing.html"}"#);
+    let scratch = Scratch::application(r#"{"name":"a","version":"1.0.0","entry":"missing.html"}"#);
     let recorded = Arc::new(Recorded::default());
     let factory = RecordingFactory {
         recorded: Arc::clone(&recorded),

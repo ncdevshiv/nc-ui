@@ -81,7 +81,8 @@ impl NativeViewEvent {
     pub fn is_within_bounds(&self) -> bool {
         self.source.len() <= MAX_NATIVE_NAME_BYTES
             && self.action.len() <= MAX_NATIVE_NAME_BYTES
-            && serde_json::to_string(&self.payload).map_or(0, |s| s.len()) <= MAX_NATIVE_PAYLOAD_BYTES
+            && serde_json::to_string(&self.payload).map_or(0, |s| s.len())
+                <= MAX_NATIVE_PAYLOAD_BYTES
     }
 }
 

@@ -336,7 +336,7 @@ fn native_event_sink(c: &mut Criterion) {
 
 /// Without the optional GPUI engine binding the sink type is not public API, so there is
 /// no queue implementation to measure honestly. The unconditional contract benches above
-/// still run; this stub only keeps registration shape simple.
+/// still run; this no-op only keeps registration shape simple.
 #[cfg(not(feature = "native-gpui"))]
 fn native_event_sink(_c: &mut Criterion) {}
 

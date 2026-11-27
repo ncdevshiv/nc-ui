@@ -1250,8 +1250,7 @@ impl WindowRegistry {
             let Some(navigation) = NavigationRequest::from_url(&request.url, true) else {
                 return Err(WindowRejection::Unreachable {
                     url: request.url.clone(),
-                    reason:
-                        "the URL cannot be read, and a URL the policy cannot read is refused"
+                    reason: "the URL cannot be read, and a URL the policy cannot read is refused"
                         .to_owned(),
                 });
             };

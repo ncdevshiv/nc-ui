@@ -2237,7 +2237,10 @@ mod tests {
         let mut administrator = session(AgentRole::Administrator);
         let page = runtime
             .windows
-            .open(&ncui_webview::WindowRequest::new("https://example.com"), None)
+            .open(
+                &ncui_webview::WindowRequest::new("https://example.com"),
+                None,
+            )
             .expect("the page window opens");
 
         for method in ["ncui.window.native.command", "ncui.window.native.events"] {
@@ -2372,9 +2375,14 @@ mod tests {
         );
         assert!(drained.error.is_none(), "got: {:?}", drained.error);
 
-        let snapshot = call(&mut runtime, &mut administrator, "ncui.metrics.query", json!({}))
-            .result
-            .expect("metrics result");
+        let snapshot = call(
+            &mut runtime,
+            &mut administrator,
+            "ncui.metrics.query",
+            json!({}),
+        )
+        .result
+        .expect("metrics result");
         let series = snapshot["series"].as_array().expect("metric series");
         let counter = |name: &str| {
             series

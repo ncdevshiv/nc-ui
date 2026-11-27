@@ -58,7 +58,7 @@ pub use capability::{CapabilityGrant, CapabilityRequest};
 pub use lifecycle::{HostState, IllegalTransition, WindowLifecycle};
 pub use menu::{MenuEntry, MenuEvent, MenuRequest, MenuSubmenu};
 pub use native::{
-    MAX_QUEUED_NATIVE_EVENTS, MAX_NATIVE_PAYLOAD_BYTES, NativeViewBackend, NativeViewCommand,
+    MAX_NATIVE_PAYLOAD_BYTES, MAX_QUEUED_NATIVE_EVENTS, NativeViewBackend, NativeViewCommand,
     NativeViewError, NativeViewEvent, RoutingFactory,
 };
 pub use navigation::{

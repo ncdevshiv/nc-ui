@@ -445,7 +445,10 @@ fn native_events_report_what_the_queue_dropped_since_the_last_drain() {
         "ncui.window.native.events",
         json!({ "window": window }),
     );
-    assert_eq!(second.result.expect("the second drain answers")["dropped"], 2);
+    assert_eq!(
+        second.result.expect("the second drain answers")["dropped"],
+        2
+    );
 
     // And a quiet interval is owed zero rather than the count restated.
     let third = call(

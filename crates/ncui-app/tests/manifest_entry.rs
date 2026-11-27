@@ -85,8 +85,14 @@ fn a_mistagged_object_entry_is_refused_naming_the_kind() {
         panic!("a mistagged object is an invalid field, got: {error}");
     };
     assert_eq!(field, "entry.kind");
-    assert!(reason.contains("nativ"), "the refusal quotes what was written: {error}");
-    assert!(reason.contains("\"native\""), "the refusal names the expected kind: {error}");
+    assert!(
+        reason.contains("nativ"),
+        "the refusal quotes what was written: {error}"
+    );
+    assert!(
+        reason.contains("\"native\""),
+        "the refusal names the expected kind: {error}"
+    );
 }
 
 #[test]
@@ -166,9 +172,12 @@ fn unknown_fields_in_a_native_entry_are_refused() {
 fn an_object_without_a_provider_is_not_an_entry_at_all() {
     // `provider` has no default: an object that does not name one does not have the shape
     // of either kind, so the document is malformed rather than invalid.
-    let error =
-        manifest(r#"{"name":"a","version":"1.0.0","entry":{"kind":"native"}}"#).expect_err("no provider");
-    assert!(matches!(error, ManifestError::Malformed { .. }), "got: {error}");
+    let error = manifest(r#"{"name":"a","version":"1.0.0","entry":{"kind":"native"}}"#)
+        .expect_err("no provider");
+    assert!(
+        matches!(error, ManifestError::Malformed { .. }),
+        "got: {error}"
+    );
 }
 
 #[test]
@@ -239,8 +248,7 @@ fn the_entrys_one_line_form_is_truthful_for_metadata() {
     .expect("a valid native manifest");
     let rendered = parsed.entry.to_string();
     assert_eq!(
-        rendered,
-        r#"{"kind":"native","provider":"nc-ui-kit::settings-tabs","props":{"rows":3}}"#,
+        rendered, r#"{"kind":"native","provider":"nc-ui-kit::settings-tabs","props":{"rows":3}}"#,
         "the one-line form is the entry's own JSON object"
     );
     // And because it is the entry's own object, it parses back to the same entry: the

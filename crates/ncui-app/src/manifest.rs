@@ -1202,4 +1202,3 @@ pub fn percent_encode(component: &str) -> String {
     }
     encoded
 }
-

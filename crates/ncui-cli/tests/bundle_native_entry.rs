@@ -80,7 +80,10 @@ fn a_native_entrys_bundle_metadata_is_the_entrys_own_object() {
     // The manifest the runtime will read is copied byte-for-byte, object entry and all.
     let shipped =
         std::fs::read_to_string(out.path().join("ncui.app.json")).expect("the shipped manifest");
-    assert_eq!(shipped, MANIFEST, "the shipped manifest is the author's own bytes");
+    assert_eq!(
+        shipped, MANIFEST,
+        "the shipped manifest is the author's own bytes"
+    );
 
     // And a page entry still writes its bare path, byte-identical to what it always was.
     let page_app = Scratch::new("page-app");

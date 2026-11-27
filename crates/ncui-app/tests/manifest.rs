@@ -355,8 +355,7 @@ fn a_complete_manifest_is_read() {
 
 #[test]
 fn a_manifest_with_only_a_name_and_version_takes_the_defaults() {
-    let parsed =
-        manifest(r#"{"name":"counter","version":"1.0.0"}"#).expect("a minimal manifest");
+    let parsed = manifest(r#"{"name":"counter","version":"1.0.0"}"#).expect("a minimal manifest");
     assert_eq!(
         parsed.entry,
         EntryPoint::Page("index.html".to_owned()),
@@ -378,9 +377,8 @@ fn a_manifest_that_is_not_json_is_refused() {
 
 #[test]
 fn a_manifest_with_an_unknown_capability_is_refused() {
-    let error =
-        manifest(r#"{"name":"a","version":"1.0.0","capabilities":["not.a.capability"]}"#)
-            .expect_err("unknown capability");
+    let error = manifest(r#"{"name":"a","version":"1.0.0","capabilities":["not.a.capability"]}"#)
+        .expect_err("unknown capability");
     assert!(
         matches!(error, ManifestError::Malformed { .. }),
         "got: {error}"
@@ -421,8 +419,8 @@ fn an_entry_that_leaves_the_application_is_refused() {
 
 #[test]
 fn the_entry_resolves_inside_the_assets_directory() {
-    let parsed = manifest(r#"{"name":"a","version":"1.0.0","entry":"pages/app.html"}"#)
-        .expect("manifest");
+    let parsed =
+        manifest(r#"{"name":"a","version":"1.0.0","entry":"pages/app.html"}"#).expect("manifest");
     let root = Path::new("/srv/app");
     let resolved = parsed.entry_path(root).expect("the entry resolves");
     assert_eq!(resolved, root.join("public").join("pages").join("app.html"));

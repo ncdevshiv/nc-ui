@@ -85,8 +85,9 @@ impl KitWidget for InputWidget {
         _window: &mut gpui::Window,
         cx: &mut gpui::App,
     ) -> Result<gpui::Entity<Self::View>, KitProviderError> {
-        let mut input = Input::new(props.placeholder.clone()).on_change(move |value, _cx| {
-            // ncui-allow-placeholder: the input hint-text prop — a UI domain term, not unfinished work
+        // ncui-allow-placeholder survives rustfmt only on a short line — bind first, annotate there.
+        let hint = props.placeholder.clone(); // ncui-allow-placeholder: input hint-text prop, a UI domain term
+        let mut input = Input::new(hint).on_change(move |value, _cx| {
             Self::emit_change(&events, value, "interaction");
         });
         if props.numeric {

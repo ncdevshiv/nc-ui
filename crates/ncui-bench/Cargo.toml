@@ -11,6 +11,16 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+# The real provider-side native-event sink is exported by ncui-gpui only when its
+# engine binding is compiled. Keeping that binding optional preserves the bench crate's
+# headless/default build while making the queue measurement available explicitly.
+native-gpui = ["dep:ncui-gpui"]
+# The kit-provider measurements go through gpui's own headless test application. They
+# are optional because ncui-kit-providers intentionally links the full gpui widget stack.
+kit-providers = ["native-gpui", "dep:ncui-kit-providers", "dep:gpui"]
+
 [dependencies]
 ncui-abi = { workspace = true }
 ncui-app = { workspace = true }
@@ -23,6 +33,13 @@ ncui-ipc = { workspace = true }
 ncui-runtime = { workspace = true }
 ncui-webview = { workspace = true }
 ncui-webview-child = { workspace = true }
+ncui-gpui = { workspace = true, optional = true, features = ["gpui-engine"] }
+ncui-kit-providers = { workspace = true, optional = true }
+# Direct only so the kit-provider bench can use gpui's own headless TestAppContext.
+# `test-support` exposes that harness. The trim matches ncui-gpui's pin, but nc-ui-kit's
+# own gpui dependency enables gpui's defaults in this feature's graph; that inherited
+# weight is precisely why the provider measurements are opt-in.
+gpui = { version = "0.2.2", optional = true, default-features = false, features = ["windows-manifest", "test-support"] }
 ncui-observability = { workspace = true }
 ncui-scheduler = { workspace = true }
 ncui-security = { workspace = true }
@@ -45,4 +62,8 @@ harness = false
 
 [[bench]]
 name = "components"
+harness = false
+
+[[bench]]
+name = "native_views"
 harness = false

@@ -1,0 +1,48 @@
+[package]
+name = "ncui-gpui"
+description = "GPUI native window host: implements the window-host backend over gpui on Windows, feature-gated so the crate compiles headless."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors = ["NC-UI Contributors"]
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Enables the real gpui engine binding: the DirectX renderer, DirectWrite text system and
+# Win32 windowing that gpui performs internally. Off by default so the crate — and the
+# whole workspace — compiles and tests on a machine with no display and no graphics
+# stack, exactly like the wry host's `wry-engine` feature. ADR-012 records gpui as a
+# deliberate dependency exception, confined to this crate and the kit bridge.
+gpui-engine = ["dep:gpui", "dep:flume"]
+
+[dependencies]
+ncui-webview = { workspace = true }
+ncui-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# ADR-012 eleventh exception: a native immediate-mode UI is Win32 windowing, DirectX rendering
+# and DirectWrite text, all foreign functions, and `unsafe_code = "forbid"` rejects calling
+# them. gpui performs the FFI internally, so this crate's own code remains free of unsafe.
+# Confined to this crate and behind the `gpui-engine` feature.
+#
+# `default-features = false` is measured, not aspirational: gpui's default feature set compiles
+# the blade/ash/naga Vulkan stack on Windows even though gpui's Windows backend is pure
+# DirectX/DirectWrite — 21 crates of rendering stack that never runs. The Windows build needs
+# only `windows-manifest`, which must stay because gpui sets DPI awareness through the manifest
+# alone and has no programmatic fallback. The trim is verified: the crate compiles and the
+# engine runs with exactly these features.
+gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest"], optional = true }
+# The command channel into the engine thread. The engine bridge is a foreground future
+# draining host commands, and gpui's executor wakes tasks whose channels receive — which
+# flume provides and std::sync::mpsc does not. flume reaches the graph through gpui in any
+# case, so this adds no transitive weight beyond the engine itself.
+flume = { version = "0.11", optional = true }
+
+[dev-dependencies]
+gpui = { version = "0.2.2", features = ["test-support"] }

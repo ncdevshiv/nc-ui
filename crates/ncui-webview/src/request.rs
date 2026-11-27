@@ -38,13 +38,96 @@ pub const MAX_WINDOW_WIDTH: u32 = 16_384;
 /// The tallest window that may be created.
 pub const MAX_WINDOW_HEIGHT: u32 = 16_384;
 
+/// The longest a native content provider identifier may be, in bytes.
+///
+/// Provider identifiers are namespaced (`nc-ui-kit::sonner`), so they need more room than
+/// the 64 bytes a seam action is allowed; they are still bounded, because an unbounded
+/// identifier is memory a page controls.
+pub const MAX_PROVIDER_ID_BYTES: usize = 128;
+
+/// The largest the serialized props of a native content request may be, in bytes.
+///
+/// Props cross the same trust boundary the URL does: a page names them and host-linked
+/// code parses them. 64 KiB is generous for a widget tree's configuration and small
+/// enough that a page cannot use props as a memory-exhaustion channel.
+pub const MAX_NATIVE_PROPS_BYTES: usize = 65_536;
+
+/// What a window's content is.
+///
+/// A window was always a page: the URL was the content, and the engine was always a
+/// webview. ADR-020 adds a second kind — a native view rendered by a host-linked
+/// provider — and the kind travels inside the request rather than beside it, so every
+/// validation and every host sees the whole of what was asked for in one place.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WindowContent {
+    /// A web page at the request's URL, rendered by the embedded webview.
+    Page,
+    /// A native view rendered by a host-linked provider.
+    ///
+    /// The provider is trusted code linked into the host — it is not a sandboxed
+    /// component, and ADR-020 records why: a native view is Rust in the host process,
+    /// which no WASM artifact can be. The trust decision is made where the provider is
+    /// registered, not where the window is opened.
+    Native {
+        /// The provider identifier the window asks for, namespaced (`nc-ui-kit::sonner`).
+        provider: String,
+        /// The props the view is built with.
+        ///
+        /// Optional because most views have meaningful defaults; bounded at validation
+        /// because a page controls these bytes and host memory is not the page's to spend.
+        #[serde(default)]
+        props: serde_json::Value,
+    },
+}
+
+impl Default for WindowContent {
+    fn default() -> Self {
+        Self::Page
+    }
+}
+
+impl WindowContent {
+    /// Whether the content is a native view rather than a page.
+    #[must_use]
+    pub const fn is_native(&self) -> bool {
+        matches!(self, Self::Native { .. })
+    }
+
+    /// The provider identifier, when the content is native.
+    #[must_use]
+    pub fn provider(&self) -> Option<&str> {
+        match self {
+            Self::Page => None,
+            Self::Native { provider, .. } => Some(provider),
+        }
+    }
+
+    /// The machine-readable name of the kind, for diagnostics and listings.
+    #[must_use]
+    pub const fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Page => "page",
+            Self::Native { .. } => "native",
+        }
+    }
+}
+
 /// A window the host is asked to open.
 ///
 /// Serializable, because it is part of the agent-facing surface: an agent that opens a
 /// window with a title and a size gets the same window an application would.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// The request is `PartialEq` but not `Eq`: native content carries `serde_json::Value`
+/// props, and a JSON number has no total equality.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WindowRequest {
     /// Where the window's page starts.
+    ///
+    /// Mandatory for a page window and meaningless for a native one: validation refuses a
+    /// native request that carries one, because silently ignoring it would hide a caller's
+    /// mistake. Defaulted at deserialization so a native request may omit it.
+    #[serde(default)]
     pub url: String,
     /// The title the window's frame carries.
     #[serde(default = "default_title")]
@@ -105,6 +188,12 @@ pub struct WindowRequest {
     /// never chose it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<Icon>,
+    /// What the window's content is: a page at the URL, or a native view from a provider.
+    ///
+    /// Defaulted to a page, because every request before ADR-020 was one: a caller that
+    /// names no content gets the window it would always have got.
+    #[serde(default)]
+    pub content: WindowContent,
 }
 
 /// The default for a flag that is on unless a caller says otherwise.
@@ -572,7 +661,29 @@ impl WindowRequest {
             fullscreen: false,
             maximized: false,
             icon: None,
+            content: WindowContent::Page,
         }
+    }
+
+    /// A request for a native window: content rendered by the provider `provider`.
+    #[must_use]
+    pub fn native(provider: impl Into<String>) -> Self {
+        Self {
+            content: WindowContent::Native {
+                provider: provider.into(),
+                props: serde_json::Value::Null,
+            },
+            ..Self::new("")
+        }
+    }
+
+    /// A request with native view props.
+    #[must_use]
+    pub fn with_props(mut self, props: serde_json::Value) -> Self {
+        if let WindowContent::Native { props: slot, .. } = &mut self.content {
+            *slot = props;
+        }
+        self
     }
 
     /// A request with a title.
@@ -667,8 +778,25 @@ impl WindowRequest {
     /// impossible window is refused at the boundary, where the reason can be reported,
     /// rather than at the engine, where it would be a crash.
     pub fn validate(&self) -> Result<(), WindowRequestError> {
-        if self.url.trim().is_empty() {
-            return Err(WindowRequestError::EmptyUrl);
+        match &self.content {
+            WindowContent::Page => {
+                if self.url.trim().is_empty() {
+                    return Err(WindowRequestError::EmptyUrl);
+                }
+            }
+            WindowContent::Native { provider, props } => {
+                if !self.url.trim().is_empty() {
+                    return Err(WindowRequestError::UrlOnNativeWindow);
+                }
+                validate_provider_id(provider)?;
+                let props_bytes = serde_json::to_string(props).map_or(0, |s| s.len());
+                if props_bytes > MAX_NATIVE_PROPS_BYTES {
+                    return Err(WindowRequestError::PropsTooLarge {
+                        bytes: props_bytes,
+                        bound: MAX_NATIVE_PROPS_BYTES,
+                    });
+                }
+            }
         }
         if let Some(min_width) = self.min_width
             && !(MIN_WINDOW_WIDTH..=self.width).contains(&min_width)
@@ -717,6 +845,30 @@ impl WindowRequest {
     }
 }
 
+/// Whether a provider identifier is one a host may be asked for.
+///
+/// The shape mirrors a seam action's, with `:` added for namespacing: lowercase ASCII to
+/// start, then lowercase letters, digits and the `.`, `_`, `-` and `:` separators. The
+/// character rules are not about taste — an identifier is printed into diagnostics and
+/// compared against a registry, and a character set that cannot carry whitespace or
+/// control characters cannot smuggle either into a log line.
+fn validate_provider_id(provider: &str) -> Result<(), WindowRequestError> {
+    let bytes = provider.as_bytes();
+    let valid = !bytes.is_empty()
+        && bytes.len() <= MAX_PROVIDER_ID_BYTES
+        && bytes[0].is_ascii_lowercase()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-' | b':'));
+    if valid {
+        Ok(())
+    } else {
+        Err(WindowRequestError::BadProvider {
+            provider: provider.to_owned(),
+        })
+    }
+}
+
 /// A request that describes a window which cannot be created.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowRequestError {
@@ -759,6 +911,21 @@ pub enum WindowRequestError {
         height: u32,
         /// How many bytes of pixels came with it.
         bytes: usize,
+    },
+    /// A native content request carries a URL, which a native window cannot navigate to.
+    UrlOnNativeWindow,
+    /// The provider identifier is empty, too long, or carries characters outside the set
+    /// an identifier may use.
+    BadProvider {
+        /// The identifier that was refused.
+        provider: String,
+    },
+    /// The serialized props are larger than the bound a native window may carry.
+    PropsTooLarge {
+        /// How large the props were.
+        bytes: usize,
+        /// The bound they exceeded.
+        bound: usize,
     },
 }
 
@@ -803,6 +970,20 @@ impl fmt::Display for WindowRequestError {
                 f,
                 "an icon of {width}x{height} carrying {bytes} bytes is not a whole image: it must be \
                  between 1 and {MAX_ICON_EDGE} pixels on each edge and carry four bytes per pixel"
+            ),
+            Self::UrlOnNativeWindow => write!(
+                f,
+                "a native window has no page to navigate to, so its request must not name a URL"
+            ),
+            Self::BadProvider { provider } => write!(
+                f,
+                "the provider identifier `{provider}` is not one a host may be asked for: it must \
+                 start with a lowercase letter, use only lowercase letters, digits and `.`, `_`, \
+                 `-`, `:`, and fit in {MAX_PROVIDER_ID_BYTES} bytes"
+            ),
+            Self::PropsTooLarge { bytes, bound } => write!(
+                f,
+                "the native view props are {bytes} bytes, over the host bound of {bound}"
             ),
         }
     }

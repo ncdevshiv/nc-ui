@@ -43,6 +43,7 @@
 pub mod capability;
 pub mod lifecycle;
 pub mod menu;
+pub mod native;
 pub mod navigation;
 pub mod request;
 pub mod seam;
@@ -56,14 +57,18 @@ use ncui_core::WindowId;
 pub use capability::{CapabilityGrant, CapabilityRequest};
 pub use lifecycle::{HostState, IllegalTransition, WindowLifecycle};
 pub use menu::{MenuEntry, MenuEvent, MenuRequest, MenuSubmenu};
+pub use native::{
+    MAX_QUEUED_NATIVE_EVENTS, MAX_NATIVE_PAYLOAD_BYTES, NativeViewBackend, NativeViewCommand,
+    NativeViewError, NativeViewEvent, RoutingFactory,
+};
 pub use navigation::{
     NavigationPolicy, NavigationRequest, Origin, Scheme, Verdict, is_loopback_host,
 };
 pub use request::{
     DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_TITLE, DEFAULT_WINDOW_WIDTH, Icon, MAX_ICON_EDGE,
-    MAX_WINDOW_HEIGHT, MAX_WINDOW_WIDTH, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, MonitorRect, Theme,
-    WindowChange, WindowChangeError, WindowGeometry, WindowRequest, WindowRequestError,
-    WindowShape, WindowState,
+    MAX_NATIVE_PROPS_BYTES, MAX_PROVIDER_ID_BYTES, MAX_WINDOW_HEIGHT, MAX_WINDOW_WIDTH,
+    MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, MonitorRect, Theme, WindowChange, WindowChangeError,
+    WindowContent, WindowGeometry, WindowRequest, WindowRequestError, WindowShape, WindowState,
 };
 pub use seam::{
     ActionDefinition, ActionTable, ActionTableError, BRIDGE_PROTOCOL_VERSION, HostSeam,
@@ -377,6 +382,16 @@ pub trait WebViewBackend: core::fmt::Debug + Send {
         None
     }
 
+    /// The native-view half of this host, when the window's content is native (ADR-020).
+    ///
+    /// `None` is the honest answer from a page window: there is no native view, and a page
+    /// host says so rather than offering a native half that never produces anything. A
+    /// host whose window is native returns its other half here — one object implementing
+    /// both contracts, with the web half honestly reporting that there is no page.
+    fn native_view(&self) -> Option<&dyn NativeViewBackend> {
+        None
+    }
+
     /// The backend as [`Any`](core::any::Any), for a caller that knows a concrete engine
     /// type and needs a capability only it exposes (the CDP transport). A backend that has
     /// no such capability returns a value that downcasts to nothing.
@@ -539,6 +554,10 @@ impl<T: WebViewBackend + ?Sized> WebViewBackend for Box<T> {
         T::is_devtools_open(self)
     }
 
+    fn native_view(&self) -> Option<&dyn NativeViewBackend> {
+        T::native_view(self)
+    }
+
     fn cdp_send(&self, command: &serde_json::Value) -> Result<serde_json::Value, CdpError> {
         T::cdp_send(self, command)
     }
@@ -602,6 +621,20 @@ mod tests {
         page_wait: Mutex<Option<Duration>>,
     }
 
+    impl crate::native::NativeViewBackend for ForwardingBackend {
+        fn poll_native_event(&self) -> Option<crate::native::NativeViewEvent> {
+            None
+        }
+
+        fn send_view_command(
+            &self,
+            command: crate::native::NativeViewCommand,
+        ) -> Result<(), crate::native::NativeViewError> {
+            let _ = command;
+            Ok(())
+        }
+    }
+
     impl WebViewBackend for ForwardingBackend {
         fn as_any(&self) -> &dyn core::any::Any {
             self
@@ -658,6 +691,10 @@ mod tests {
             )
         }
 
+        fn native_view(&self) -> Option<&dyn crate::native::NativeViewBackend> {
+            Some(self)
+        }
+
         fn cdp_send(&self, command: &serde_json::Value) -> Result<serde_json::Value, CdpError> {
             self.cdp_commands
                 .lock()
@@ -670,6 +707,13 @@ mod tests {
     #[test]
     fn a_boxed_backend_forwards_optional_window_capabilities() {
         let backend: Box<dyn WebViewBackend> = Box::new(ForwardingBackend::default());
+        // The native half must forward too: method resolution prefers the box's own
+        // impl over the object inside it, so a forward that is missing here is a method
+        // the inner object never gets to answer — however it answered for itself.
+        assert!(
+            backend.native_view().is_some(),
+            "native_view must forward through the box impl"
+        );
         assert!(backend.set_zoom(1.25));
         assert!(backend.open_devtools());
         assert_eq!(backend.is_devtools_open(), Some(true));

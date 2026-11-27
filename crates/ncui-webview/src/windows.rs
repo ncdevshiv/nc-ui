@@ -117,6 +117,11 @@ pub struct Window {
     pub host: Option<Box<dyn crate::WebViewBackend>>,
     /// The page this window was opened with.
     pub url: String,
+    /// What the window's content is: a page at the URL, or a native view from a provider.
+    ///
+    /// Recorded rather than re-derived, because the URL is empty for a native window and
+    /// the kind is the only honest answer to "what is in this window".
+    pub content: crate::WindowContent,
     /// The title the window's frame carries.
     pub title: String,
     /// The window's width in logical pixels.
@@ -278,6 +283,8 @@ impl Window {
             state: self.lifecycle.state().unwrap_or(HostState::Created),
             serving: self.is_serving(),
             url: self.url.clone(),
+            content: self.content.kind_name().to_owned(),
+            provider: self.content.provider().map(str::to_owned),
             title: self.title.clone(),
             width: self.width,
             height: self.height,
@@ -761,6 +768,11 @@ pub struct WindowSummary {
     pub serving: bool,
     /// The page the window holds.
     pub url: String,
+    /// What the window's content is, as the machine-readable kind name (`page`/`native`).
+    pub content: String,
+    /// The provider identifier, when the content is native.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     /// The title the window's frame carries.
     pub title: String,
     /// The window's width in logical pixels.
@@ -1231,20 +1243,26 @@ impl WindowRegistry {
         // host asked for that URL, and the allow-list governs what a *page* may reach.
         // That exemption is only safe if the host has already vetted the URL, so it is
         // vetted here — the one place a window is created with a URL the runtime chose.
-        let Some(navigation) = NavigationRequest::from_url(&request.url, true) else {
-            return Err(WindowRejection::Unreachable {
-                url: request.url.clone(),
-                reason: "the URL cannot be read, and a URL the policy cannot read is refused"
-                    .to_owned(),
-            });
-        };
-        if let crate::navigation::Verdict::Deny { reason } =
-            self.default_navigation.evaluate(&navigation)
-        {
-            return Err(WindowRejection::Unreachable {
-                url: request.url.clone(),
-                reason,
-            });
+        // A native window is exempt rather than rejected: it has no URL and no navigation,
+        // so there is nothing for the policy to decide — validation has already refused a
+        // native request that tried to carry one.
+        if !request.content.is_native() {
+            let Some(navigation) = NavigationRequest::from_url(&request.url, true) else {
+                return Err(WindowRejection::Unreachable {
+                    url: request.url.clone(),
+                    reason:
+                        "the URL cannot be read, and a URL the policy cannot read is refused"
+                        .to_owned(),
+                });
+            };
+            if let crate::navigation::Verdict::Deny { reason } =
+                self.default_navigation.evaluate(&navigation)
+            {
+                return Err(WindowRejection::Unreachable {
+                    url: request.url.clone(),
+                    reason,
+                });
+            }
         }
 
         // A page grant is the intersection of the default and what was asked for. Asking
@@ -1290,6 +1308,7 @@ impl WindowRegistry {
             seam,
             host: None,
             url: request.url.clone(),
+            content: request.content.clone(),
             title: request.title.clone(),
             width: request.width,
             height: request.height,

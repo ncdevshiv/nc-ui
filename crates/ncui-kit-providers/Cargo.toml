@@ -1,0 +1,33 @@
+[package]
+name = "ncui-kit-providers"
+description = "nc-ui-kit native view providers: bridges the GPUI widget kit into NC-UI's native window host."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors = ["NC-UI Contributors"]
+
+[lints]
+workspace = true
+
+[dependencies]
+ncui-gpui = { workspace = true, features = ["gpui-engine"] }
+ncui-webview = { workspace = true }
+ncui-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# The widget library lives in the sibling repository. From this crate the path is
+# crates/ncui-kit-providers -> crates -> nc-ui -> the repositories' parent -> nc-ui-kit.
+nc-ui-kit = { version = "0.2.0", path = "../../../nc-ui-kit/crates/nc-ui-kit" }
+
+# The same gpui pin as ncui-gpui, non-optional here because a provider has no meaning
+# without the framework whose entities it builds. `default-features = false` is the
+# measured trim recorded in ncui-gpui's manifest; note that nc-ui-kit depends on gpui
+# with default features, so Cargo's feature unification enables those defaults in any
+# graph containing both crates. That is inherited from the kit, not a second pin here.
+gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest"] }
+
+[dev-dependencies]
+gpui = { version = "0.2.2", features = ["test-support"] }

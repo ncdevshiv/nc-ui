@@ -65,7 +65,12 @@ pub const LAYERS: &[(&str, u8)] = &[
     // the runtime depend on a real host without depending on the policy that describes one.
     ("ncui-webview-wry", 3),
     ("ncui-gpu-renderer", 3),
+    ("ncui-gpui", 3),
     ("ncui-runtime", 4),
+    // Layer 4 also holds the kit bridge: it implements ncui-gpui's provider contract over
+    // the nc-ui-kit widget library and is wired into composition by the CLI, never by the
+    // runtime, so the two layer-4 crates never depend on each other.
+    ("ncui-kit-providers", 4),
     ("ncui-cli", 5),
     ("ncui-bench", 5),
 ];

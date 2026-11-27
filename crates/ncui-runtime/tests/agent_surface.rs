@@ -41,6 +41,25 @@ impl HostFactory for AlwaysReady {
 #[derive(Debug)]
 struct AlwaysAlive;
 
+/// The native half of the test engine: an honest empty queue and an acceptance of whatever
+/// it is sent, so a native method driven against the fixture reaches its handler rather
+/// than being refused for an engine without a native half.
+#[derive(Debug)]
+struct AlwaysListening;
+
+impl ncui_webview::NativeViewBackend for AlwaysListening {
+    fn poll_native_event(&self) -> Option<ncui_webview::NativeViewEvent> {
+        None
+    }
+
+    fn send_view_command(
+        &self,
+        _command: ncui_webview::NativeViewCommand,
+    ) -> Result<(), ncui_webview::NativeViewError> {
+        Ok(())
+    }
+}
+
 impl ncui_webview::WebViewBackend for AlwaysAlive {
     fn as_any(&self) -> &dyn core::any::Any {
         self
@@ -57,6 +76,13 @@ impl ncui_webview::WebViewBackend for AlwaysAlive {
     }
     fn evaluate_script(&self, _script: &str) -> bool {
         true
+    }
+    // Answered for the same reason as the presentation below: an engine that stayed silent
+    // would turn the native window methods into a refusal, and this fixture exists to reach
+    // their handlers. The sweep drives one window, so the one engine answers both halves.
+    fn native_view(&self) -> Option<&dyn ncui_webview::NativeViewBackend> {
+        static NATIVE: AlwaysListening = AlwaysListening;
+        Some(&NATIVE)
     }
     // A real engine asks the platform; this one answers the way a windowed, unfocused window does,
     // so the presentation and shape methods reach their handlers rather than being refused for an
@@ -234,7 +260,13 @@ fn params_for(name: &str, created_window: Option<WindowId>) -> Value {
         }),
         "ncui.window.child.list" => json!({}),
         "ncui.window.zoom" => json!({ "window": named, "factor": 1.25 }),
-        "ncui.window.print.pdf" | "ncui.window.screenshot" => json!({ "window": named }),
+        "ncui.window.print.pdf" | "ncui.window.screenshot" | "ncui.window.native.events" => {
+            json!({ "window": named })
+        }
+        "ncui.window.native.command" => json!({
+            "window": named,
+            "action": "focus"
+        }),
         "ncui.window.post" => json!({ "window": named, "script": "1;" }),
         "ncui.app.emit" => json!({ "window": named, "event": "test" }),
         "ncui.window.state" => json!({ "window": named, "maximized": true }),

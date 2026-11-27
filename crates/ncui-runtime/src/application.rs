@@ -121,18 +121,58 @@ impl Application {
     /// # Errors
     ///
     /// Returns whatever `setup` returns, and the same errors as [`Application::launch`].
-    #[allow(
-        clippy::too_many_lines,
-        reason = "launching an application is one ordered composition — read the manifest, grant \
-                  what it asks for, start the server, register the surfaces, open the window — \
-                  and splitting it would hide the order, which is the part that matters"
-    )]
     pub fn launch_with(
         directory: &Path,
         limits: Limits,
         window_state: Option<PathBuf>,
         port: Option<u16>,
         setup: impl FnOnce(&mut Runtime) -> Result<()>,
+    ) -> Result<Self> {
+        Self::launch_inner(directory, limits, window_state, port, setup, None)
+    }
+
+    /// Launches the application in `directory` over the caller's window host.
+    ///
+    /// Everything [`Application::launch_with`] does, with one difference: the factory the
+    /// windows open in is the caller's rather than the build's default host. The factory
+    /// is the embedding's decision — a routing factory carrying a page host and a native
+    /// host is exactly as welcome as a single one — and the runtime wires the navigation
+    /// policy, the seam and the page grant around whichever it is handed, so the
+    /// application is the same application either way.
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever `setup` returns, and the same errors as [`Application::launch`].
+    pub fn launch_with_factory(
+        directory: &Path,
+        limits: Limits,
+        window_state: Option<PathBuf>,
+        port: Option<u16>,
+        setup: impl FnOnce(&mut Runtime) -> Result<()>,
+        factory: Box<dyn ncui_webview::HostFactory>,
+    ) -> Result<Self> {
+        Self::launch_inner(directory, limits, window_state, port, setup, Some(factory))
+    }
+
+    /// The ordered composition both launch entries share.
+    ///
+    /// `factory` is `None` for the default launch and `Some` when the caller chose the
+    /// host: the default still flows through [`Runtime::with_host`], so a build without
+    /// the `wry-host` feature answers the refusal it always answered, at the same point
+    /// in the composition it always answered it.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "launching an application is one ordered composition — read the manifest, grant \
+                  what it asks for, start the server, register the surfaces, open the window — \
+                  and splitting it would hide the order, which is the part that matters"
+    )]
+    fn launch_inner(
+        directory: &Path,
+        limits: Limits,
+        window_state: Option<PathBuf>,
+        port: Option<u16>,
+        setup: impl FnOnce(&mut Runtime) -> Result<()>,
+        factory: Option<Box<dyn ncui_webview::HostFactory>>,
     ) -> Result<Self> {
         let manifest = AppManifest::load(directory).map_err(|error| {
             NcError::new(ErrorKind::Validation {
@@ -293,7 +333,11 @@ impl Application {
         // artifact is named relative to the application, and `run.components` is what decides
         // whether the commands exist at all.
         let component_commands = crate::components::register(&runtime, directory)?;
-        let runtime = runtime.with_host(&[origin])?;
+        let runtime = if let Some(factory) = factory {
+            runtime.with_host_factory(factory, &[origin])?
+        } else {
+            runtime.with_host(&[origin])?
+        };
         // Where the places of windows a page names are kept, beside the application's own window
         // state: one parameter decides where an application's state lives.
         runtime

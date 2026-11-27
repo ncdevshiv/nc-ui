@@ -232,7 +232,19 @@ fn run_app(
     use ncui_runtime::application::Application;
 
     let directory_path = std::path::Path::new(directory);
-    let install_approval = |runtime: &mut Runtime| {
+    let composition = crate::host::platform_host_composition();
+    let host_routing = composition.routing();
+    let native_configured = composition.native_configured();
+    let native_error = composition.native_error().map(str::to_owned);
+    let Some(host_factory) = composition.into_factory() else {
+        return Err("the window host could not be composed: no page host is available".to_owned());
+    };
+    // Declared before the application so the drops happen in the other order: the windows
+    // close first, and only then is the native engine asked to stop. The guard also covers
+    // every early return below, which a single call at the end could not.
+    let _native_host_teardown = crate::host::NativeHostTeardown::new();
+    let native_error_for_setup = native_error.clone();
+    let install_approval = move |runtime: &mut Runtime| {
         if std::env::var("NCUI_COMPARISON_HOST").as_deref() == Ok("1") {
             runtime.set_consent_prompter(std::sync::Arc::new(ComparisonConsentPrompter));
         } else {
@@ -240,29 +252,21 @@ fn run_app(
                 ncui_runtime::consent::NativeConsentPrompter::new(),
             ));
         }
+        if let Some(reason) = native_error_for_setup.as_deref() {
+            crate::host::record_native_start_failure(runtime, reason);
+        }
         Ok(())
     };
-    let mut application = if let Some(port) = port {
-        Application::launch_with(
-            directory_path,
-            Limits::default(),
-            None,
-            Some(port),
-            install_approval,
-        )
-        .map_err(|error| format!("cannot run the application: {error}"))?
-        .with_link(url.map(str::to_owned))
-    } else {
-        Application::launch_with(
-            directory_path,
-            Limits::default(),
-            None,
-            None,
-            install_approval,
-        )
-        .map_err(|error| format!("cannot run the application: {error}"))?
-        .with_link(url.map(str::to_owned))
-    };
+    let mut application = Application::launch_with_factory(
+        directory_path,
+        Limits::default(),
+        None,
+        port,
+        install_approval,
+        host_factory,
+    )
+    .map_err(|error| format!("cannot run the application: {error}"))?
+    .with_link(url.map(str::to_owned));
     if watch {
         application
             .watch()
@@ -336,7 +340,7 @@ fn run_app(
     let handoffs = application.handoffs();
     application.shutdown();
 
-    Ok(json!({
+    let mut payload = json!({
         "application": name,
         "version": version,
         "url": url,
@@ -347,7 +351,22 @@ fn run_app(
         "instance": "first",
         "link": url,
         "closed": true,
-    }))
+    });
+    if native_configured && let Some(fields) = payload.as_object_mut() {
+        // The runtime's log ring disappears with the application, so the final report keeps
+        // the composition fact a terminal user or an automation can actually read. In a
+        // build without native support the field is absent rather than a misleading "off".
+        fields.insert(
+            "native_host".to_owned(),
+            json!({
+                "available": host_routing.has_native(),
+                "routing": host_routing.as_str(),
+                "error": native_error,
+            }),
+        );
+    }
+
+    Ok(payload)
 }
 
 /// Where an application's instance lock lives.
@@ -801,6 +820,12 @@ fn serve(role: Option<&str>, registry: Option<Value>) -> CommandResult {
             })?,
     };
 
+    // The teardown token is declared before the runtime so it is dropped after it: the
+    // server's runtime closes its windows first, and the native engine is asked to stop
+    // only once no window can still be using it. On the paths that return early this same
+    // drop ordering is what keeps a failed startup from leaving the engine thread behind.
+    let _native_host_teardown = crate::host::NativeHostTeardown::new();
+
     // The window host. A runtime with a host can open windows; one without refuses every
     // window operation rather than inventing windows. The feature is off by default, so a
     // build without it says so rather than pretending.
@@ -819,12 +844,22 @@ fn serve(role: Option<&str>, registry: Option<Value>) -> CommandResult {
             Runtime::start(limits).map_err(|error| format!("runtime failed to start: {error}"))?;
         #[cfg(feature = "wry-host")]
         {
+            let composition = crate::host::platform_host_composition();
+            let native_error = composition.native_error().map(str::to_owned);
+            let Some(factory) = composition.into_factory() else {
+                return Err(
+                    "the window host could not be composed: no page host is available".to_owned(),
+                );
+            };
             runtime = runtime
                 .with_consent_prompter(std::sync::Arc::new(
                     ncui_runtime::consent::NativeConsentPrompter::new(),
                 ))
-                .with_host(&ncui_runtime::window::hosted_origins())
+                .with_host_factory(factory, &ncui_runtime::window::hosted_origins())
                 .map_err(|error| format!("cannot install the window host: {error}"))?;
+            if let Some(reason) = native_error.as_deref() {
+                crate::host::record_native_start_failure(&runtime, reason);
+            }
         }
         #[cfg(not(feature = "wry-host"))]
         {

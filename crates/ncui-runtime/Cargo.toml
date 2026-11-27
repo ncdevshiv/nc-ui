@@ -53,6 +53,11 @@ gpu-islands = [
     "ncui-gpu-renderer/wgpu-device",
     "ncui-gpu-renderer/text-shaping",
 ]
+# The GPUI native window host. Off by default for the same reason as the wry host: it is a
+# platform dependency chain, and a build with no display stack must still compile and run.
+# The runtime never names the crate outside this feature — a GPUI host enters through the
+# host-neutral `Runtime::with_host_factory` like any other factory.
+gpui-host = ["dep:ncui-gpui", "ncui-gpui/gpui-engine"]
 
 [dependencies]
 ncui-core = { workspace = true }
@@ -64,6 +69,8 @@ ncui-webview = { workspace = true }
 ncui-webview-child = { workspace = true }
 ncui-webview-wry = { workspace = true, optional = true }
 ncui-gpu = { workspace = true }
+# Optional: only a build that links the GPUI native window host needs it.
+ncui-gpui = { workspace = true, optional = true }
 # Optional: only the island surface draws anything.
 ncui-gpu-renderer = { workspace = true, optional = true }
 ncui-a11y = { workspace = true }
@@ -76,3 +83,11 @@ ncui-security = { workspace = true }
 ncui-observability = { workspace = true }
 ncui-workers = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+# The coexistence test drives both real hosts in one process: gpui with its test support
+# for the provider it registers, and the same pinning ncui-gpui carries so feature
+# unification keeps one gpui in the graph.
+gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest"] }
+ncui-gpui = { workspace = true, features = ["gpui-engine"] }
+ncui-webview-wry = { workspace = true, features = ["wry-engine"] }

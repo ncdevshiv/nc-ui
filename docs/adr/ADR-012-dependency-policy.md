@@ -334,6 +334,44 @@ performs no FFI, and is confined to this integrity check and the existing bundle
 alternative — comparing caller-controlled JSON without a canonical digest, or relying on token text
 as proof — would either miss semantically identical requests or accept altered operations.
 
+## The eleventh exception: `gpui` for the native view host
+
+`ncui-gpui` depends on `gpui` 0.2.2 to host native windows. ADR-020 records why a native view
+host exists at all; this section records what it costs the dependency graph, because it is the
+largest exception this project has taken: gpui adds roughly 385 crate names to the lockfile,
+where the previous largest exception added 27. The number is measured, not estimated — the
+audit counted the locked graph before and after, and `docs/native-dependency-analysis.md`
+carries the full measurement.
+
+The size is honest rather than accidental, and the shape of it matters more than the count:
+
+* The dependency is **optional and feature-gated**. `gpui-engine` is off by default in
+  `ncui-gpui`, the runtime's `gpui-host` feature is off by default, and a default build of the
+  workspace carries no gpui crate at all. The headless gate — the machine with no display that
+  every CI run is — compiles exactly what it compiled before this exception existed.
+* gpui performs every foreign call internally. Win32 windowing, DirectX rendering and
+  DirectWrite text are FFI a native immediate-mode UI cannot avoid, and `unsafe_code = "forbid"`
+  rejects calling them directly. This crate's own code remains free of unsafe for the same
+  reason the wry host's does: the platform binding is the exception, the policy above it is not.
+* The default feature set is trimmed because the default is waste: gpui's Windows backend is
+  pure DirectX/DirectWrite, yet its default features compile the blade/ash/naga Vulkan stack —
+  21 crates that never run on Windows. `default-features = false` with only `windows-manifest`
+  is compile-verified, and the manifest feature must stay because gpui sets DPI awareness
+  through the manifest alone. The trim and its verification are in the analysis document.
+* What cannot be trimmed is recorded honestly: `zed-reqwest` is a mandatory forked HTTP client
+  that advisories will not match by name, `rav1e` enters through the image crate's default AVIF
+  support, and `rustybuzz` is now present at two versions. The analysis document lists each with
+  its cause; none is silent.
+
+The licence consequence is measured too: exactly one crate in the tree, `libfuzzer-sys`, carries
+a licence (`NCSA` conjunctively) the allow-list does not cover — and it enters only through a
+fuzzing configuration that never compiles in this workspace. The exception in `deny.toml` is
+scoped to that crate rather than the licence, because an allow-list entry would admit NCSA
+everywhere, and the point of the list is that it means something.
+
+The alternative to this exception was a native UI toolkit written in-house — a project measured
+in years, not crates — or no native views at all, which is the absence ADR-020 exists to end.
+
 ## Consequences
 - Some conveniences are reimplemented rather than imported, which is a real cost paid for a
   smaller and more auditable attack surface. This is a deliberate trade, not an oversight.

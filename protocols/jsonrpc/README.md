@@ -98,6 +98,8 @@ behind it, which is why `protocol_conformance.rs` checks this table against the 
 | `role` | `ncui.describe`, `ncui.serve` | The role whose grants are described or served |
 | `package`, `filter` | `ncui.test.run`, `ncui.benchmark.run` | Which package to run, and which test or benchmark within it |
 | `url` | `ncui.window.create`, `ncui.window.post` | The page to open, or the page to evaluate a script in |
+| `content` | `ncui.window.create` | What the window carries: `{"kind": "page"}` (the default) or `{"kind": "native", "provider": "...", "props": {...}}` |
+| `command` | `ncui.window.native.command` | What the native view is told: `{"kind": "update_props", "props": {...}}` or `{"kind": "invoke", "action": "...", "payload": {...}}` |
 | `window` | every method that names one window | The window's identity |
 | `title`, `width`, `height`, `x`, `y` | `ncui.window.create` | What the window is called, how big it is and where it sits |
 | `always_on_top`, `decorations`, `transparent`, `resizable` | `ncui.window.create` | How the window is framed, floated, made see-through and resized |
@@ -179,6 +181,8 @@ is the one actually enforced.
 | `ncui.window.close` | `window` | no | Close a window by identity |
 | `ncui.window.state` | `window` | no | How a window is presented, and how to change it: fullscreen, maximised, minimised, shown or hidden, or focused. The answer also reports the platform's frame — decorated, resizable, always on top — as the platform has it. A page is told when its window is resized or moved, through `resized` and `moved` events |
 | `ncui.window.theme` | `window` | no | Whether the platform is drawing its interface light or dark, and a `theme` event when it changes |
+| `ncui.window.native.events` | `window` | no | Poll one event a native window's view has emitted, or null when its queue is empty |
+| `ncui.window.native.command` | `window` | no | Deliver one command to a native window's view: update its props, or invoke one of the verbs it answers |
 | `ncui.window.zoom` | `window` | no | Scale a window's page by a factor between 0.25 and 5.0, where 1.0 is the platform default |
 | `ncui.window.print.pdf` | `window` | no | Render a window's page to PDF through the engine's own DevTools protocol; the answer carries the PDF as base64 |
 | `ncui.window.screenshot` | `window` | no | Capture a window's page as a PNG or JPEG through the engine's own DevTools protocol; the answer carries the image as base64 |
@@ -211,6 +215,64 @@ is the one actually enforced.
 | `ncui.profile.stop` | `inspect.runtime` | no | End profiling |
 | `ncui.test.run` | `run.tests` | no | Run the project's test suite |
 | `ncui.benchmark.run` | `run.benchmarks` | no | Run the project's benchmark suite |
+
+### Native windows
+
+A window's content is either a page at a URL or a native view from a provider registered
+with the host. `ncui.window.create` chooses by its `content` parameter. Absent means
+`{"kind": "page"}`, so a payload written before native windows existed means exactly what it
+always meant; `{"kind": "page"}` said out loud is the same request. A native window is asked
+for with `{"kind": "native", "provider": "...", "props": {...}}` and obeys three rules the
+request is validated against before any host is asked:
+
+- A native window carries **no URL**. Naming `url` alongside native content is a
+  `validation` error, because the request describes two different windows and neither is
+  the one the caller will get.
+- The provider identifier is at most 128 bytes of lowercase ASCII letters, digits, `.`,
+  `_`, `-` or `:`, starting with a letter — the name of a provider the host registered,
+  never a free-form label.
+- The props, serialized, are at most 65 536 bytes. The bound is the contract's, and it is
+  enforced where the request is parsed rather than left for the host to discover.
+
+`ncui.window.list` reports what each window carries: `content` is the machine-readable
+kind (`page` or `native`) and `provider` is present when the content is native. Every
+window method that acts on a window accepts native windows; the two below exist only for
+them, and asked of a page window they answer `-32006` / `conflict` with a message naming
+what the window is — because "no events yet" and "no events ever, this window is a page"
+are different facts.
+
+`ncui.window.native.events` takes `{"window": "<id>"}` and polls one event:
+
+```json
+{ "window": "<id>", "event": { "source": "test.panel", "action": "clicked", "payload": { "row": 2 } } }
+```
+
+`event` is `null` when the queue is honestly empty, so an agent polls rather than
+subscribes. The event object is the provider's own, serialized in the native contract's
+shape — `source`, `action`, `payload` — carried unchanged: what a view emits is the
+provider's business, and the runtime does not interpret it. Events are bounded per window
+at 256 queued; a view that outruns the polling drops its oldest events.
+
+`ncui.window.native.command` takes `{"window": "<id>", "command": {...}}` and answers
+`{"window": "<id>", "sent": true}` when the view accepted the command. The command is the
+contract's tagged shape — `{"kind": "update_props", "props": {...}}` replaces the props
+the view was built with, `{"kind": "invoke", "action": "...", "payload": {...}}` invokes a
+verb in the provider's own vocabulary. Actions are at most 128 bytes and payloads at most
+65 536 bytes serialized; a command outside the bounds is refused with `-32602` /
+`validation` **before it is sent**, so a host is never asked to carry what the contract
+forbids.
+
+A command the view itself refuses is a structured error whose message carries the stable
+`native_*` code as a prefix, because the code is the part of the refusal an agent branches
+on and it must survive every layer:
+
+| The view's answer | `ncui_code` | Message prefix |
+| --- | --- | --- |
+| The window's view is gone | `conflict` | `native_window_gone` |
+| The view refused the command | `conflict` | `native_view_refused` |
+| The native engine is unavailable | `conflict` | `native_engine_unavailable` |
+| The command was out of bounds | `validation` | `native_out_of_bounds` |
+
 ### Planned, not implemented
 
 These are specified so the interface is stable, but **they do not exist**. Each is recorded

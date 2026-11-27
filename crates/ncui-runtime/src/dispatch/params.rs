@@ -764,11 +764,65 @@ pub(crate) fn remembered_place(
     Ok(runtime.windows.place_for(key))
 }
 
+/// Reads the `content` of a window request, when the caller named one.
+///
+/// Absent means a page window — the default the request contract itself carries, so a
+/// payload written before native windows existed means exactly what it always meant. The
+/// tagged shape is the contract's own (`{"kind": "page"}` or `{"kind": "native",
+/// "provider": ..., "props": ...}`), parsed by serde rather than field by field because
+/// the contract crate is what owns which shapes exist.
+pub(crate) fn content_param(params: &Value) -> Result<Option<ncui_webview::WindowContent>> {
+    let Some(value) = params.get("content") else {
+        return Ok(None);
+    };
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|error| {
+            validation(
+                "content",
+                format!("must be a window content object: {error}"),
+            )
+            .operation("dispatch::content_param")
+        })
+}
+
+/// Builds the base request a window's parameters describe, before its shape is applied.
+///
+/// The content decides how the URL is read at all: a page window requires one, exactly as
+/// it always has, while a native window carries none — so the reading happens here, with
+/// the strictness that kind of window answers to.
+fn base_request_param(
+    params: &Value,
+    content: Option<ncui_webview::WindowContent>,
+) -> Result<ncui_webview::WindowRequest> {
+    match content {
+        Some(ncui_webview::WindowContent::Native { provider, props }) => {
+            let mut request = ncui_webview::WindowRequest::native(provider).with_props(props);
+            // A URL a caller passed alongside native content is carried into the request so
+            // the contract's own validation rejects it, rather than being refused here with a
+            // second wording of the same rule — or worse, dropped, which would accept a
+            // payload the caller did not mean.
+            if let Some(value) = params.get("url") {
+                value
+                    .as_str()
+                    .ok_or_else(|| {
+                        validation("url", "must be a string").operation("dispatch::url_param")
+                    })?
+                    .clone_into(&mut request.url);
+            }
+            Ok(request)
+        }
+        Some(ncui_webview::WindowContent::Page) | None => {
+            Ok(ncui_webview::WindowRequest::new(url_param(params)?))
+        }
+    }
+}
+
 pub(crate) fn window_request_param(
     params: &Value,
     remembered_place: Option<ncui_webview::WindowGeometry>,
 ) -> Result<ncui_webview::WindowRequest> {
-    let url = url_param(params)?;
+    let content = content_param(params)?;
     let title = match params.get("title") {
         None => None,
         Some(value) => Some(value.as_str().ok_or_else(|| {
@@ -796,7 +850,7 @@ pub(crate) fn window_request_param(
         }
     };
 
-    let mut request = ncui_webview::WindowRequest::new(url);
+    let mut request = base_request_param(params, content)?;
     if let Some(title) = title {
         request = request.with_title(title);
     }
@@ -1475,5 +1529,121 @@ mod capture_tests {
             matches!(error.kind(), ErrorKind::NotFound { .. }),
             "{error:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod native_param_tests {
+    use super::window_request_param;
+    use ncui_core::ErrorKind;
+    use serde_json::json;
+
+    #[test]
+    fn a_native_window_request_parses_through_the_same_path_without_a_url() {
+        let request = window_request_param(
+            &json!({
+                "content": { "kind": "native", "provider": "test.panel", "props": { "rows": 3 } },
+                "title": "Panel",
+                "width": 400,
+                "height": 300
+            }),
+            None,
+        )
+        .expect("a well-formed native request passes validation");
+        assert!(request.content.is_native());
+        assert!(request.url.is_empty(), "a native window carries no URL");
+        assert_eq!(request.title, "Panel");
+        assert_eq!(request.width, 400);
+    }
+
+    #[test]
+    fn a_native_window_request_carrying_a_url_is_rejected() {
+        let error = window_request_param(
+            &json!({
+                "url": "https://example.com",
+                "content": { "kind": "native", "provider": "test.panel" }
+            }),
+            None,
+        )
+        .expect_err("a native window must not name a URL");
+        assert!(
+            matches!(error.kind(), ErrorKind::Validation { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_page_window_request_still_requires_a_url() {
+        for params in [
+            json!({}),
+            json!({ "content": { "kind": "page" } }),
+            json!({ "url": "" }),
+        ] {
+            let error = window_request_param(&params, None)
+                .expect_err("a page window without a URL is refused");
+            assert!(
+                matches!(error.kind(), ErrorKind::Validation { .. }),
+                "{params}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bad_provider_is_rejected_at_validation() {
+        for provider in [
+            String::new(),
+            "Uppercase".to_owned(),
+            "has space".to_owned(),
+            "a".repeat(129),
+        ] {
+            let error = window_request_param(
+                &json!({ "content": { "kind": "native", "provider": provider } }),
+                None,
+            )
+            .expect_err("a provider outside the contract is refused");
+            assert!(
+                matches!(error.kind(), ErrorKind::Validation { .. }),
+                "{provider}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn props_past_the_contracts_bound_are_rejected_at_validation() {
+        let error = window_request_param(
+            &json!({
+                "content": {
+                    "kind": "native",
+                    "provider": "test.panel",
+                    "props": { "data": "x".repeat(70_000) }
+                }
+            }),
+            None,
+        )
+        .expect_err("props past the bound are refused");
+        assert!(
+            matches!(error.kind(), ErrorKind::Validation { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_content_that_is_not_the_contracts_shape_is_rejected() {
+        for content in [
+            json!("native"),
+            json!({ "kind": "dance" }),
+            json!({ "kind": "native" }),
+            json!({ "provider": "test.panel" }),
+        ] {
+            let error = window_request_param(
+                &json!({ "url": "https://example.com", "content": content }),
+                None,
+            )
+            .expect_err("content outside the contract is refused");
+            assert!(
+                matches!(error.kind(), ErrorKind::Validation { .. }),
+                "{content}: {error:?}"
+            );
+        }
     }
 }

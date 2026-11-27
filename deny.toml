@@ -17,11 +17,10 @@ version = 2
 # untrusted web content and agent-supplied commands, so the exploit surface is real.
 yanked = "deny"
 ignore = [
-    # RUSTSEC-2026-0206: rustybuzz is unmaintained; the recommended replacement is
-    # harfrust. Migrating the GPU text-shaping path is tracked as follow-up work;
-    # until then this is a maintenance-status advisory, not a vulnerability, and the
-    # shaping code is exercised by the island text tests on every gate run.
-    "RUSTSEC-2026-0206",
+    # RUSTSEC-2026-0206 (rustybuzz unmaintained) was ignored here while it applied; the
+    # advisory no longer matches the locked versions, and cargo-deny fails the gate on a
+    # stale ignore. The migration to harfrust remains worthwhile on maintenance grounds,
+    # but there is nothing left to ignore.
 ]
 
 [licenses]
@@ -46,6 +45,17 @@ allow = [
 # A copyleft or unknown licence in a dependency is a distribution blocker until
 # reviewed and added deliberately, not something to discover at release time.
 confidence-threshold = 0.8
+
+[[licenses.exceptions]]
+# `libfuzzer-sys` enters the all-features graph through gpui's image pipeline
+# (gpui -> image -> ravif -> rav1e) but only under rav1e's `cfg(fuzzing)` target, which no
+# build of this workspace compiles — verified in docs/native-dependency-analysis.md. Its
+# licence is `(MIT OR Apache-2.0) AND NCSA`; the NCSA conjunct is what the allow-list
+# cannot cover, and a list-wide NCSA entry would admit it for every future dependency,
+# which is why the exception is scoped to this one crate and documented in ADR-012.
+allow = ["NCSA", "MIT", "Apache-2.0"]
+name = "libfuzzer-sys"
+version = "*"
 
 [bans]
 multiple-versions = "warn"

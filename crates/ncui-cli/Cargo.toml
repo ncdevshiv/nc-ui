@@ -20,16 +20,34 @@ default = []
 # `ncui build --profile minimal` compiles exactly this, shipping a window host with no
 # graphics stack for applications that draw no islands. `wry-host-gpu` adds the renderer
 # for the full build.
-wry-host = ["ncui-runtime/wry-host"]
+wry-host = [
+    "ncui-runtime/wry-host",
+    "dep:ncui-webview-wry",
+    "ncui-webview-wry/wry-engine",
+]
 # The full window host: the minimal one plus the GPU-island renderer. This is what a plain
 # `cargo build --release -p ncui-cli --features wry-host-gpu` (and the standard profile)
 # ships, and what the workspace built before the renderer became optional at link time.
 wry-host-gpu = ["wry-host", "ncui-runtime/gpu-islands"]
+# The GPUI native window host. Independent of `wry-host` because the two content kinds are
+# separate engines; a desktop build that hosts both asks for both features. The runtime
+# feature is forwarded because that is where the application surface is feature-gated, while
+# the direct dependency is what lets this composition root construct the factory itself.
+gpui-host = [
+    "ncui-runtime/gpui-host",
+    "dep:ncui-gpui",
+    "ncui-gpui/gpui-engine",
+]
 
 [dependencies]
 ncui-core = { workspace = true }
 ncui-app = { workspace = true }
 ncui-webview = { workspace = true }
+# Optional: the page engine is only linked when `wry-host` is enabled. The composition root
+# names the factory directly so it can route page and native content between two hosts.
+ncui-webview-wry = { workspace = true, optional = true }
+# Optional: the native engine is only linked when `gpui-host` is enabled.
+ncui-gpui = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 ncui-native = { workspace = true }
@@ -37,6 +55,9 @@ ncui-runtime = { workspace = true }
 ncui-security = { workspace = true }
 # The crash-report shape the binary's panic hook writes (ADR-001 reporting half).
 ncui-observability = { workspace = true }
+# Host-composition failures are instrumentation, so the composition root names the tracing
+# facade rather than depending on the runtime's copy of it.
+tracing = { workspace = true }
 # A digest per bundled file. Already in the tree as a transitive dependency; the bundle makes it
 # direct, so no new crate enters the graph.
 sha2 = { workspace = true }

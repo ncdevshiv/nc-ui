@@ -29,6 +29,7 @@
 pub mod bundle;
 pub mod commands;
 pub mod crash;
+pub mod host;
 pub mod installer;
 pub mod release;
 pub mod render;

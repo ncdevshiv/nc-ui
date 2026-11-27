@@ -28,7 +28,9 @@ use crate::Runtime;
 use crate::commands::CommandTarget;
 
 mod actions;
+mod native;
 pub use actions::{SEAM_ACTIONS, SeamAction, default_page_grant};
+pub use native::NativePoll;
 
 /// The window surface available to agents.
 #[derive(Default)]
@@ -48,6 +50,13 @@ pub struct Windows {
     places: Mutex<BTreeMap<String, ncui_webview::WindowGeometry>>,
     /// Which open windows are remembered, and under which name.
     keys: Mutex<BTreeMap<WindowId, String>>,
+    /// The cumulative dropped-event count each native window reported at its last drain.
+    ///
+    /// The backend's counter is cumulative and monotonic, while a drain's caller is owed
+    /// what changed since it last asked: the delta is the difference, and this is the
+    /// memory the difference is taken against. Forgotten when the window closes, because a
+    /// window that is gone has no queue left to account for.
+    native_drops_reported: Mutex<BTreeMap<WindowId, u64>>,
     /// The displays the host reported when it was installed.
     ///
     /// Asked for once, at installation, because that is when the engine starts: a remembered
@@ -295,6 +304,13 @@ impl Windows {
         // stops — a window the user closed mid-run is a window whose place the user chose.
         self.save_places();
         self.forget_place(id);
+        // The drop cursor goes with the window, exactly as the remembered-place key does:
+        // a window that is gone has no queue left to account for, and its id will never be
+        // answered again, so the memory of what it last reported is dropped rather than kept.
+        self.native_drops_reported
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&id);
         self.with_registry_mut(|registry| Ok(registry.close(id).is_some()))
     }
 
@@ -1312,6 +1328,32 @@ pub fn hosted_registry(
         .with_default_locale(locale, direction)
 }
 
+/// Builds the window surface a hosted runtime uses, over the caller's host factory.
+///
+/// The registry, the policy and the engine are installed together, because a registry with
+/// no factory can never open a window and a factory with no registry has nothing to open
+/// one in. Either half alone would be a surface that reports something the runtime cannot
+/// do. The factory is the caller's because which host a window opens in is an embedding
+/// decision — the runtime wires the policy around whatever host the embedding chooses,
+/// and a routing factory carrying several hosts is exactly as welcome as a single one.
+#[must_use]
+pub fn hosted_surface_with(
+    factory: Box<dyn HostFactory>,
+    allowed_origins: &[ncui_webview::Origin],
+    actions: &ActionTable,
+    page_grant: CapabilitySet,
+) -> Windows {
+    // The displays are asked for here, because installing the host is what starts the engine: a
+    // remembered window place has to be answerable before the first window exists, and only the
+    // engine knows which displays this process can put a window on.
+    let monitors = factory.monitors();
+    let mut windows = Windows::new()
+        .with_registry(hosted_registry(allowed_origins, actions, page_grant))
+        .with_factory(factory);
+    windows.monitors = monitors;
+    windows
+}
+
 /// Builds the window surface a hosted runtime uses.
 ///
 /// The registry, the policy and the engine are installed together, because a registry with
@@ -1326,15 +1368,7 @@ pub fn hosted_surface(
     page_grant: CapabilitySet,
 ) -> Windows {
     let factory: Box<dyn HostFactory> = Box::new(ncui_webview_wry::WryHostFactory);
-    // The displays are asked for here, because installing the host is what starts the engine: a
-    // remembered window place has to be answerable before the first window exists, and only the
-    // engine knows which displays this process can put a window on.
-    let monitors = factory.monitors();
-    let mut windows = Windows::new()
-        .with_registry(hosted_registry(allowed_origins, actions, page_grant))
-        .with_factory(factory);
-    windows.monitors = monitors;
-    windows
+    hosted_surface_with(factory, allowed_origins, actions, page_grant)
 }
 
 /// Runs the window engine's event loop on the main thread, with the application's

@@ -33,9 +33,11 @@ use crate::rpc::{Request, Response};
 pub(crate) use self::params::{consent_token_param, json_error};
 mod cargo;
 mod cdp_handler;
+mod native_handler;
 mod params;
 
 use self::cdp_handler::invoke_cdp_send;
+use self::native_handler::{invoke_window_native_command, invoke_window_native_events};
 use self::params::{
     deadline_param, enforce_deadline, grant_param, invoke_app_emit, invoke_component_inspect,
     invoke_devtools_events, invoke_devtools_profile, invoke_devtools_tree, invoke_logs_query,
@@ -214,6 +216,18 @@ pub fn method_table() -> Vec<MethodDescription> {
         entry(
             "ncui.window.theme",
             "Whether the platform is drawing its interface light or dark.",
+            CapabilitySet::empty().with(Capability::Window),
+            false,
+        ),
+        entry(
+            "ncui.window.native.events",
+            "Drain every event a native window's view has emitted since the last drain, with the count dropped to a full queue in between.",
+            CapabilitySet::empty().with(Capability::Window),
+            false,
+        ),
+        entry(
+            "ncui.window.native.command",
+            "Deliver one command to a native window's view: update its props, or invoke one of the verbs it answers.",
             CapabilitySet::empty().with(Capability::Window),
             false,
         ),
@@ -782,6 +796,8 @@ fn invoke(
         }
         "ncui.window.post" => invoke_window_post(runtime, &request.params),
         "ncui.window.drag.region" => invoke_window_drag_region(runtime, &request.params),
+        "ncui.window.native.events" => invoke_window_native_events(runtime, &request.params),
+        "ncui.window.native.command" => invoke_window_native_command(runtime, &request.params),
         "ncui.window.zoom" => invoke_window_zoom(runtime, &request.params),
         "ncui.window.print.pdf" => invoke_window_print_to_pdf(runtime, &request.params),
         "ncui.window.screenshot" => invoke_window_screenshot(runtime, &request.params),
@@ -1200,9 +1216,20 @@ mod tests {
                         | "ncui.window.devtools.close"
                         | "ncui.window.devtools.state"
                         | "ncui.window.print.pdf"
+                        | "ncui.window.native.events"
                         | "ncui.window.screenshot" => match created_window {
                             Some(id) => json!({ "window": id.to_string() }),
                             None => json!({ "window": "00000000000000000000000000000001" }),
+                        },
+                        "ncui.window.native.command" => match created_window {
+                            Some(id) => json!({
+                                "window": id.to_string(),
+                                "action": "focus",
+                            }),
+                            None => json!({
+                                "window": "00000000000000000000000000000001",
+                                "action": "focus",
+                            }),
                         },
                         "ncui.window.zoom" => match created_window {
                             Some(id) => json!({ "window": id.to_string(), "factor": 1.25 }),
@@ -1615,6 +1642,17 @@ mod tests {
                             .expect("create is listed before theme")
                             .to_string(),
                     }),
+                    "ncui.window.native.events" => json!({
+                        "window": created_window
+                            .expect("create is listed before native events")
+                            .to_string(),
+                    }),
+                    "ncui.window.native.command" => json!({
+                        "window": created_window
+                            .expect("create is listed before native command")
+                            .to_string(),
+                        "action": "focus",
+                    }),
                     "ncui.window.state" => json!({
                         "window": created_window
                             .expect("create is listed before state")
@@ -1832,6 +1870,25 @@ mod tests {
     #[derive(Debug)]
     struct AlwaysAlive;
 
+    /// The native half of the test engine: an honest empty queue and an acceptance of
+    /// whatever it is sent, so a native method driven against the fixture reaches its
+    /// handler rather than being refused for an engine without a native half.
+    #[derive(Debug)]
+    struct AlwaysListening;
+
+    impl ncui_webview::NativeViewBackend for AlwaysListening {
+        fn poll_native_event(&self) -> Option<ncui_webview::NativeViewEvent> {
+            None
+        }
+
+        fn send_view_command(
+            &self,
+            _command: ncui_webview::NativeViewCommand,
+        ) -> Result<(), ncui_webview::NativeViewError> {
+            Ok(())
+        }
+    }
+
     impl ncui_webview::WebViewBackend for AlwaysAlive {
         fn as_any(&self) -> &dyn core::any::Any {
             self
@@ -1863,6 +1920,15 @@ mod tests {
 
         fn window_theme(&self) -> Option<ncui_webview::Theme> {
             Some(ncui_webview::Theme::Light)
+        }
+
+        // Answered for the same reason as the presentation above: an engine that stayed
+        // silent would turn the native window methods into a refusal, and this fixture
+        // exists to reach their handlers. The sweeps drive one window, so the one engine
+        // answers both halves.
+        fn native_view(&self) -> Option<&dyn ncui_webview::NativeViewBackend> {
+            static NATIVE: AlwaysListening = AlwaysListening;
+            Some(&NATIVE)
         }
 
         fn last_error(&self) -> Option<String> {

@@ -156,6 +156,35 @@ pub const SEAM_ACTIONS: &[SeamAction] = &[
         granted_by_default: false,
         targets_caller_window: true,
     },
+    // The native pair is not pinned to the caller's window, for the reason the pin exists
+    // inverted: a page window is never a native window, so the window a page drives is
+    // always another one, and the page names it explicitly the way an agent does. The
+    // grant decides whether the page may drive native windows at all; what it may drive
+    // them to do was decided when the provider was registered, in code review (ADR-020).
+    SeamAction {
+        name: "native_command",
+        method: "ncui.window.native.command",
+        requires: CapabilitySet::empty().with(Capability::Window),
+        summary: "Deliver one command to a native window's view: replace its props with \
+                  `props`, or invoke one of the verbs it answers with `action` and an \
+                  optional `payload` — exactly one of the two, because a command is either \
+                  a props update or an invoked verb. The window is named with `window`. \
+                  Requires the `window` capability.",
+        granted_by_default: false,
+        targets_caller_window: false,
+    },
+    SeamAction {
+        name: "native_events",
+        method: "ncui.window.native.events",
+        requires: CapabilitySet::empty().with(Capability::Window),
+        summary: "Drain the events a native window's view has emitted since they were last \
+                  drained, and learn how many were dropped to a full queue in between. \
+                  Draining consumes the events, so the page that drains is the consumer the \
+                  view's queue has. The window is named with `window`. Requires the `window` \
+                  capability.",
+        granted_by_default: false,
+        targets_caller_window: false,
+    },
 ];
 
 /// The grant a page receives when the host offers these actions.

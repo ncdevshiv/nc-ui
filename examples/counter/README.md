@@ -48,6 +48,39 @@ The name belongs to the page rather than to the runtime, because the page is wha
 windows it opens are two windows. `notes.html` finds itself in `list_windows` and prints the place
 it is at, so the remembered geometry is visible rather than taken on faith.
 
+## A native window, when the kit bridge lands
+
+`create_window` can ask for native content instead of a page. The content is part of the window
+request, so the request carries no `url` when its kind is native:
+
+```js
+window.ncui.invoke("create_window", {
+  title: "Notifications",
+  width: 420,
+  height: 480,
+  content: {
+    kind: "native",
+    provider: "nc-ui-kit::sonner",
+    props: {
+      position: "bottom-right"
+    }
+  }
+});
+```
+
+`props` may be omitted when the provider's defaults are the desired configuration. A provider
+identifier is lowercase ASCII, at most 128 bytes, and may use digits plus `.`, `_`, `-` and `:`
+as separators; the serialized props are bounded at 64 KiB. The manifest schema in this tree still
+accepts only a string `entry`; the native object form for an application entry is part of the same
+unfinished kit-bridge work rather than something this example can demonstrate today.
+
+There is deliberately no native-window button in this example yet. A native view is host-linked
+Rust code, not a WASM component, and the provider demonstration is blocked until the kit bridge
+lands and registers a real provider. Faking one in the page would demonstrate nothing about the
+native path. In a binary built with the CLI's `gpui-host` feature, the GPUI host serves these
+requests while the wry host continues to serve pages; if the GPUI engine cannot start, pages
+remain available and native window creation is refused with the missing-host diagnostic.
+
 ## What the plugin demonstrates
 
 `plugins/greeter.wat` is a WebAssembly component: code this page did not write, running inside

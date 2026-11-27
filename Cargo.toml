@@ -36,6 +36,8 @@ ncui-webview-wry = { version = "0.1.0", path = "crates/ncui-webview-wry" }
 ncui-webview-child = { version = "0.1.0", path = "crates/ncui-webview-child" }
 ncui-gpu = { version = "0.1.0", path = "crates/ncui-gpu" }
 ncui-gpu-renderer = { version = "0.1.0", path = "crates/ncui-gpu-renderer" }
+ncui-gpui = { version = "0.1.0", path = "crates/ncui-gpui" }
+ncui-kit-providers = { version = "0.1.0", path = "crates/ncui-kit-providers" }
 ncui-cli = { version = "0.1.0", path = "crates/ncui-cli" }
 # External dependencies. Kept deliberately small; see ADR-012 (dependency policy).
 serde = { version = "1.0.229", features = ["derive"] }

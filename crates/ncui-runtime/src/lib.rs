@@ -421,6 +421,35 @@ impl Runtime {
         self.consent_prompter = Some(prompter);
     }
 
+    /// Installs the caller's window host, over the origins given.
+    ///
+    /// The factory is the caller's because which host a window opens in is an embedding
+    /// decision: the runtime wires the navigation policy, the seam's action table, the
+    /// page grant and the display list around whatever factory it is handed, exactly as
+    /// it does for the wry host [`Runtime::with_host`] installs. A factory that routes
+    /// content kinds — [`ncui_webview::RoutingFactory`] — is exactly as welcome as a
+    /// single host, which is what makes a native window host reachable without the
+    /// runtime naming any one engine.
+    ///
+    /// The origins are the pages this runtime will load. A page that navigates anywhere
+    /// else is refused by the same policy the page's own messages are checked against, so
+    /// the allow-list is not a suggestion the engine may ignore.
+    ///
+    /// # Errors
+    ///
+    /// Never fails today; the `Result` is the shape [`Runtime::with_host`] established,
+    /// so a caller switching between the two does not restructure its error handling.
+    pub fn with_host_factory(
+        mut self,
+        factory: Box<dyn ncui_webview::HostFactory>,
+        allowed_origins: &[ncui_webview::Origin],
+    ) -> Result<Self> {
+        let actions = self.page_commands.actions();
+        self.windows =
+            window::hosted_surface_with(factory, allowed_origins, &actions, self.page_grant);
+        Ok(self)
+    }
+
     /// Installs a real window host, over the origins given.
     ///
     /// The origins are the pages this runtime will load. A page that navigates anywhere
@@ -435,10 +464,10 @@ impl Runtime {
     ///
     /// Returns [`ncui_core::ErrorKind::Validation`] when the `wry-host` feature is off.
     #[cfg(feature = "wry-host")]
-    pub fn with_host(mut self, allowed_origins: &[ncui_webview::Origin]) -> Result<Self> {
-        let actions = self.page_commands.actions();
-        self.windows = window::hosted_surface(allowed_origins, &actions, self.page_grant);
-        Ok(self)
+    pub fn with_host(self, allowed_origins: &[ncui_webview::Origin]) -> Result<Self> {
+        let factory: Box<dyn ncui_webview::HostFactory> =
+            Box::new(ncui_webview_wry::WryHostFactory);
+        self.with_host_factory(factory, allowed_origins)
     }
 
     /// Installs a real window host, over the origins given.

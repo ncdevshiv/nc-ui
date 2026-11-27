@@ -315,7 +315,7 @@ pub fn build(app: &Path, binary: &Path, out: &Path) -> Result<Bundle, BundleErro
         identity,
         scheme: manifest.scheme.clone().filter(|scheme| !scheme.is_empty()),
         associations: normalized_associations(&manifest.associations)?,
-        entry: manifest.entry.clone(),
+        entry: manifest.entry.to_string(),
         runtime: binary_name,
         files,
     };

@@ -227,25 +227,38 @@ impl Application {
             })?
         };
 
-        // The entry must be a file that exists. A window opened at a 404 is not an
+        // What the root window opens decides how the launch reaches it. A page entry names
+        // a file the server must actually have: a window opened at a 404 is not an
         // application running, and the failure is far easier to diagnose here than in a
-        // window the user has to look at.
-        let entry_path = manifest.entry_path(directory).map_err(|error| {
-            NcError::new(ErrorKind::Validation {
-                field: "entry".to_owned(),
-                reason: error.to_string(),
-            })
-            .operation("application::launch")
-        })?;
-        if !entry_path.is_file() {
-            return Err(NcError::new(ErrorKind::NotFound {
-                kind: "entry_page".to_owned(),
-                id: manifest.entry.clone(),
-            })
-            .operation("application::launch"));
-        }
-
-        let url = server.url_for(&manifest.entry);
+        // window the user has to look at. A native entry names no file at all — its content
+        // is built by a registered provider — so there is nothing to resolve, no existence
+        // to check, and no URL to open at; the request carries the provider and its props
+        // instead. The server starts either way, because an application whose root window
+        // is a native view may still open page windows, and they fetch what it serves.
+        let (url, base_request) = match &manifest.entry {
+            ncui_app::manifest::EntryPoint::Page(page) => {
+                let entry_path = manifest.entry_path(directory).map_err(|error| {
+                    NcError::new(ErrorKind::Validation {
+                        field: "entry".to_owned(),
+                        reason: error.to_string(),
+                    })
+                    .operation("application::launch")
+                })?;
+                if !entry_path.is_file() {
+                    return Err(NcError::new(ErrorKind::NotFound {
+                        kind: "entry_page".to_owned(),
+                        id: page.clone(),
+                    })
+                    .operation("application::launch"));
+                }
+                let url = server.url_for(page);
+                (url.clone(), WindowRequest::new(url))
+            }
+            ncui_app::manifest::EntryPoint::Native(native) => (
+                String::new(),
+                WindowRequest::native(native.provider.clone()).with_props(native.props.clone()),
+            ),
+        };
         let origin = Origin::new(Scheme::Http, "127.0.0.1", Some(server.local_addr().port()));
 
         let mut runtime = Runtime::start(limits)?;
@@ -349,7 +362,9 @@ impl Application {
         // moving and resizing the window, and it wins.
         let remembered = read_window_state(&window_state);
 
-        let mut request = WindowRequest::new(url.clone()).with_title(
+        // Everything the manifest asks of the window applies to either content kind: a
+        // native view is still a window with a frame, a size and a place it was left.
+        let mut request = base_request.with_title(
             manifest
                 .window
                 .title
@@ -536,6 +551,7 @@ impl Application {
         tracing::info!(
             application = %manifest.name,
             version = %manifest.version,
+            content = request.content.kind_name(),
             url = %url,
             "the application is running"
         );
@@ -855,6 +871,9 @@ impl Application {
     }
 
     /// The URL the application's page is served at.
+    ///
+    /// Empty when the root window is a native view rather than a page: nothing is served
+    /// to it, and reporting a URL anyway would be a lie dressed as an answer.
     #[must_use]
     pub fn url(&self) -> &str {
         &self.url

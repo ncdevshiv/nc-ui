@@ -428,6 +428,37 @@ const EVENT_PAGE: &str = r#"<!doctype html>
 </body></html>
 "#;
 
+
+/// Register the `record` page command the page-driven tests share: the page reports what it
+/// observed, the test asserts on what arrived.
+fn record_command(
+    recorder: Arc<Mutex<Vec<serde_json::Value>>>,
+) -> impl FnOnce(&mut ncui_runtime::Runtime) -> Result<(), ncui_core::NcError> {
+    move |runtime| {
+        let _registration = runtime
+            .register_page_command(
+                "record",
+                CapabilitySet::empty(),
+                "Record what the page sent.",
+                move |payload| {
+                    recorder
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(payload.clone());
+                    Ok(serde_json::json!({ "echoed": true }))
+                },
+            )
+            .map_err(|error| {
+                ncui_core::NcError::new(ncui_core::ErrorKind::Validation {
+                    field: "record".to_owned(),
+                    reason: error.to_string(),
+                })
+                .operation("test::launch")
+            })?;
+        Ok(())
+    }
+}
+
 #[test]
 fn a_page_hears_its_own_window_resized() {
     require_real_window!();
@@ -443,29 +474,7 @@ fn a_page_hears_its_own_window_resized() {
         Limits::default(),
         None,
         None,
-        move |runtime| {
-            let _registration = runtime
-                .register_page_command(
-                    "record",
-                    CapabilitySet::empty(),
-                    "Record what the page sent.",
-                    move |payload| {
-                        recorder
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .push(payload.clone());
-                        Ok(serde_json::json!({ "echoed": true }))
-                    },
-                )
-                .map_err(|error| {
-                    ncui_core::NcError::new(ncui_core::ErrorKind::Validation {
-                        field: "record".to_owned(),
-                        reason: error.to_string(),
-                    })
-                    .operation("test::launch")
-                })?;
-            Ok(())
-        },
+        record_command(recorder),
     )
     .expect("the application launches");
 

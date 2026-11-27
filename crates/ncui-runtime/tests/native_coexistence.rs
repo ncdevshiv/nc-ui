@@ -64,12 +64,19 @@ impl NativeViewInstance for CoexistenceInstance {
     }
 }
 
+/// Display-gated skips must be audible in test output — a silently-passing suite would
+/// hide that nothing was proven on a headless machine.
+#[allow(clippy::print_stderr, reason = "display-gated skip diagnostic")]
+fn note_skip(message: &str) {
+    eprintln!("{message}");
+}
+
 /// The provider the coexistence window is opened with.
 #[derive(Debug)]
 struct CoexistenceProvider;
 
 impl NativeViewProvider for CoexistenceProvider {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "ncui-test::coexistence"
     }
 
@@ -102,7 +109,7 @@ fn gpui_and_wry_windows_coexist_in_one_process() {
     let gpui_factory = match GpuiHostFactory::new() {
         Ok(factory) => factory,
         Err(error) => {
-            eprintln!("no display for the gpui engine, skipping: {error}");
+            note_skip(&format!("no display for the gpui engine, skipping: {error}"));
             return;
         }
     };
@@ -153,7 +160,7 @@ fn gpui_and_wry_windows_coexist_in_one_process() {
         // A page window that did not open is not a coexistence failure if the engine
         // reported why: wry's own smoke contract allows a machine to refuse. Report it
         // rather than fail, and let the native half's proof stand.
-        eprintln!("the page window did not open; the native half is still proven");
+        note_skip("the page window did not open; the native half is still proven");
     }
 
     // The native window answers operations while the page loop is running: geometry is
@@ -182,7 +189,7 @@ fn a_native_window_outlives_the_close_of_a_page_window() {
     let gpui_factory = match GpuiHostFactory::new() {
         Ok(factory) => factory,
         Err(error) => {
-            eprintln!("no display for the gpui engine, skipping: {error}");
+            note_skip(&format!("no display for the gpui engine, skipping: {error}"));
             return;
         }
     };

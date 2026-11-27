@@ -74,10 +74,10 @@ pub const fn decide_host_routing(page_host: bool, native_host: bool) -> HostRout
 /// What happened when composition looked for a native host.
 ///
 /// `Disabled` and `Failed` are different answers. A disabled feature means the build never
-/// promised native content, so the page host is installed exactly as it always was. A failed
-/// engine means the build *did* promise it and could not deliver: the page host is therefore
-/// put behind a router whose native half is absent, so a native window-open is refused with
-/// a diagnostic naming the missing host rather than being handed to the page engine.
+/// promised native content, so page behaviour remains exactly as it always was. A failed
+/// engine means the build *did* promise it and could not deliver: the reason is carried beside
+/// the router whose native half is absent, so a native window-open is refused with a
+/// diagnostic naming the missing host rather than being handed to the page engine.
 pub enum NativeHostOutcome {
     /// This build does not carry the native host feature.
     Disabled,
@@ -156,11 +156,10 @@ impl HostComposition {
 
 /// Composes the page and native factories into the one factory a runtime can install.
 ///
-/// A page-only composition with native support disabled returns the page factory itself,
-/// preserving the exact pre-native-host behaviour. Once native support is part of the
-/// build, even a failed engine produces a router: the router is what turns a later native
-/// window-open into the explicit refusal "no native host is installed" instead of a
-/// misrouted page-engine failure.
+/// A page-only composition still puts the page factory behind the router. For a page the
+/// router delegates unchanged, so the pre-native-host behaviour is preserved; for a native
+/// request it is what produces the explicit refusal "no native host is installed" instead of
+/// handing a window with no URL to an engine that only understands pages.
 #[must_use]
 pub fn compose_host_factory(
     page_host: Option<Box<dyn HostFactory>>,
@@ -178,10 +177,9 @@ pub fn compose_host_factory(
                 .with_page_host(page)
                 .with_native_host(native),
         )),
-        (Some(page), None) if native_configured => Some(Box::new(
+        (Some(page), None) => Some(Box::new(
             ncui_webview::RoutingFactory::new().with_page_host(page),
         )),
-        (Some(page), None) => Some(page),
         (None, Some(native)) => Some(Box::new(
             ncui_webview::RoutingFactory::new().with_native_host(native),
         )),
@@ -216,6 +214,10 @@ pub fn platform_host_composition() -> HostComposition {
 
 /// The page host this build carries, when it carries one.
 #[cfg(feature = "wry-host")]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the disabled form returns `None`; both forms keep one shape so composition does not branch"
+)]
 fn page_host() -> Option<Box<dyn HostFactory>> {
     Some(Box::new(ncui_webview_wry::WryHostFactory))
 }
@@ -231,8 +233,17 @@ fn page_host() -> Option<Box<dyn HostFactory>> {
 }
 
 /// Starts the native host this build carries, when it carries one.
+///
+/// Kit registration happens before the engine starts because registration is process-wide
+/// and the first window may be opened immediately afterwards. It is deliberately tied to a
+/// separate feature: the engine and one stock provider set are different choices.
 #[cfg(feature = "gpui-host")]
 fn native_host() -> NativeHostOutcome {
+    #[cfg(feature = "kit-providers")]
+    {
+        let registered = ncui_kit_providers::register_all();
+        tracing::info!(registered, "nc-ui-kit native view providers registered");
+    }
     match ncui_gpui::GpuiHostFactory::new() {
         Ok(factory) => NativeHostOutcome::Ready(Box::new(factory)),
         Err(error) => NativeHostOutcome::Failed(error.to_string()),
@@ -347,24 +358,41 @@ mod tests {
         }
     }
 
-    fn page_factory() -> Option<Box<dyn HostFactory>> {
-        Some(Box::new(DummyHost))
+    fn page_factory() -> Box<dyn HostFactory> {
+        Box::new(DummyHost)
     }
 
     #[test]
-    fn page_only_composition_keeps_the_page_host_without_a_native_promise() {
-        let composition = compose_host_factory(page_factory(), NativeHostOutcome::Disabled);
+    fn page_only_composition_keeps_pages_and_refuses_native_explicitly() {
+        let composition = compose_host_factory(Some(page_factory()), NativeHostOutcome::Disabled);
 
         assert_eq!(composition.routing(), HostRouting::PageOnly);
         assert!(!composition.native_configured());
         assert_eq!(composition.native_error(), None);
-        assert!(composition.into_factory().is_some());
+        let factory = composition.into_factory().expect("the page host composes");
+        let request = ncui_webview::WindowRequest::native("nc-ui-kit::gallery");
+        let seam = std::sync::Arc::new(ncui_webview::HostSeam::new(
+            ncui_webview::WindowLifecycle::new(),
+            ncui_webview::CapabilityGrant::none(),
+            ncui_webview::NavigationPolicy::new(&[]),
+        ));
+
+        assert!(
+            factory
+                .spawn(ncui_core::WindowId::new(), &request, &seam)
+                .is_none()
+        );
+        let error = factory.last_error().expect("the refusal carries a reason");
+        assert!(
+            error.contains("no native host is installed"),
+            "the refusal names the missing native host: {error}"
+        );
     }
 
     #[test]
     fn native_failure_keeps_pages_and_carries_the_reason() {
         let composition = compose_host_factory(
-            page_factory(),
+            Some(page_factory()),
             NativeHostOutcome::Failed("engine unavailable".to_owned()),
         );
 
@@ -375,9 +403,37 @@ mod tests {
     }
 
     #[test]
+    fn native_failure_routes_native_open_to_an_explicit_refusal() {
+        let composition = compose_host_factory(
+            Some(page_factory()),
+            NativeHostOutcome::Failed("engine unavailable".to_owned()),
+        );
+        let factory = composition
+            .into_factory()
+            .expect("the page host still composes");
+        let request = ncui_webview::WindowRequest::native("nc-ui-kit::gallery");
+        let seam = std::sync::Arc::new(ncui_webview::HostSeam::new(
+            ncui_webview::WindowLifecycle::new(),
+            ncui_webview::CapabilityGrant::none(),
+            ncui_webview::NavigationPolicy::new(&[]),
+        ));
+
+        assert!(
+            factory
+                .spawn(ncui_core::WindowId::new(), &request, &seam)
+                .is_none()
+        );
+        let error = factory.last_error().expect("the refusal carries a reason");
+        assert!(
+            error.contains("no native host is installed"),
+            "the refusal names the missing native host: {error}"
+        );
+    }
+
+    #[test]
     fn two_hosts_compose_as_routed() {
         let composition = compose_host_factory(
-            page_factory(),
+            Some(page_factory()),
             NativeHostOutcome::Ready(Box::new(DummyHost)),
         );
 

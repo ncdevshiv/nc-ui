@@ -80,6 +80,7 @@ the registry disagree, the registry is right and this table is the bug.
 | Window presentation: a page makes its own window fullscreen, maximised, minimised, hidden or focused, reads back the frame the platform draws, and is told when it is resized or moved | Implemented |
 | Window shape: a page renames, moves, resizes, floats or fixes its own window | Implemented |
 | The platform's theme: a page asks whether the system is light or dark, and is told when it changes | Implemented |
+| Native windows: a trusted provider's GPUI view in its own top-level window, opened through the same capability check as a page | Implemented on Windows — providers are host-linked Rust, trusted by review rather than sandboxed; Linux and macOS unverified |
 | Page preferences: `state.save` / `state.load` / `state.remove`, bounded and per application | Implemented |
 | Accessibility: semantic tree, focus order, keyboard routing | Implemented |
 | Global shortcuts: the manifest declares them, the runtime holds the key, the page hears the press | Implemented |
@@ -142,6 +143,8 @@ crates/
   ncui-component       layer 2  the component host: bounded WASM execution behind the ABI
   ncui-webview-wry     layer 3  the `wry`/`tao` binding: a real window, a real page
   ncui-gpu-renderer     layer 3  the `wgpu` binding: device, surface, render pass, text
+  ncui-gpui            layer 3  the `gpui` binding: trusted native views in their own windows
+  ncui-kit-providers   layer 4  the nc-ui-kit widgets, registered as native-view providers
   ncui-runtime         layer 4  composition, JSON-RPC agent API, health
   ncui-cli             layer 5  machine-readable status, introspection, and `ncui run`
   ncui-bench           layer 5  latency and throughput harness with committed baselines
@@ -317,6 +320,53 @@ floats and whether the user may resize it. A field the page does not name is lef
 page that renames itself does not drag the window back to where it was created, and the
 window list is updated only after the platform took the change — so it describes the window
 that exists rather than the one that was asked for.
+
+## Native windows
+
+A page window is untrusted content in a sandboxed engine; everything it can do crosses a
+capability-checked seam. A **native window** is the opposite bargain: its content is a Rust
+view compiled into the host — a GPUI widget tree, today the nc-ui-kit widgets — which means
+it renders and handles input natively, and it means the sandbox cannot apply to it. ADR-020
+is the honest statement of that bargain: native views are a second trust class, trusted by
+host-linking and review the way `ncui-native` itself is, never by content. A page can no
+more ship a native provider than it can ship a `.dll`; providers are registered by the
+embedder at the composition root, before the runtime serves anything.
+
+What a page or an agent *can* do is ask for a window whose content a registered provider
+builds, through the same capability check as any window:
+
+```js
+const settings = await window.ncui.invoke("create_window", {
+  content: {
+    kind: "native",
+    provider: "nc-ui-kit::settings-tabs",
+    props: { /* the provider's own small JSON object */ },
+  },
+  title: "Settings",
+  width: 640,
+  height: 480,
+});
+```
+
+The conversation with the view is bounded in both directions. Props and command payloads
+are at most 65 536 bytes serialized and actions at most 128 bytes, checked before anything
+is sent; events queue at most 256 per window, and when a view outruns its consumer the
+oldest are dropped *and the drop is counted* — the count is how an operator learns the
+queue overflowed at all. An agent reads the conversation with `ncui.window.native.events`
+(everything since the last drain, plus the dropped count) and writes it with
+`ncui.window.native.command` (`props` replaces the view's props; `action` invokes one of
+the provider's own verbs). Refusals carry stable machine-readable codes —
+`native_window_gone`, `native_view_refused`, `native_engine_unavailable`,
+`native_out_of_bounds` — because the code is the part of a refusal an agent branches on.
+
+The honest limits, because they shape what native windows are for. A native window is its
+own top-level window: GPUI owns its platform window and swapchain, so a native view is
+never composited inside a page window — it is a sibling, not an island. GPUI 0.2.2 can
+resize a window but cannot reposition one programmatically, cannot report every state the
+platform window is in, and cannot reverse every transition it can perform; the host answers
+those cases with a typed refusal rather than a pretend success. And the engine is
+Windows-verified today: the dependency is feature-gated off, so a headless or non-Windows
+build neither compiles GPUI nor pretends to.
 
 ## Running an application
 

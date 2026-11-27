@@ -6,8 +6,9 @@ composition root by calling `register_all()` before the runtime serves.
 
 ## Providers and props
 
-All props are JSON objects. `null` is accepted as the empty object for providers whose
-fields all have defaults. Unknown fields are refused, because a mistyped field should
+All props are JSON objects. Top-level `null` is accepted as the empty object for
+providers whose fields all have defaults; a field-level `null` is a type error rather
+than a synonym for omission. Unknown fields are refused, because a mistyped field should
 surface where the mistake was made rather than silently changing a control's meaning.
 Strings and arrays have the bounds listed below in addition to the runtime's outer
 64 KiB props bound.

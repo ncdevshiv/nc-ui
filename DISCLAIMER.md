@@ -38,7 +38,14 @@ deserve to know what you are evaluating before you read a single line of it.
   the gates measure. They do not catch what nobody thought to measure.
 - **That the code is secure.** A capability model, an audit trail, and a
   path-containment check that pass their tests are still untrusted until an
-  independent human reviews them and fails to break them.
+  independent human reviews them and fails to break them. Note in particular
+  that the runtime has *two* trust classes: pages and WASM components are
+  untrusted content inside a sandbox, but native-view providers are Rust code
+  linked into the host process itself — they run with the host's full
+  privileges by design, and the only thing standing between a bad provider and
+  your machine is the review it got before someone linked it (see
+  `docs/adr/ADR-020-native-view-host.md`). Do not link a provider you would not
+  run as a program.
 - **That the code is production-ready.** It is not. Treat NC-UI as an
   experimental runtime under active development, not as a dependency you ship
   to users today.

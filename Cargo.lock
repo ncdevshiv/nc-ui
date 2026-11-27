@@ -4306,6 +4306,7 @@ dependencies = [
  "ncui-app",
  "ncui-core",
  "ncui-gpui",
+ "ncui-kit-providers",
  "ncui-native",
  "ncui-observability",
  "ncui-runtime",

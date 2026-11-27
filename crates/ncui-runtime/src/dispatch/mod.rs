@@ -125,7 +125,7 @@ pub fn method_table() -> Vec<MethodDescription> {
         ),
         entry(
             "ncui.window.create",
-            "Open a window on a URL. Requires a host to be installed.",
+            "Open a window — a page on a URL, or a native view when the content says so. Requires a host to be installed.",
             CapabilitySet::empty().with(Capability::Window),
             false,
         ),

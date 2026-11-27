@@ -221,6 +221,10 @@ fn comparison_approval_allowed(
 }
 
 #[cfg(feature = "wry-host")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "running an application is one ordered lifecycle — compose the host, open the window, serve it, and report its teardown — and splitting it would hide the drop order that keeps the native engine safe"
+)]
 fn run_app(
     directory: &str,
     watch: bool,

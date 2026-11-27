@@ -187,12 +187,25 @@ disease is present.
 
 ## Implementation status
 
-**In progress.** The layer-2 contract is implemented and tested without a display:
-`WindowContent` and its validation in `ncui-webview`, the event/command/error types with
-their bounds, `NativeViewBackend`, and `RoutingFactory` routing by content kind. The
-navigation-policy exemption for native windows is in place. In `ncui-gpui`, the provider
-contract, the bounded event sink with its drop counter, and the process-wide registry
-exist; the engine thread and the window host that implements the backend over real gpui
-windows land with the `gpui-engine` feature. The layering is enforced — `ncui-gpui` sits
-at layer 3 beside `ncui-webview-wry`, and `ncui-kit-providers` at layer 4 — by the same
-`ncui-arch` check that has always enforced it.
+**Implemented on Windows.** The layer-2 contract is implemented and tested without a
+display: `WindowContent` and its validation in `ncui-webview`, the event/command/error
+types with their bounds, `NativeViewBackend`, and `RoutingFactory` routing by content
+kind. The navigation-policy exemption for native windows is in place. In `ncui-gpui`, the
+engine thread owns `gpui::Application` behind a command channel, a hidden anchor window
+keeps the loop alive across the last user window closing, and the window host implements
+the backend over real windows — proven on Windows by display-gated tests in
+`crates/ncui-gpui/tests/native_window.rs` (engine startup, window lifecycle, command and
+event round-trips, unknown-provider refusal, two-window independence) and by the wry/gpui
+event-loop coexistence suite in `crates/ncui-runtime/tests/native_coexistence.rs`. The
+runtime speaks the protocol end to end — `ncui.window.create` with native content,
+`ncui.window.native.events` draining with drop deltas, `ncui.window.native.command`
+delivering props updates and verb invocations — covered by the pipeline tests in
+`crates/ncui-runtime/tests/native_windows.rs`. `ncui-kit-providers` registers six real
+nc-ui-kit widgets with strictly validated props, tested headlessly through GPUI's own test
+platform in `crates/ncui-kit-providers/tests/providers.rs`. The layering is enforced —
+`ncui-gpui` sits at layer 3 beside `ncui-webview-wry`, and `ncui-kit-providers` at layer
+4 — by the same `ncui-arch` check that has always enforced it. What remains open: the
+manifest schema does not yet declare a native root window (a native window is opened
+through the window surface, not named as an application's entry), GPUI 0.2.2's asset
+source is fixed at application construction so provider SVG assets are not yet installed,
+and neither Linux nor macOS has been verified.

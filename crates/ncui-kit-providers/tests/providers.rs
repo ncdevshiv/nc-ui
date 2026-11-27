@@ -163,6 +163,14 @@ fn every_provider_builds_updates_and_invokes_headlessly(cx: &mut TestAppContext)
             invoked.unwrap_err()
         );
         built.visual.run_until_parked();
+
+        let event = built
+            .events
+            .poll()
+            .expect("an accepted state-changing command emits its native event");
+        assert_eq!(event.source, id.trim_start_matches("nc-ui-kit::"));
+        assert_eq!(event.action, event_action);
+        assert_eq!(event.payload, event_payload);
         assert!(
             built.weak.upgrade().is_some(),
             "{id} lost its root entity across commands"

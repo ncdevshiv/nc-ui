@@ -48,38 +48,58 @@ The name belongs to the page rather than to the runtime, because the page is wha
 windows it opens are two windows. `notes.html` finds itself in `list_windows` and prints the place
 it is at, so the remembered geometry is visible rather than taken on faith.
 
-## A native window, when the kit bridge lands
+## A native window beside the page
 
-`create_window` can ask for native content instead of a page. The content is part of the window
-request, so the request carries no `url` when its kind is native:
+The **Open the native settings window** button asks for a window whose content is not a page.
+`create_window` is the page-bridge action that reaches the runtime's `ncui.window.create` method;
+when the content kind is native the request carries no `url`, because there is no document to
+load:
 
 ```js
 window.ncui.invoke("create_window", {
-  title: "Notifications",
-  width: 420,
-  height: 480,
+  title: "Counter settings",
+  width: 560,
+  height: 420,
+  remember: "native-settings",
   content: {
     kind: "native",
-    provider: "nc-ui-kit::sonner",
+    provider: "nc-ui-kit::settings-tabs",
     props: {
-      position: "bottom-right"
+      active: "general",
+      panels: {
+        general: "The counter is at 0. This panel is rendered by nc-ui-kit, not by the DOM."
+      }
     }
   }
 });
 ```
 
-`props` may be omitted when the provider's defaults are the desired configuration. A provider
-identifier is lowercase ASCII, at most 128 bytes, and may use digits plus `.`, `_`, `-` and `:`
-as separators; the serialized props are bounded at 64 KiB. The manifest schema in this tree still
-accepts only a string `entry`; the native object form for an application entry is part of the same
-unfinished kit-bridge work rather than something this example can demonstrate today.
+The provider is real host-linked Rust from `ncui-kit-providers`, not a widget imitated in the
+page. `props` may be omitted when the provider's defaults are the desired configuration. A
+provider identifier is lowercase ASCII, at most 128 bytes, and may use digits plus `.`, `_`, `-`
+and `:` as separators; the serialized props are bounded at 64 KiB before the provider's own
+stricter field validation runs.
 
-There is deliberately no native-window button in this example yet. A native view is host-linked
-Rust code, not a WASM component, and the provider demonstration is blocked until the kit bridge
-lands and registers a real provider. Faking one in the page would demonstrate nothing about the
-native path. In a binary built with the CLI's `gpui-host` feature, the GPUI host serves these
-requests while the wry host continues to serve pages; if the GPUI engine cannot start, pages
-remain available and native window creation is refused with the missing-host diagnostic.
+The stock providers are explicit too. The CLI's `gpui-host` feature carries only the native
+engine, for embedders registering their own host-linked Rust; `kit-providers` implies it and
+registers the six kit providers at composition time. A runnable binary and a bundle using it are
+therefore:
+
+```sh
+cargo build --release -p ncui-cli --no-default-features --features "wry-host-gpu kit-providers"
+ncui build examples/counter --binary target/release/ncui
+```
+
+On Windows the binary path is `target/release/ncui.exe`. In that binary the wry host serves this
+page while the GPUI host serves the native settings window. If the GPUI engine cannot start, the
+page remains available and the button's refusal names the missing native host. In the default
+`standard` and `minimal` bundle profiles there is no GPUI dependency at all, so the same button
+is refused explicitly rather than opening a blank page.
+
+The manifest schema in this tree still accepts only a string `entry`. A native object as the
+application's first window is the remaining schema work in `ncui-app`; this example therefore
+demonstrates native content as a second window rather than pretending the entry form already
+exists.
 
 ## What the plugin demonstrates
 

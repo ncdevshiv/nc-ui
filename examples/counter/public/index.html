@@ -132,6 +132,12 @@
         again: it comes back where you left it.
       </p>
 
+      <button id="native-settings" type="button">Open the native settings window</button>
+      <p class="status" id="native-settings-status">
+        In a kit-enabled binary this is a GPUI window rendered by host-linked Rust. In a
+        page-only build the runtime refuses it explicitly rather than opening a blank page.
+      </p>
+
       <button id="fullscreen" type="button">Go fullscreen</button>
       <p class="status" id="fullscreen-status">
         The page asks the runtime, the runtime asks the platform, and what comes back is what

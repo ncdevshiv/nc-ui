@@ -498,6 +498,14 @@ mod tests {
     }
 
     #[test]
+    fn a_field_level_null_is_not_a_synonym_for_omission() {
+        let error = decode::<Example>("provider", &json!({"label": null}), &["label"], shape)
+            .expect_err("only the top-level null is the empty-object shorthand");
+        assert!(error.to_string().contains("label"));
+        assert!(error.to_string().contains("null"));
+    }
+
+    #[test]
     fn action_payload_helpers_name_the_payload_field() {
         let payload = json!({"checked": "yes"});
         let object = payload_object("provider", "set_checked", &payload, &["checked"])

@@ -38,6 +38,11 @@ gpui-host = [
     "dep:ncui-gpui",
     "ncui-gpui/gpui-engine",
 ]
+# The stock nc-ui-kit providers, registered into the GPUI host before it serves. This is
+# separate from `gpui-host` because the host is engine infrastructure and the kit is one
+# provider set: an embedder with its own host-linked providers should not pay for widgets it
+# does not use, while a packaged application has no other way to register host-linked Rust.
+kit-providers = ["gpui-host", "dep:ncui-kit-providers"]
 
 [dependencies]
 ncui-core = { workspace = true }
@@ -48,6 +53,8 @@ ncui-webview = { workspace = true }
 ncui-webview-wry = { workspace = true, optional = true }
 # Optional: the native engine is only linked when `gpui-host` is enabled.
 ncui-gpui = { workspace = true, optional = true }
+# Optional: the stock kit widgets are only linked when `kit-providers` is enabled.
+ncui-kit-providers = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 ncui-native = { workspace = true }

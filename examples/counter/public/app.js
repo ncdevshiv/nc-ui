@@ -11,6 +11,8 @@ const pluginButton = document.getElementById("plugin");
 const pluginElement = document.getElementById("plugin-status");
 const notesButton = document.getElementById("notes");
 const notesElement = document.getElementById("notes-status");
+const nativeSettingsButton = document.getElementById("native-settings");
+const nativeSettingsElement = document.getElementById("native-settings-status");
 const fullscreenButton = document.getElementById("fullscreen");
 const fullscreenElement = document.getElementById("fullscreen-status");
 const islandElement = document.getElementById("island");
@@ -185,6 +187,46 @@ notesButton.addEventListener("click", () => {
     .catch((error) => {
       notesElement.textContent = `The runtime refused create_window: ${error.code} — ${error.message}`;
       notesButton.disabled = false;
+    });
+});
+
+// The native settings window is the other side of the routing story: this same page asks for
+// a window whose content is not a page at all. There is no URL in the request — a native view
+// is host-linked Rust named by provider, with JSON props bounded by the window contract. The
+// provider is real kit code rather than something imitated here; in a binary that did not link
+// and register it, the refusal below is the demonstration of the failure path.
+nativeSettingsButton.addEventListener("click", () => {
+  nativeSettingsButton.disabled = true;
+  nativeSettingsElement.textContent = "Opening the native settings window…";
+  window.ncui
+    .invoke("create_window", {
+      title: "Counter settings",
+      width: 560,
+      height: 420,
+      remember: "native-settings",
+      content: {
+        kind: "native",
+        provider: "nc-ui-kit::settings-tabs",
+        props: {
+          active: "general",
+          panels: {
+            general: `The counter is at ${count}. This panel is rendered by nc-ui-kit, not by the DOM.`,
+            appearance: "The kit provider applies the platform theme it is given.",
+            advanced: "Native events and commands cross the runtime's bounded channel.",
+          },
+        },
+      },
+    })
+    .then((answer) => {
+      nativeSettingsElement.textContent =
+        `Native settings is open as ${answer.id}. It is a GPUI window beside this page, ` +
+        `not a second webview.`;
+      nativeSettingsButton.disabled = false;
+    })
+    .catch((error) => {
+      nativeSettingsElement.textContent =
+        `The runtime refused the native window: ${error.code} — ${error.message}`;
+      nativeSettingsButton.disabled = false;
     });
 });
 

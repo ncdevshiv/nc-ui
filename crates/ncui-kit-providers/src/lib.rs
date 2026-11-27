@@ -10,9 +10,10 @@
 //! # Registered providers
 //!
 //! [`register_all`] registers six providers. Their props are deliberately small,
-//! strictly validated JSON objects. `null` is treated as an empty object where every
-//! field has a default; otherwise required fields are reported by name. Unknown fields
-//! are refused because a mistyped field should not silently become a different control.
+//! strictly validated JSON objects. Top-level `null` is treated as an empty object where
+//! every field has a default; a field-level `null` is a type error, not a synonym for
+//! omission. Unknown fields are refused because a mistyped field should not silently
+//! become a different control.
 //!
 //! * `nc-ui-kit::button` — `label`, `variant`, `size`, `disabled`, `loading` and
 //!   `full_width`. Emits `button`/`clicked`; accepts the `click` command.

@@ -8,9 +8,13 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use gpui::{div, px, AppContext as _, Context, IntoElement, ParentElement, Render, Styled, Window};
-use ncui_gpui::{NativeEventSink, NativeViewInstance, NativeViewProvider};
+use gpui::{
+    AnyView, App, AppContext as _, Context, Entity, IntoElement, ParentElement, Render, Styled,
+    Window, div, px,
+};
 use nc_ui_kit::theme::Theme;
+use ncui_gpui::{NativeEventSink, NativeViewContext, NativeViewInstance, NativeViewProvider};
+use serde_json::Value;
 
 use crate::KitProviderError;
 
@@ -22,7 +26,7 @@ use crate::KitProviderError;
 /// a detail of `build` so the same validation governs creation and later replacement.
 pub trait KitWidget: Send + Sync + 'static {
     /// The concrete gpui view type this widget constructs.
-    type View: gpui::Render + 'static;
+    type View: Render + 'static;
     /// The typed props the widget uses after validation.
     type Props: Clone + Send + 'static;
 
@@ -40,7 +44,7 @@ pub trait KitWidget: Send + Sync + 'static {
     ///
     /// Returns the typed refusal when the JSON is not an object-shaped props document or
     /// any field fails the widget's schema.
-    fn parse_props(props: &serde_json::Value) -> Result<Self::Props, KitProviderError>;
+    fn parse_props(props: &Value) -> Result<Self::Props, KitProviderError>;
 
     /// Constructs the typed child entity for one window.
     ///
@@ -55,9 +59,9 @@ pub trait KitWidget: Send + Sync + 'static {
     fn build_child(
         props: &Self::Props,
         events: Arc<NativeEventSink>,
-        window: &mut gpui::Window,
-        cx: &mut gpui::App,
-    ) -> Result<gpui::Entity<Self::View>, KitProviderError>;
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<Entity<Self::View>, KitProviderError>;
 
     /// Performs one provider-defined verb on the typed child.
     ///
@@ -71,13 +75,13 @@ pub trait KitWidget: Send + Sync + 'static {
     /// Returns the typed refusal when the verb is unknown, its payload is invalid, or
     /// the view's current state does not admit it.
     fn invoke_child(
-        view: &gpui::Entity<Self::View>,
+        view: &Entity<Self::View>,
         props: &Self::Props,
         events: Arc<NativeEventSink>,
         action: &str,
-        payload: &serde_json::Value,
-        window: &mut gpui::Window,
-        cx: &mut gpui::App,
+        payload: &Value,
+        window: &mut Window,
+        cx: &mut App,
     ) -> Result<(), KitProviderError>;
 
     /// The padding around the child in logical pixels.
@@ -102,7 +106,9 @@ impl<W: KitWidget> KitProvider<W> {
     /// A provider marker ready for registration.
     #[must_use]
     pub const fn new() -> Self {
-        Self { marker: PhantomData }
+        Self {
+            marker: PhantomData,
+        }
     }
 }
 
@@ -125,18 +131,18 @@ impl<W: KitWidget> NativeViewProvider for KitProvider<W> {
 
     fn build(
         &self,
-        context: ncui_gpui::NativeViewContext,
-        window: &mut gpui::Window,
-        cx: &mut gpui::App,
-    ) -> Result<(gpui::AnyView, Box<dyn NativeViewInstance>), String> {
+        context: NativeViewContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<(AnyView, Box<dyn NativeViewInstance>), String> {
         let events = Arc::clone(&context.events);
         let props = W::parse_props(&context.props).map_err(|error| error.to_string())?;
         let child = W::build_child(&props, Arc::clone(&events), window, cx)
             .map_err(|error| error.to_string())?;
-        let child_view: gpui::AnyView = child.clone().into();
+        let child_view: AnyView = child.clone().into();
         let padding = W::padding();
         let root = cx.new(|cx| KitRoot::new(child_view, padding, cx));
-        let root_view: gpui::AnyView = root.clone().into();
+        let root_view: AnyView = root.clone().into();
         Ok((
             root_view,
             Box::new(KitInstance::<W> {
@@ -151,8 +157,8 @@ impl<W: KitWidget> NativeViewProvider for KitProvider<W> {
 
 /// The per-window half of a provider: typed child plus the root that displays it.
 struct KitInstance<W: KitWidget> {
-    root: gpui::Entity<KitRoot>,
-    child: gpui::Entity<W::View>,
+    root: Entity<KitRoot>,
+    child: Entity<W::View>,
     props: W::Props,
     events: Arc<NativeEventSink>,
 }
@@ -160,14 +166,14 @@ struct KitInstance<W: KitWidget> {
 impl<W: KitWidget> NativeViewInstance for KitInstance<W> {
     fn update_props(
         &mut self,
-        props: &serde_json::Value,
-        window: &mut gpui::Window,
-        cx: &mut gpui::App,
+        props: &Value,
+        window: &mut Window,
+        cx: &mut App,
     ) -> Result<(), String> {
         let next_props = W::parse_props(props).map_err(|error| error.to_string())?;
         let child = W::build_child(&next_props, Arc::clone(&self.events), window, cx)
             .map_err(|error| error.to_string())?;
-        let child_view: gpui::AnyView = child.clone().into();
+        let child_view: AnyView = child.clone().into();
         self.root.update(cx, |root, cx| {
             root.replace_child(child_view);
             cx.notify();
@@ -180,9 +186,9 @@ impl<W: KitWidget> NativeViewInstance for KitInstance<W> {
     fn invoke(
         &mut self,
         action: &str,
-        payload: &serde_json::Value,
-        window: &mut gpui::Window,
-        cx: &mut gpui::App,
+        payload: &Value,
+        window: &mut Window,
+        cx: &mut App,
     ) -> Result<(), String> {
         W::invoke_child(
             &self.child,
@@ -204,19 +210,19 @@ impl<W: KitWidget> NativeViewInstance for KitInstance<W> {
 /// copy of the same window chrome. It is intentionally not public: the provider contract
 /// type-erases it, and exposing it would invite hosts to depend on implementation chrome.
 pub(crate) struct KitRoot {
-    child: gpui::AnyView,
+    child: AnyView,
     padding: f32,
 }
 
 impl KitRoot {
-    fn new(child: gpui::AnyView, padding: f32, cx: &mut Context<'_, Self>) -> Self {
+    fn new(child: AnyView, padding: f32, cx: &mut Context<'_, Self>) -> Self {
         // `Theme::set_global` notifies global observers rather than every view. Observing
         // here is what makes a runtime theme change reach windows that are already open.
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
         Self { child, padding }
     }
 
-    fn replace_child(&mut self, child: gpui::AnyView) {
+    fn replace_child(&mut self, child: AnyView) {
         self.child = child;
     }
 }

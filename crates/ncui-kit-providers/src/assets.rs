@@ -145,7 +145,11 @@ fn resolution(
     is_dir: &impl Fn(&Path) -> bool,
 ) -> AssetResolution {
     let complete = is_dir(&root.join("assets").join("icons")) && is_dir(&root.join("themes"));
-    AssetResolution { root, source, complete }
+    AssetResolution {
+        root,
+        source,
+        complete,
+    }
 }
 
 /// A filesystem-backed gpui asset source rooted at the kit's `assets` directory.
@@ -195,7 +199,11 @@ impl gpui::AssetSource for KitAssets {
         let resolved = match self.resolve_path(path) {
             Ok(path) => path,
             Err(error) => {
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string()).into());
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    error.to_string(),
+                )
+                .into());
             }
         };
         match std::fs::read(resolved) {
@@ -209,7 +217,11 @@ impl gpui::AssetSource for KitAssets {
         let resolved = match self.resolve_path(path) {
             Ok(path) => path,
             Err(error) => {
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string()).into());
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    error.to_string(),
+                )
+                .into());
             }
         };
         let entries = match std::fs::read_dir(resolved) {
@@ -248,7 +260,10 @@ mod tests {
         );
         assert_eq!(resolved.source(), AssetResolutionSource::Environment);
         assert_eq!(resolved.root(), Path::new("C:/override"));
-        assert!(!resolved.is_complete(), "the override is authoritative rather than silently corrected");
+        assert!(
+            !resolved.is_complete(),
+            "the override is authoritative rather than silently corrected"
+        );
     }
 
     #[test]
@@ -259,7 +274,10 @@ mod tests {
             PathBuf::from("C:/devkit"),
             complete_executable,
         );
-        assert_eq!(resolved.source(), AssetResolutionSource::ExecutableDirectory);
+        assert_eq!(
+            resolved.source(),
+            AssetResolutionSource::ExecutableDirectory
+        );
         assert_eq!(resolved.assets_dir(), PathBuf::from("C:/installed/assets"));
         assert!(resolved.is_complete());
     }

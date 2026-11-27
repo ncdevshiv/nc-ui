@@ -89,21 +89,46 @@ impl core::fmt::Display for KitProviderError {
                 f,
                 "the provider {provider} expected props to be a JSON object or null, not {actual}"
             ),
-            Self::InvalidProps { provider, field, reason } => {
-                write!(f, "the provider {provider} rejected props field `{field}`: {reason}")
+            Self::InvalidProps {
+                provider,
+                field,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "the provider {provider} rejected props field `{field}`: {reason}"
+                )
             }
             Self::UnknownAction { provider, action } => {
-                write!(f, "the provider {provider} does not expose an action named `{action}`")
+                write!(
+                    f,
+                    "the provider {provider} does not expose an action named `{action}`"
+                )
             }
-            Self::InvalidActionPayload { provider, action, field, reason } => write!(
+            Self::InvalidActionPayload {
+                provider,
+                action,
+                field,
+                reason,
+            } => write!(
                 f,
                 "the provider {provider} rejected action `{action}` at field `{field}`: {reason}"
             ),
-            Self::ActionUnavailable { provider, action, reason } => {
-                write!(f, "the provider {provider} cannot perform `{action}` now: {reason}")
+            Self::ActionUnavailable {
+                provider,
+                action,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "the provider {provider} cannot perform `{action}` now: {reason}"
+                )
             }
             Self::AssetPathOutsideRoot { path } => {
-                write!(f, "the asset path `{path}` would escape the resolved asset root")
+                write!(
+                    f,
+                    "the asset path `{path}` would escape the resolved asset root"
+                )
             }
         }
     }
@@ -118,13 +143,19 @@ mod tests {
     #[test]
     fn every_variant_has_a_distinct_stable_code() {
         let errors = [
-            KitProviderError::PropsNotObject { provider: "p", actual: "array" },
+            KitProviderError::PropsNotObject {
+                provider: "p",
+                actual: "array",
+            },
             KitProviderError::InvalidProps {
                 provider: "p",
                 field: "f".to_owned(),
                 reason: "r".to_owned(),
             },
-            KitProviderError::UnknownAction { provider: "p", action: "a".to_owned() },
+            KitProviderError::UnknownAction {
+                provider: "p",
+                action: "a".to_owned(),
+            },
             KitProviderError::InvalidActionPayload {
                 provider: "p",
                 action: "a".to_owned(),
@@ -136,7 +167,9 @@ mod tests {
                 action: "a".to_owned(),
                 reason: "r".to_owned(),
             },
-            KitProviderError::AssetPathOutsideRoot { path: "../x".to_owned() },
+            KitProviderError::AssetPathOutsideRoot {
+                path: "../x".to_owned(),
+            },
         ];
         let mut codes: Vec<&str> = errors.iter().map(KitProviderError::code).collect();
         let count = codes.len();

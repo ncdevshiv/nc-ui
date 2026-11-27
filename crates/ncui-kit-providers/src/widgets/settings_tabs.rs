@@ -8,7 +8,10 @@
 
 use std::sync::Arc;
 
-use gpui::{div, px, AppContext as _, Context, Entity, IntoElement, ParentElement, Render, Styled, Window};
+use gpui::{
+    App, AppContext as _, Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div,
+    px,
+};
 use nc_ui_kit::theme::Theme;
 use nc_ui_kit::ui::Tabs;
 use ncui_gpui::NativeEventSink;
@@ -16,9 +19,9 @@ use ncui_webview::NativeViewEvent;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::KitProviderError;
 use crate::props;
 use crate::provider::KitWidget;
-use crate::KitProviderError;
 
 const ID: &str = "nc-ui-kit::settings-tabs";
 const MAX_PANEL_BYTES: usize = 2048;
@@ -62,19 +65,22 @@ impl Default for PanelCopy {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct SettingsTabsProps {
+pub struct SettingsTabsProps {
     active: TabSpec,
     panels: PanelCopy,
 }
 
 impl Default for SettingsTabsProps {
     fn default() -> Self {
-        Self { active: TabSpec::General, panels: PanelCopy::default() }
+        Self {
+            active: TabSpec::General,
+            panels: PanelCopy::default(),
+        }
     }
 }
 
 /// The provider surface pairing the kit tab strip with the active panel's copy.
-struct SettingsTabsPanel {
+pub struct SettingsTabsPanel {
     tabs: Entity<Tabs>,
     active: String,
     panels: PanelCopy,
@@ -174,16 +180,16 @@ impl KitWidget for SettingsTabsWidget {
 
     const ID: &'static str = ID;
 
-    fn parse_props(value: &serde_json::Value) -> Result<Self::Props, KitProviderError> {
+    fn parse_props(value: &Value) -> Result<Self::Props, KitProviderError> {
         props::decode(ID, value, &["active", "panels"], Self::validate_shape)
     }
 
     fn build_child(
         props: &Self::Props,
         events: Arc<NativeEventSink>,
-        _window: &mut gpui::Window,
-        cx: &mut gpui::App,
-    ) -> Result<gpui::Entity<Self::View>, KitProviderError> {
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Result<Entity<Self::View>, KitProviderError> {
         let tabs = cx.new(|_| {
             Tabs::new(vec![
                 ("general", "General"),
@@ -198,24 +204,28 @@ impl KitWidget for SettingsTabsWidget {
         let active = props.active.as_str().to_owned();
         let panels = props.panels.clone();
         let panel = cx.new(|cx| {
-            cx.observe(&tabs, |panel, tabs, cx| {
+            cx.observe(&tabs, |panel: &mut SettingsTabsPanel, tabs, cx| {
                 panel.active = tabs.read(cx).active.to_string();
                 cx.notify();
             })
             .detach();
-            SettingsTabsPanel { tabs: tabs.clone(), active, panels }
+            SettingsTabsPanel {
+                tabs: tabs.clone(),
+                active,
+                panels,
+            }
         });
         Ok(panel)
     }
 
     fn invoke_child(
-        view: &gpui::Entity<Self::View>,
+        view: &Entity<Self::View>,
         _props: &Self::Props,
         events: Arc<NativeEventSink>,
         action: &str,
-        payload: &serde_json::Value,
-        _window: &mut gpui::Window,
-        cx: &mut gpui::App,
+        payload: &Value,
+        _window: &mut Window,
+        cx: &mut App,
     ) -> Result<(), KitProviderError> {
         if action != "select" {
             return Err(props::unknown_action(ID, action));
@@ -234,7 +244,7 @@ impl KitWidget for SettingsTabsWidget {
         if changed {
             let owned = tab.to_owned();
             view.update(cx, |panel, cx| {
-                panel.active = owned.clone();
+                panel.active.clone_from(&owned);
                 panel.tabs.update(cx, |tabs, cx| {
                     tabs.active = gpui::SharedString::new(owned);
                     cx.notify();
@@ -256,33 +266,35 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn parse(value: serde_json::Value) -> Result<SettingsTabsProps, KitProviderError> {
-        <SettingsTabsWidget as KitWidget>::parse_props(&value)
+    fn parse(value: &Value) -> Result<SettingsTabsProps, KitProviderError> {
+        <SettingsTabsWidget as KitWidget>::parse_props(value)
     }
 
     #[test]
     fn null_props_produce_the_documented_defaults() {
-        let props = parse(serde_json::Value::Null).expect("null is the empty object shorthand");
+        let props = parse(&Value::Null).expect("null is the empty object shorthand");
         assert_eq!(props.active, TabSpec::General);
         assert!(props.panels.general.contains("Application-wide"));
     }
 
     #[test]
     fn an_unknown_active_tab_names_the_active_field() {
-        let error = parse(json!({"active": "plugins"})).expect_err("unknown tabs are invalid");
+        let error = parse(&json!({"active": "plugins"})).expect_err("unknown tabs are invalid");
         assert!(error.to_string().contains("active"));
         assert!(error.to_string().contains("plugins"));
     }
 
     #[test]
     fn a_bad_panel_names_its_nested_field() {
-        let error = parse(json!({"panels": {"appearance": 2}})).expect_err("panel copy must be text");
+        let error =
+            parse(&json!({"panels": {"appearance": 2}})).expect_err("panel copy must be text");
         assert!(error.to_string().contains("panels.appearance"));
     }
 
     #[test]
     fn an_unknown_panel_key_names_the_nested_field() {
-        let error = parse(json!({"panels": {"plugins": "x"}})).expect_err("unknown panels are invalid");
+        let error =
+            parse(&json!({"panels": {"plugins": "x"}})).expect_err("unknown panels are invalid");
         assert!(error.to_string().contains("panels.plugins"));
     }
 }

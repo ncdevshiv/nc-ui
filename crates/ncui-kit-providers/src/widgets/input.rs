@@ -11,9 +11,9 @@ use ncui_gpui::NativeEventSink;
 use ncui_webview::NativeViewEvent;
 use serde::Deserialize;
 
+use crate::KitProviderError;
 use crate::props;
 use crate::provider::KitWidget;
-use crate::KitProviderError;
 
 const ID: &str = "nc-ui-kit::input";
 const MAX_VALUE_BYTES: usize = 4096;
@@ -21,7 +21,7 @@ const MAX_PLACEHOLDER_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct InputProps {
+pub struct InputProps {
     value: String,
     placeholder: String,
     numeric: bool,
@@ -129,7 +129,11 @@ impl KitWidget for InputWidget {
             "focus" => {
                 props::ensure_empty_payload(ID, action, payload)?;
                 if props.disabled {
-                    return Err(props::action_unavailable(ID, action, "the input is disabled"));
+                    return Err(props::action_unavailable(
+                        ID,
+                        action,
+                        "the input is disabled",
+                    ));
                 }
                 let focus = view.read(cx).focus_handle().clone();
                 window.focus(&focus);
@@ -145,13 +149,13 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn parse(value: serde_json::Value) -> Result<InputProps, KitProviderError> {
-        <InputWidget as KitWidget>::parse_props(&value)
+    fn parse(value: &serde_json::Value) -> Result<InputProps, KitProviderError> {
+        <InputWidget as KitWidget>::parse_props(value)
     }
 
     #[test]
     fn null_props_produce_the_documented_defaults() {
-        let props = parse(serde_json::Value::Null).expect("null is the empty object shorthand");
+        let props = parse(&serde_json::Value::Null).expect("null is the empty object shorthand");
         assert!(props.value.is_empty());
         assert_eq!(props.placeholder, "Type here…");
         assert!(!props.numeric);
@@ -159,14 +163,15 @@ mod tests {
 
     #[test]
     fn a_non_boolean_numeric_flag_names_its_field() {
-        let error = parse(json!({"numeric": "yes"})).expect_err("a string is not a boolean");
+        let error = parse(&json!({"numeric": "yes"})).expect_err("a string is not a boolean");
         assert!(error.to_string().contains("numeric"));
         assert!(error.to_string().contains("boolean"));
     }
 
     #[test]
     fn an_empty_placeholder_is_refused() {
-        let error = parse(json!({"placeholder": ""})).expect_err("an empty placeholder is invalid");
+        let error =
+            parse(&json!({"placeholder": ""})).expect_err("an empty placeholder is invalid");
         assert!(error.to_string().contains("placeholder"));
         assert!(error.to_string().contains("empty"));
     }
@@ -174,7 +179,7 @@ mod tests {
     #[test]
     fn the_value_bound_is_enforced() {
         let value = "x".repeat(MAX_VALUE_BYTES + 1);
-        let error = parse(json!({"value": value})).expect_err("the value bound is enforced");
+        let error = parse(&json!({"value": value})).expect_err("the value bound is enforced");
         assert!(error.to_string().contains("value"));
         assert!(error.to_string().contains("bound"));
     }

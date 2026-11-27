@@ -1,4 +1,4 @@
-//! Shared serde_json validation for provider props and command payloads.
+//! Shared `serde_json` validation for provider props and command payloads.
 //!
 //! The helpers exist because serde's type errors are positional rather than contractual:
 //! "expected a string at column 19" is true, but it does not tell a page author which
@@ -116,7 +116,11 @@ pub(crate) fn reject_unknown_fields(
     Ok(())
 }
 
-pub(crate) fn require_field(provider: &'static str, object: &Object, field: &str) -> Result<(), KitProviderError> {
+pub(crate) fn require_field(
+    provider: &'static str,
+    object: &Object,
+    field: &str,
+) -> Result<(), KitProviderError> {
     match object.get(field) {
         Some(Value::Null) | None => Err(invalid_props(provider, field, "is required")),
         Some(_) => Ok(()),
@@ -133,9 +137,6 @@ pub(crate) fn check_string(
     let Some(value) = object.get(field) else {
         return Ok(());
     };
-    if value.is_null() {
-        return Ok(());
-    }
     let Value::String(text) = value else {
         return Err(invalid_props(
             provider,
@@ -174,7 +175,7 @@ pub(crate) fn check_boolean(
     let Some(value) = object.get(field) else {
         return Ok(());
     };
-    if value.is_null() || value.is_boolean() {
+    if value.is_boolean() {
         return Ok(());
     }
     Err(invalid_props(
@@ -194,9 +195,6 @@ pub(crate) fn check_integer(
     let Some(value) = object.get(field) else {
         return Ok(());
     };
-    if value.is_null() {
-        return Ok(());
-    }
     let Some(number) = value.as_u64() else {
         return Err(invalid_props(
             provider,
@@ -225,9 +223,6 @@ pub(crate) fn check_number(
     let Some(value) = object.get(field) else {
         return Ok(());
     };
-    if value.is_null() {
-        return Ok(());
-    }
     let Some(number) = value.as_f64() else {
         return Err(invalid_props(
             provider,
@@ -254,14 +249,15 @@ pub(crate) fn check_enum(
     let Some(value) = object.get(field) else {
         return Ok(());
     };
-    if value.is_null() {
-        return Ok(());
-    }
     let Value::String(choice) = value else {
         return Err(invalid_props(
             provider,
             field,
-            format!("must be a string naming one of {}, not {}", choices.join(", "), json_kind(value)),
+            format!(
+                "must be a string naming one of {}, not {}",
+                choices.join(", "),
+                json_kind(value)
+            ),
         ));
     };
     if choices.contains(&choice.as_str()) {
@@ -284,9 +280,6 @@ pub(crate) fn check_array(
     let Some(value) = object.get(field) else {
         return Ok(());
     };
-    if value.is_null() {
-        return Ok(());
-    }
     let Value::Array(items) = value else {
         return Err(invalid_props(
             provider,
@@ -298,7 +291,10 @@ pub(crate) fn check_array(
         return Err(invalid_props(
             provider,
             field,
-            format!("must contain {minimum}..={maximum} items, not {}", items.len()),
+            format!(
+                "must contain {minimum}..={maximum} items, not {}",
+                items.len()
+            ),
         ));
     }
     Ok(())
@@ -338,7 +334,7 @@ pub(crate) fn check_object(
     let Some(value) = object.get(field) else {
         return Ok(());
     };
-    if value.is_null() || value.is_object() {
+    if value.is_object() {
         return Ok(());
     }
     Err(invalid_props(
@@ -454,7 +450,12 @@ pub(crate) fn payload_usize(
         ));
     };
     usize::try_from(number).map_err(|_| {
-        invalid_payload(provider, action, field, format!("is too large for this platform: {number}"))
+        invalid_payload(
+            provider,
+            action,
+            field,
+            format!("is too large for this platform: {number}"),
+        )
     })
 }
 

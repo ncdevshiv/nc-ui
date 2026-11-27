@@ -94,12 +94,24 @@ pub const PROVIDER_IDS: [&str; 6] = [
 /// composition component.
 pub fn register_all() -> usize {
     let registry = ncui_gpui::providers();
-    registry.register(std::sync::Arc::new(KitProvider::<widgets::ButtonWidget>::new()));
-    registry.register(std::sync::Arc::new(KitProvider::<widgets::InputWidget>::new()));
-    registry.register(std::sync::Arc::new(KitProvider::<widgets::DropdownWidget>::new()));
-    registry.register(std::sync::Arc::new(KitProvider::<widgets::CheckboxWidget>::new()));
-    registry.register(std::sync::Arc::new(KitProvider::<widgets::DialogWidget>::new()));
-    registry.register(std::sync::Arc::new(KitProvider::<widgets::SettingsTabsWidget>::new()));
+    registry.register(std::sync::Arc::new(
+        KitProvider::<widgets::ButtonWidget>::new(),
+    ));
+    registry.register(std::sync::Arc::new(
+        KitProvider::<widgets::InputWidget>::new(),
+    ));
+    registry.register(std::sync::Arc::new(
+        KitProvider::<widgets::DropdownWidget>::new(),
+    ));
+    registry.register(std::sync::Arc::new(
+        KitProvider::<widgets::CheckboxWidget>::new(),
+    ));
+    registry.register(std::sync::Arc::new(
+        KitProvider::<widgets::DialogWidget>::new(),
+    ));
+    registry.register(std::sync::Arc::new(KitProvider::<
+        widgets::SettingsTabsWidget,
+    >::new()));
     PROVIDER_IDS.len()
 }
 
@@ -111,7 +123,10 @@ mod tests {
     fn every_registered_id_passes_the_runtime_provider_rules() {
         assert_eq!(register_all(), PROVIDER_IDS.len());
         for id in PROVIDER_IDS {
-            assert!(ncui_gpui::providers().get(id).is_some(), "{id} was not registered");
+            assert!(
+                ncui_gpui::providers().get(id).is_some(),
+                "{id} was not registered"
+            );
             ncui_webview::WindowRequest::native(id)
                 .validate()
                 .unwrap_or_else(|error| panic!("{id} failed runtime validation: {error}"));
@@ -120,7 +135,7 @@ mod tests {
 
     #[test]
     fn the_documented_ids_are_unique() {
-        let mut ids = PROVIDER_IDS;
+        let mut ids = PROVIDER_IDS.to_vec();
         ids.sort_unstable();
         let before = ids.len();
         ids.dedup();

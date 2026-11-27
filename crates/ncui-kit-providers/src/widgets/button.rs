@@ -13,9 +13,9 @@ use ncui_gpui::NativeEventSink;
 use ncui_webview::NativeViewEvent;
 use serde::Deserialize;
 
+use crate::KitProviderError;
 use crate::props;
 use crate::provider::KitWidget;
-use crate::KitProviderError;
 
 const ID: &str = "nc-ui-kit::button";
 const MAX_LABEL_BYTES: usize = 128;
@@ -64,7 +64,7 @@ impl SizeSpec {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct ButtonProps {
+pub struct ButtonProps {
     label: String,
     variant: VariantSpec,
     size: SizeSpec,
@@ -125,7 +125,14 @@ impl KitWidget for ButtonWidget {
         props::decode(
             ID,
             value,
-            &["label", "variant", "size", "disabled", "loading", "full_width"],
+            &[
+                "label",
+                "variant",
+                "size",
+                "disabled",
+                "loading",
+                "full_width",
+            ],
             Self::validate_shape,
         )
     }
@@ -169,10 +176,18 @@ impl KitWidget for ButtonWidget {
         }
         props::ensure_empty_payload(ID, action, payload)?;
         if props.disabled {
-            return Err(props::action_unavailable(ID, action, "the button is disabled"));
+            return Err(props::action_unavailable(
+                ID,
+                action,
+                "the button is disabled",
+            ));
         }
         if props.loading {
-            return Err(props::action_unavailable(ID, action, "the button is busy loading"));
+            return Err(props::action_unavailable(
+                ID,
+                action,
+                "the button is busy loading",
+            ));
         }
         Self::emit_click(&events, &props.label, "command");
         Ok(())
@@ -184,13 +199,13 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn parse(value: serde_json::Value) -> Result<ButtonProps, KitProviderError> {
-        <ButtonWidget as KitWidget>::parse_props(&value)
+    fn parse(value: &serde_json::Value) -> Result<ButtonProps, KitProviderError> {
+        <ButtonWidget as KitWidget>::parse_props(value)
     }
 
     #[test]
     fn null_props_produce_the_documented_defaults() {
-        let props = parse(serde_json::Value::Null).expect("null is the empty object shorthand");
+        let props = parse(&serde_json::Value::Null).expect("null is the empty object shorthand");
         assert_eq!(props.label, "Continue");
         assert_eq!(props.variant, VariantSpec::Secondary);
         assert_eq!(props.size, SizeSpec::Md);
@@ -198,7 +213,7 @@ mod tests {
 
     #[test]
     fn a_non_string_label_is_refused_by_field_name() {
-        let error = parse(json!({"label": 4})).expect_err("a numeric label is invalid");
+        let error = parse(&json!({"label": 4})).expect_err("a numeric label is invalid");
         assert_eq!(error.code(), "kit_invalid_props");
         assert!(error.to_string().contains("label"));
         assert!(error.to_string().contains("string"));
@@ -206,7 +221,8 @@ mod tests {
 
     #[test]
     fn an_unknown_variant_names_the_field_and_the_choice() {
-        let error = parse(json!({"variant": "purple"})).expect_err("an unknown variant is invalid");
+        let error =
+            parse(&json!({"variant": "purple"})).expect_err("an unknown variant is invalid");
         assert!(error.to_string().contains("variant"));
         assert!(error.to_string().contains("purple"));
     }
@@ -214,14 +230,14 @@ mod tests {
     #[test]
     fn an_oversized_label_is_refused() {
         let label = "x".repeat(MAX_LABEL_BYTES + 1);
-        let error = parse(json!({"label": label})).expect_err("the label bound is enforced");
+        let error = parse(&json!({"label": label})).expect_err("the label bound is enforced");
         assert!(error.to_string().contains("label"));
         assert!(error.to_string().contains("bound"));
     }
 
     #[test]
     fn a_non_object_props_value_has_a_typed_refusal() {
-        let error = parse(json!([])).expect_err("arrays are not props objects");
+        let error = parse(&json!([])).expect_err("arrays are not props objects");
         assert_eq!(error.code(), "kit_props_not_object");
     }
 }

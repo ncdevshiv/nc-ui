@@ -30,7 +30,6 @@ use crate::commands::CommandTarget;
 mod actions;
 mod native;
 pub use actions::{SEAM_ACTIONS, SeamAction, default_page_grant};
-pub use native::NativePoll;
 
 /// The window surface available to agents.
 #[derive(Default)]
@@ -1489,6 +1488,103 @@ mod tests {
         }
     }
 
+    /// What a native test view and the test staging it both see: the events the view has
+    /// queued and the cumulative count of drops a full queue would have lost, which the
+    /// drain is owed as a delta rather than restated.
+    #[derive(Debug, Default)]
+    struct NativeViewFixture {
+        events: Mutex<std::collections::VecDeque<ncui_webview::NativeViewEvent>>,
+        dropped: Mutex<u64>,
+    }
+
+    /// A native test view: a working event queue over the fixture, so a drain driven
+    /// against it answers what the contract promises rather than an empty invention.
+    #[derive(Debug)]
+    struct NativeBackend {
+        fixture: Arc<NativeViewFixture>,
+    }
+
+    impl ncui_webview::NativeViewBackend for NativeBackend {
+        fn poll_native_event(&self) -> Option<ncui_webview::NativeViewEvent> {
+            self.fixture
+                .events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+        }
+
+        fn send_view_command(
+            &self,
+            _command: ncui_webview::NativeViewCommand,
+        ) -> Result<(), ncui_webview::NativeViewError> {
+            Ok(())
+        }
+
+        fn dropped_native_events(&self) -> u64 {
+            *self
+                .fixture
+                .dropped
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+    }
+
+    impl ncui_webview::WebViewBackend for NativeBackend {
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+
+        fn last_error(&self) -> Option<String> {
+            None
+        }
+        fn is_alive(&self) -> bool {
+            true
+        }
+        fn poll_page_message(&self) -> Option<PageMessage> {
+            None
+        }
+        fn evaluate_script(&self, _script: &str) -> bool {
+            true
+        }
+        fn native_view(&self) -> Option<&dyn ncui_webview::NativeViewBackend> {
+            Some(self)
+        }
+    }
+
+    /// The factory a native-window test installs: every window it spawns carries the view
+    /// the fixture stages.
+    #[derive(Debug)]
+    struct NativeFactory {
+        fixture: Arc<NativeViewFixture>,
+    }
+
+    impl HostFactory for NativeFactory {
+        fn spawn(
+            &self,
+            _window: WindowId,
+            _request: &WindowRequest,
+            _seam: &Arc<HostSeam>,
+        ) -> Option<Box<dyn ncui_webview::WebViewBackend>> {
+            Some(Box::new(NativeBackend {
+                fixture: Arc::clone(&self.fixture),
+            }))
+        }
+    }
+
+    /// A window surface with one native window open, and the fixture its view is staged through.
+    fn native_window() -> (Windows, Arc<NativeViewFixture>, WindowId) {
+        let fixture = Arc::new(NativeViewFixture::default());
+        let windows = Windows::new()
+            .with_registry(test_registry())
+            .with_factory(Box::new(NativeFactory {
+                fixture: Arc::clone(&fixture),
+            }));
+        let window = windows
+            .open(&WindowRequest::native("test.panel"), None)
+            .expect("the native window opens");
+        (windows, fixture, window)
+    }
+
     /// A registry with one allowed origin, which every test window is opened at.
     ///
     /// A window's URL is vetted against the policy before the engine sees it, so a
@@ -1555,6 +1651,110 @@ mod tests {
             "an agent must not be told it closed a window twice"
         );
         assert_eq!(windows.len().expect("installed"), 0);
+    }
+
+    #[test]
+    fn a_native_drain_answers_everything_queued_in_the_order_it_was_emitted() {
+        let (windows, fixture, window) = native_window();
+        fixture
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend([
+                ncui_webview::NativeViewEvent::new("test.panel", "clicked"),
+                ncui_webview::NativeViewEvent::new("test.panel", "changed"),
+            ]);
+
+        let (events, dropped) = windows
+            .drain_native_events(window)
+            .expect("an open window is not a refusal")
+            .expect("a native window has a queue to drain");
+        assert_eq!(
+            events,
+            vec![
+                ncui_webview::NativeViewEvent::new("test.panel", "clicked"),
+                ncui_webview::NativeViewEvent::new("test.panel", "changed"),
+            ],
+            "the drain carries everything queued, in order"
+        );
+        assert_eq!(dropped, 0);
+
+        // The queue drained is honestly empty rather than a refusal: an empty answer is
+        // what "nothing since last time" looks like.
+        let (events, dropped) = windows
+            .drain_native_events(window)
+            .expect("still open")
+            .expect("still native");
+        assert!(events.is_empty(), "the queue was drained: {events:?}");
+        assert_eq!(dropped, 0);
+    }
+
+    #[test]
+    fn a_native_drain_is_owed_the_drops_since_the_last_drain_and_no_more() {
+        let (windows, fixture, window) = native_window();
+
+        // The backend's counter is cumulative: the first drain is owed everything lost
+        // since the window opened.
+        *fixture
+            .dropped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = 5;
+        let (_, dropped) = windows
+            .drain_native_events(window)
+            .expect("open")
+            .expect("native");
+        assert_eq!(dropped, 5, "the first drain is owed the whole count");
+
+        // Two more drops since — the second drain is owed the delta, because one loss
+        // counted twice is a metric that lies.
+        *fixture
+            .dropped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = 7;
+        let (_, dropped) = windows
+            .drain_native_events(window)
+            .expect("open")
+            .expect("native");
+        assert_eq!(dropped, 2, "the second drain is owed only what is new");
+
+        // A quiet interval is owed zero rather than the count restated.
+        let (_, dropped) = windows
+            .drain_native_events(window)
+            .expect("open")
+            .expect("native");
+        assert_eq!(dropped, 0);
+    }
+
+    #[test]
+    fn draining_a_page_window_is_no_answer_rather_than_an_empty_one() {
+        let windows = Windows::new()
+            .with_registry(test_registry())
+            .with_factory(Box::new(Counting::default()));
+        let page = windows
+            .open(&WindowRequest::new("https://app.example.com"), None)
+            .expect("opens");
+
+        let drained = windows
+            .drain_native_events(page)
+            .expect("an open window is not a refusal");
+        assert!(
+            drained.is_none(),
+            "a page window has no queue to drain, and the answer says so"
+        );
+    }
+
+    #[test]
+    fn draining_a_window_that_is_not_open_is_a_refusal() {
+        let (windows, _fixture, window) = native_window();
+        windows.close(window).expect("closes");
+
+        let error = windows
+            .drain_native_events(window)
+            .expect_err("a closed window has no queue at all");
+        assert!(
+            matches!(error, WindowRejection::EngineUnavailable { .. }),
+            "got: {error}"
+        );
     }
 
     #[test]

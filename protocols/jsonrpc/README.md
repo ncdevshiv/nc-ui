@@ -99,7 +99,8 @@ behind it, which is why `protocol_conformance.rs` checks this table against the 
 | `package`, `filter` | `ncui.test.run`, `ncui.benchmark.run` | Which package to run, and which test or benchmark within it |
 | `url` | `ncui.window.create`, `ncui.window.post` | The page to open, or the page to evaluate a script in |
 | `content` | `ncui.window.create` | What the window carries: `{"kind": "page"}` (the default) or `{"kind": "native", "provider": "...", "props": {...}}` |
-| `command` | `ncui.window.native.command` | What the native view is told: `{"kind": "update_props", "props": {...}}` or `{"kind": "invoke", "action": "...", "payload": {...}}` |
+| `props` | `ncui.window.native.command` | Replace the props a native window's view was built with |
+| `action`, `payload` | `ncui.window.native.command` | Invoke one verb a native view answers, with its input |
 | `window` | every method that names one window | The window's identity |
 | `title`, `width`, `height`, `x`, `y` | `ncui.window.create` | What the window is called, how big it is and where it sits |
 | `always_on_top`, `decorations`, `transparent`, `resizable` | `ncui.window.create` | How the window is framed, floated, made see-through and resized |
@@ -181,7 +182,7 @@ is the one actually enforced.
 | `ncui.window.close` | `window` | no | Close a window by identity |
 | `ncui.window.state` | `window` | no | How a window is presented, and how to change it: fullscreen, maximised, minimised, shown or hidden, or focused. The answer also reports the platform's frame — decorated, resizable, always on top — as the platform has it. A page is told when its window is resized or moved, through `resized` and `moved` events |
 | `ncui.window.theme` | `window` | no | Whether the platform is drawing its interface light or dark, and a `theme` event when it changes |
-| `ncui.window.native.events` | `window` | no | Poll one event a native window's view has emitted, or null when its queue is empty |
+| `ncui.window.native.events` | `window` | no | Drain every event a native window's view has emitted since the last drain, with the count dropped to a full queue in between |
 | `ncui.window.native.command` | `window` | no | Deliver one command to a native window's view: update its props, or invoke one of the verbs it answers |
 | `ncui.window.zoom` | `window` | no | Scale a window's page by a factor between 0.25 and 5.0, where 1.0 is the platform default |
 | `ncui.window.print.pdf` | `window` | no | Render a window's page to PDF through the engine's own DevTools protocol; the answer carries the PDF as base64 |
@@ -241,26 +242,30 @@ them, and asked of a page window they answer `-32006` / `conflict` with a messag
 what the window is — because "no events yet" and "no events ever, this window is a page"
 are different facts.
 
-`ncui.window.native.events` takes `{"window": "<id>"}` and polls one event:
+`ncui.window.native.events` takes `{"window": "<id>"}` and drains the queue:
 
 ```json
-{ "window": "<id>", "event": { "source": "test.panel", "action": "clicked", "payload": { "row": 2 } } }
+{ "events": [ { "source": "test.panel", "action": "clicked", "payload": { "row": 2 } } ], "dropped": 0 }
 ```
 
-`event` is `null` when the queue is honestly empty, so an agent polls rather than
-subscribes. The event object is the provider's own, serialized in the native contract's
-shape — `source`, `action`, `payload` — carried unchanged: what a view emits is the
-provider's business, and the runtime does not interpret it. Events are bounded per window
-at 256 queued; a view that outruns the polling drops its oldest events.
+`events` is every event queued since the last drain — empty when nothing happened — so an
+agent polls rather than subscribes. Each event object is the provider's own, serialized in
+the native contract's shape — `source`, `action`, `payload` — carried unchanged: what a
+view emits is the provider's business, and the runtime does not interpret it. Events are
+bounded per window at 256 queued; a view that outruns the draining drops its oldest
+events, and `dropped` reports how many were lost since the last drain — the overload
+signal an operator watches this surface to learn, counted rather than hidden.
 
-`ncui.window.native.command` takes `{"window": "<id>", "command": {...}}` and answers
-`{"window": "<id>", "sent": true}` when the view accepted the command. The command is the
-contract's tagged shape — `{"kind": "update_props", "props": {...}}` replaces the props
-the view was built with, `{"kind": "invoke", "action": "...", "payload": {...}}` invokes a
-verb in the provider's own vocabulary. Actions are at most 128 bytes and payloads at most
-65 536 bytes serialized; a command outside the bounds is refused with `-32602` /
-`validation` **before it is sent**, so a host is never asked to carry what the contract
-forbids.
+`ncui.window.native.command` takes `{"window": "<id>"}` plus exactly one of two shapes
+and answers `{"delivered": true}` when the view accepted the command. The wire does not
+ask the caller to write the contract's tag: `{"window": "<id>", "props": {...}}` replaces
+the props the view was built with, and `{"window": "<id>", "action": "...", "payload":
+{...}}` invokes a verb in the provider's own vocabulary (`payload` is optional, and belongs
+to `action` alone). Naming both `props` and `action` — or neither — is refused as a
+caller mistake rather than a guess at which half was meant. Actions are at most 128 bytes
+and payloads at most 65 536 bytes serialized; a command outside the bounds is refused with
+`-32602` / `validation` **before it is sent**, so a host is never asked to carry what the
+contract forbids.
 
 A command the view itself refuses is a structured error whose message carries the stable
 `native_*` code as a prefix, because the code is the part of the refusal an agent branches

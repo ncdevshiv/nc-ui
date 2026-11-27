@@ -1985,6 +1985,461 @@ mod tests {
         }
     }
 
+    /// What a native test host and the test staging it both see: the events the view has
+    /// queued, the commands it accepted, the refusal it is configured to answer with, and
+    /// the cumulative count of drops a full queue would have lost.
+    ///
+    /// Shared rather than read back out of the registry because the registry owns the host:
+    /// a test that could not reach in would have no way to stage an event or inspect what a
+    /// command delivery did, and reaching in is exactly what the shared fixture replaces.
+    #[derive(Debug, Default)]
+    struct NativeFixture {
+        events: std::sync::Mutex<std::collections::VecDeque<ncui_webview::NativeViewEvent>>,
+        commands: std::sync::Mutex<Vec<ncui_webview::NativeViewCommand>>,
+        refusal: std::sync::Mutex<Option<ncui_webview::NativeViewError>>,
+        dropped: std::sync::Mutex<u64>,
+    }
+
+    impl NativeFixture {
+        fn emit(&self, event: ncui_webview::NativeViewEvent) {
+            self.events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push_back(event);
+        }
+
+        /// Stages `count` more dropped events, the way a full queue dropping its oldest does.
+        fn drop_events(&self, count: u64) {
+            *self
+                .dropped
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) += count;
+        }
+    }
+
+    /// A native test host: the page half answers the way a live engine does, and the native
+    /// half is a working queue and command sink over the fixture the test stages through.
+    #[derive(Debug)]
+    struct NativeTestHost {
+        fixture: Arc<NativeFixture>,
+    }
+
+    impl ncui_webview::NativeViewBackend for NativeTestHost {
+        fn poll_native_event(&self) -> Option<ncui_webview::NativeViewEvent> {
+            self.fixture
+                .events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+        }
+
+        fn send_view_command(
+            &self,
+            command: ncui_webview::NativeViewCommand,
+        ) -> Result<(), ncui_webview::NativeViewError> {
+            let refusal = self
+                .fixture
+                .refusal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(refusal) = refusal {
+                return Err(refusal);
+            }
+            self.fixture
+                .commands
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(command);
+            Ok(())
+        }
+
+        fn dropped_native_events(&self) -> u64 {
+            *self
+                .fixture
+                .dropped
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+    }
+
+    impl ncui_webview::WebViewBackend for NativeTestHost {
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+
+        fn last_error(&self) -> Option<String> {
+            None
+        }
+
+        fn is_alive(&self) -> bool {
+            true
+        }
+
+        fn poll_page_message(&self) -> Option<ncui_webview::PageMessage> {
+            None
+        }
+
+        fn evaluate_script(&self, _script: &str) -> bool {
+            true
+        }
+
+        fn native_view(&self) -> Option<&dyn ncui_webview::NativeViewBackend> {
+            Some(self)
+        }
+    }
+
+    /// The factory a native-window test installs: every window it spawns is native.
+    #[derive(Debug)]
+    struct NativeTestFactory {
+        fixture: Arc<NativeFixture>,
+    }
+
+    impl ncui_webview::HostFactory for NativeTestFactory {
+        fn spawn(
+            &self,
+            _window: WindowId,
+            _request: &ncui_webview::WindowRequest,
+            _seam: &Arc<ncui_webview::HostSeam>,
+        ) -> Option<Box<dyn ncui_webview::WebViewBackend>> {
+            Some(Box::new(NativeTestHost {
+                fixture: Arc::clone(&self.fixture),
+            }))
+        }
+    }
+
+    /// A page test host: alive, and honestly without a native half — which is what makes
+    /// the window it carries a page window for the methods that ask.
+    #[derive(Debug)]
+    struct PageOnlyHost;
+
+    impl ncui_webview::WebViewBackend for PageOnlyHost {
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+
+        fn last_error(&self) -> Option<String> {
+            None
+        }
+
+        fn is_alive(&self) -> bool {
+            true
+        }
+
+        fn poll_page_message(&self) -> Option<ncui_webview::PageMessage> {
+            None
+        }
+
+        fn evaluate_script(&self, _script: &str) -> bool {
+            true
+        }
+    }
+
+    /// The factory a page-window test installs: every window it spawns is a page.
+    #[derive(Debug)]
+    struct PageOnlyFactory;
+
+    impl ncui_webview::HostFactory for PageOnlyFactory {
+        fn spawn(
+            &self,
+            _window: WindowId,
+            _request: &ncui_webview::WindowRequest,
+            _seam: &Arc<ncui_webview::HostSeam>,
+        ) -> Option<Box<dyn ncui_webview::WebViewBackend>> {
+            Some(Box::new(PageOnlyHost))
+        }
+    }
+
+    /// A runtime whose window surface is driven by `factory`, with the registry the window
+    /// tests share. The factory chooses what the windows are: native, or pages.
+    fn runtime_with_window_factory(factory: Box<dyn ncui_webview::HostFactory>) -> Runtime {
+        let mut runtime = runtime();
+        runtime.windows = runtime
+            .windows
+            .with_registry(ncui_webview::WindowRegistry::new().with_default_navigation(
+                ncui_webview::NavigationPolicy::new(&[ncui_webview::Origin::new(
+                    ncui_webview::Scheme::Https,
+                    "example.com",
+                    None,
+                )]),
+            ))
+            .with_factory(factory);
+        runtime
+    }
+
+    /// A runtime with one native window already open, and the fixture its view is staged through.
+    fn runtime_with_native_window() -> (Runtime, Arc<NativeFixture>, WindowId) {
+        let fixture = Arc::new(NativeFixture::default());
+        let runtime = runtime_with_window_factory(Box::new(NativeTestFactory {
+            fixture: Arc::clone(&fixture),
+        }));
+        let window = runtime
+            .windows
+            .open(&ncui_webview::WindowRequest::native("test.panel"), None)
+            .expect("the native window opens");
+        (runtime, fixture, window)
+    }
+
+    #[test]
+    fn a_native_command_with_neither_props_nor_action_is_refused_as_validation() {
+        let (mut runtime, _fixture, window) = runtime_with_native_window();
+        let mut administrator = session(AgentRole::Administrator);
+
+        for params in [
+            json!({ "window": window.to_string() }),
+            json!({ "window": window.to_string(), "payload": { "row": 1 } }),
+        ] {
+            let response = call(
+                &mut runtime,
+                &mut administrator,
+                "ncui.window.native.command",
+                params.clone(),
+            );
+            let error = response
+                .error
+                .unwrap_or_else(|| panic!("{params} must be refused"));
+            assert_eq!(error.data.ncui_code, "validation", "{params}: {error:?}");
+            assert!(
+                error.message.contains("props") && error.message.contains("action"),
+                "the refusal names both halves of the rule: {}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn a_native_command_with_both_props_and_action_is_refused_as_validation() {
+        let (mut runtime, _fixture, window) = runtime_with_native_window();
+        let mut administrator = session(AgentRole::Administrator);
+
+        let response = call(
+            &mut runtime,
+            &mut administrator,
+            "ncui.window.native.command",
+            json!({
+                "window": window.to_string(),
+                "props": { "rows": 3 },
+                "action": "focus",
+            }),
+        );
+        let error = response.error.expect("both halves must be refused");
+        assert_eq!(error.data.ncui_code, "validation", "{error:?}");
+        assert!(
+            error.message.contains("must not be given together"),
+            "the refusal names the rule: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn a_native_command_to_a_page_window_is_a_conflict_naming_what_the_window_is() {
+        let mut runtime = runtime_with_window_factory(Box::new(PageOnlyFactory));
+        let mut administrator = session(AgentRole::Administrator);
+        let page = runtime
+            .windows
+            .open(&ncui_webview::WindowRequest::new("https://example.com"), None)
+            .expect("the page window opens");
+
+        for method in ["ncui.window.native.command", "ncui.window.native.events"] {
+            let params = if method == "ncui.window.native.command" {
+                json!({ "window": page.to_string(), "action": "focus" })
+            } else {
+                json!({ "window": page.to_string() })
+            };
+            let response = call(&mut runtime, &mut administrator, method, params);
+            let error = response
+                .error
+                .unwrap_or_else(|| panic!("{method} on a page window must be refused"));
+            assert_eq!(error.data.ncui_code, "conflict", "{method}: {error:?}");
+            assert!(
+                error.message.contains("is not a native window"),
+                "{method} names what the window is: {}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn an_accepted_native_command_is_answered_delivered() {
+        let (mut runtime, fixture, window) = runtime_with_native_window();
+        let mut administrator = session(AgentRole::Administrator);
+
+        for (params, expected) in [
+            (
+                json!({ "window": window.to_string(), "action": "select_row", "payload": { "row": 4 } }),
+                ncui_webview::NativeViewCommand::Invoke {
+                    action: "select_row".to_owned(),
+                    payload: json!({ "row": 4 }),
+                },
+            ),
+            (
+                json!({ "window": window.to_string(), "props": { "rows": 9 } }),
+                ncui_webview::NativeViewCommand::UpdateProps {
+                    props: json!({ "rows": 9 }),
+                },
+            ),
+        ] {
+            let response = call(
+                &mut runtime,
+                &mut administrator,
+                "ncui.window.native.command",
+                params,
+            );
+            assert!(
+                response.error.is_none(),
+                "the command should have been delivered: {:?}",
+                response.error
+            );
+            assert_eq!(
+                response.result.expect("a delivered command")["delivered"],
+                true
+            );
+            let delivered = fixture
+                .commands
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            assert_eq!(
+                delivered.last(),
+                Some(&expected),
+                "the view received exactly the command the caller meant"
+            );
+        }
+    }
+
+    #[test]
+    fn a_native_event_drain_answers_the_queued_events_and_the_dropped_count() {
+        let (mut runtime, fixture, window) = runtime_with_native_window();
+        let mut administrator = session(AgentRole::Administrator);
+
+        fixture.emit(
+            ncui_webview::NativeViewEvent::new("test.panel", "clicked")
+                .with_payload(json!({ "row": 2 })),
+        );
+        fixture.emit(ncui_webview::NativeViewEvent::new("test.panel", "changed"));
+        fixture.drop_events(3);
+
+        let response = call(
+            &mut runtime,
+            &mut administrator,
+            "ncui.window.native.events",
+            json!({ "window": window.to_string() }),
+        );
+        let result = response.result.expect("the drain answers");
+        assert_eq!(
+            result["events"],
+            json!([
+                { "source": "test.panel", "action": "clicked", "payload": { "row": 2 } },
+                { "source": "test.panel", "action": "changed", "payload": null },
+            ]),
+            "the events are the contract's own serialization, in the order they were emitted"
+        );
+        assert_eq!(result["dropped"], 3);
+
+        // The queue drained is honestly empty, and the drop already reported is not
+        // restated: the count owed the second drain is the delta since the first, which
+        // here is zero.
+        let again = call(
+            &mut runtime,
+            &mut administrator,
+            "ncui.window.native.events",
+            json!({ "window": window.to_string() }),
+        );
+        let drained = again.result.expect("the second drain answers");
+        assert_eq!(drained["events"], json!([]));
+        assert_eq!(drained["dropped"], 0);
+    }
+
+    #[test]
+    fn native_commands_and_dropped_events_are_counted_in_the_metrics() {
+        let (mut runtime, fixture, window) = runtime_with_native_window();
+        let mut administrator = session(AgentRole::Administrator);
+
+        let delivered = call(
+            &mut runtime,
+            &mut administrator,
+            "ncui.window.native.command",
+            json!({ "window": window.to_string(), "action": "focus" }),
+        );
+        assert!(delivered.error.is_none(), "got: {:?}", delivered.error);
+
+        fixture.drop_events(4);
+        let drained = call(
+            &mut runtime,
+            &mut administrator,
+            "ncui.window.native.events",
+            json!({ "window": window.to_string() }),
+        );
+        assert!(drained.error.is_none(), "got: {:?}", drained.error);
+
+        let snapshot = call(&mut runtime, &mut administrator, "ncui.metrics.query", json!({}))
+            .result
+            .expect("metrics result");
+        let series = snapshot["series"].as_array().expect("metric series");
+        let counter = |name: &str| {
+            series
+                .iter()
+                .find(|series| series["name"] == name)
+                .and_then(|series| series["value"].as_u64())
+        };
+        assert_eq!(
+            counter("window.native.command"),
+            Some(1),
+            "the delivered command is counted once"
+        );
+        assert_eq!(
+            counter("window.native.events_dropped"),
+            Some(4),
+            "the drops the drain reported are counted by their amount"
+        );
+    }
+
+    #[test]
+    fn native_window_methods_are_denied_without_the_window_capability() {
+        let (mut runtime, _fixture, window) = runtime_with_native_window();
+        let mut observer = session(AgentRole::Observer);
+
+        for method in ["ncui.window.native.command", "ncui.window.native.events"] {
+            let params = if method == "ncui.window.native.command" {
+                json!({ "window": window.to_string(), "action": "focus" })
+            } else {
+                json!({ "window": window.to_string() })
+            };
+            let response = call(&mut runtime, &mut observer, method, params);
+            let error = response
+                .error
+                .unwrap_or_else(|| panic!("{method} without the capability must be denied"));
+            assert_eq!(
+                error.data.ncui_code, "capability_denied",
+                "{method}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_native_window_methods_are_in_the_table_with_the_window_capability() {
+        let table = method_table();
+        for name in ["ncui.window.native.command", "ncui.window.native.events"] {
+            let method = table
+                .iter()
+                .find(|method| method.name == name)
+                .unwrap_or_else(|| panic!("{name} is advertised"));
+            assert_eq!(
+                method.requires,
+                CapabilitySet::empty().with(Capability::Window),
+                "{name} requires exactly the window capability"
+            );
+            assert!(
+                !method.destructive,
+                "{name} is not destructive: it carries what a view said or accepts what a view answers"
+            );
+            assert!(
+                !method.summary.is_empty(),
+                "{name} carries the summary an agent reads"
+            );
+        }
+    }
+
     #[test]
     fn a_destructive_call_with_only_consent_true_is_refused() {
         let mut runtime = runtime();

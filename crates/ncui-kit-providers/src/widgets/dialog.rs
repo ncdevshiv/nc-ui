@@ -7,16 +7,18 @@
 
 use std::sync::Arc;
 
-use gpui::{div, AppContext as _, Context, Entity, IntoElement, ParentElement, Render, Styled, Window};
+use gpui::{
+    App, AppContext as _, Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div,
+};
 use nc_ui_kit::theme::Theme;
 use nc_ui_kit::ui::{Button, Dialog};
 use ncui_gpui::NativeEventSink;
 use ncui_webview::NativeViewEvent;
 use serde::Deserialize;
 
+use crate::KitProviderError;
 use crate::props;
 use crate::provider::KitWidget;
-use crate::KitProviderError;
 
 const ID: &str = "nc-ui-kit::dialog";
 const MAX_TITLE_BYTES: usize = 128;
@@ -25,7 +27,7 @@ const MAX_TRIGGER_LABEL_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct DialogProps {
+pub struct DialogProps {
     title: String,
     description: Option<String>,
     trigger_label: String,
@@ -46,7 +48,7 @@ impl Default for DialogProps {
 }
 
 /// The provider chrome that pairs a reopen button with the kit dialog entity.
-struct DialogPanel {
+pub struct DialogPanel {
     trigger: Entity<Button>,
     dialog: Entity<Dialog>,
 }
@@ -99,7 +101,7 @@ impl DialogWidget {
         title: &str,
         origin: &str,
         window: &mut Window,
-        cx: &mut gpui::App,
+        cx: &mut App,
     ) {
         let was_open = view.read(cx).dialog.read(cx).open;
         if was_open == open {
@@ -110,7 +112,12 @@ impl DialogWidget {
                 dialog.set_open(open, window, cx);
             });
         });
-        Self::emit_state(events, title, if open { "opened" } else { "closed" }, origin);
+        Self::emit_state(
+            events,
+            title,
+            if open { "opened" } else { "closed" },
+            origin,
+        );
     }
 }
 
@@ -132,9 +139,9 @@ impl KitWidget for DialogWidget {
     fn build_child(
         props: &Self::Props,
         events: Arc<NativeEventSink>,
-        window: &mut gpui::Window,
-        cx: &mut gpui::App,
-    ) -> Result<gpui::Entity<Self::View>, KitProviderError> {
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<Entity<Self::View>, KitProviderError> {
         let close_events = Arc::clone(&events);
         let close_title = props.title.clone();
         let mut dialog = Dialog::new(props.title.clone())
@@ -169,13 +176,13 @@ impl KitWidget for DialogWidget {
     }
 
     fn invoke_child(
-        view: &gpui::Entity<Self::View>,
+        view: &Entity<Self::View>,
         props: &Self::Props,
         events: Arc<NativeEventSink>,
         action: &str,
         payload: &serde_json::Value,
-        window: &mut gpui::Window,
-        cx: &mut gpui::App,
+        window: &mut Window,
+        cx: &mut App,
     ) -> Result<(), KitProviderError> {
         match action {
             "open" | "close" => {
@@ -205,13 +212,13 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn parse(value: serde_json::Value) -> Result<DialogProps, KitProviderError> {
-        <DialogWidget as KitWidget>::parse_props(&value)
+    fn parse(value: &serde_json::Value) -> Result<DialogProps, KitProviderError> {
+        <DialogWidget as KitWidget>::parse_props(value)
     }
 
     #[test]
     fn null_props_produce_the_documented_defaults() {
-        let props = parse(serde_json::Value::Null).expect("null is the empty object shorthand");
+        let props = parse(&serde_json::Value::Null).expect("null is the empty object shorthand");
         assert_eq!(props.title, "Confirmation");
         assert_eq!(props.trigger_label, "Open dialog");
         assert!(props.open);
@@ -220,20 +227,22 @@ mod tests {
 
     #[test]
     fn an_out_of_range_width_names_the_width_field() {
-        let error = parse(json!({"width": 100})).expect_err("a narrow dialog is outside the schema");
+        let error =
+            parse(&json!({"width": 100})).expect_err("a narrow dialog is outside the schema");
         assert!(error.to_string().contains("width"));
         assert!(error.to_string().contains("240"));
     }
 
     #[test]
     fn a_non_string_description_names_the_description_field() {
-        let error = parse(json!({"description": 3})).expect_err("a numeric description is invalid");
+        let error =
+            parse(&json!({"description": 3})).expect_err("a numeric description is invalid");
         assert!(error.to_string().contains("description"));
     }
 
     #[test]
     fn an_unknown_field_is_refused() {
-        let error = parse(json!({"closable": true})).expect_err("unknown fields are invalid");
+        let error = parse(&json!({"closable": true})).expect_err("unknown fields are invalid");
         assert!(error.to_string().contains("closable"));
     }
 }

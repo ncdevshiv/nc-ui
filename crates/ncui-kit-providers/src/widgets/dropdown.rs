@@ -12,9 +12,9 @@ use ncui_gpui::NativeEventSink;
 use ncui_webview::NativeViewEvent;
 use serde::Deserialize;
 
+use crate::KitProviderError;
 use crate::props;
 use crate::provider::KitWidget;
-use crate::KitProviderError;
 
 const ID: &str = "nc-ui-kit::dropdown";
 const MAX_OPTIONS: usize = 32;
@@ -27,7 +27,7 @@ fn default_placeholder() -> String {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DropdownProps {
+pub struct DropdownProps {
     options: Vec<String>,
     #[serde(default)]
     selected: usize,
@@ -141,7 +141,10 @@ impl KitWidget for DropdownWidget {
                         ID,
                         action,
                         "index",
-                        format!("must be less than the {} available options, not {index}", props.options.len()),
+                        format!(
+                            "must be less than the {} available options, not {index}",
+                            props.options.len()
+                        ),
                     ));
                 }
                 let changed = view.read(cx).selected != index;
@@ -166,13 +169,13 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn parse(value: serde_json::Value) -> Result<DropdownProps, KitProviderError> {
-        <DropdownWidget as KitWidget>::parse_props(&value)
+    fn parse(value: &serde_json::Value) -> Result<DropdownProps, KitProviderError> {
+        <DropdownWidget as KitWidget>::parse_props(value)
     }
 
     #[test]
     fn valid_options_decode_with_defaults() {
-        let props = parse(json!({"options": ["Alpha", "Beta"]})).expect("valid props decode");
+        let props = parse(&json!({"options": ["Alpha", "Beta"]})).expect("valid props decode");
         assert_eq!(props.options, ["Alpha", "Beta"]);
         assert_eq!(props.selected, 0);
         assert_eq!(props.placeholder, "Select…");
@@ -180,7 +183,7 @@ mod tests {
 
     #[test]
     fn missing_options_are_refused_by_field_name() {
-        let error = parse(serde_json::Value::Null).expect_err("options are required");
+        let error = parse(&serde_json::Value::Null).expect_err("options are required");
         assert_eq!(error.code(), "kit_invalid_props");
         assert!(error.to_string().contains("options"));
         assert!(error.to_string().contains("required"));
@@ -188,13 +191,14 @@ mod tests {
 
     #[test]
     fn a_bad_option_names_its_array_position() {
-        let error = parse(json!({"options": ["Alpha", 2]})).expect_err("non-string options are invalid");
+        let error =
+            parse(&json!({"options": ["Alpha", 2]})).expect_err("non-string options are invalid");
         assert!(error.to_string().contains("options[1]"));
     }
 
     #[test]
     fn a_selected_index_outside_the_options_is_refused() {
-        let error = parse(json!({"options": ["Alpha"], "selected": 1}))
+        let error = parse(&json!({"options": ["Alpha"], "selected": 1}))
             .expect_err("the selected index must exist");
         assert!(error.to_string().contains("selected"));
         assert!(error.to_string().contains("available options"));
@@ -202,8 +206,10 @@ mod tests {
 
     #[test]
     fn too_many_options_are_refused() {
-        let options: Vec<String> = (0..=MAX_OPTIONS).map(|index| format!("Option {index}")).collect();
-        let error = parse(json!({"options": options})).expect_err("the options bound is enforced");
+        let options: Vec<String> = (0..=MAX_OPTIONS)
+            .map(|index| format!("Option {index}"))
+            .collect();
+        let error = parse(&json!({"options": options})).expect_err("the options bound is enforced");
         assert!(error.to_string().contains("options"));
     }
 }

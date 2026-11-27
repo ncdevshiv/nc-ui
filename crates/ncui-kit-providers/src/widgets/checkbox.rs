@@ -12,16 +12,16 @@ use ncui_gpui::NativeEventSink;
 use ncui_webview::NativeViewEvent;
 use serde::Deserialize;
 
+use crate::KitProviderError;
 use crate::props;
 use crate::provider::KitWidget;
-use crate::KitProviderError;
 
 const ID: &str = "nc-ui-kit::checkbox";
 const MAX_LABEL_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct CheckboxProps {
+pub struct CheckboxProps {
     checked: bool,
     label: String,
     disabled: bool,
@@ -29,7 +29,11 @@ struct CheckboxProps {
 
 impl Default for CheckboxProps {
     fn default() -> Self {
-        Self { checked: false, label: "Enabled".to_owned(), disabled: false }
+        Self {
+            checked: false,
+            label: "Enabled".to_owned(),
+            disabled: false,
+        }
     }
 }
 
@@ -79,7 +83,12 @@ impl KitWidget for CheckboxWidget {
     const ID: &'static str = ID;
 
     fn parse_props(value: &serde_json::Value) -> Result<Self::Props, KitProviderError> {
-        props::decode(ID, value, &["checked", "label", "disabled"], Self::validate_shape)
+        props::decode(
+            ID,
+            value,
+            &["checked", "label", "disabled"],
+            Self::validate_shape,
+        )
     }
 
     fn build_child(
@@ -112,7 +121,11 @@ impl KitWidget for CheckboxWidget {
             "toggle" => {
                 props::ensure_empty_payload(ID, action, payload)?;
                 if props.disabled {
-                    return Err(props::action_unavailable(ID, action, "the checkbox is disabled"));
+                    return Err(props::action_unavailable(
+                        ID,
+                        action,
+                        "the checkbox is disabled",
+                    ));
                 }
                 let next = !view.read(cx).checked;
                 Self::set_checked(view, &events, next, "command", cx);
@@ -127,7 +140,11 @@ impl KitWidget for CheckboxWidget {
             "focus" => {
                 props::ensure_empty_payload(ID, action, payload)?;
                 if props.disabled {
-                    return Err(props::action_unavailable(ID, action, "the checkbox is disabled"));
+                    return Err(props::action_unavailable(
+                        ID,
+                        action,
+                        "the checkbox is disabled",
+                    ));
                 }
                 let focus = view.read(cx).focus_handle().clone();
                 window.focus(&focus);
@@ -143,13 +160,13 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn parse(value: serde_json::Value) -> Result<CheckboxProps, KitProviderError> {
-        <CheckboxWidget as KitWidget>::parse_props(&value)
+    fn parse(value: &serde_json::Value) -> Result<CheckboxProps, KitProviderError> {
+        <CheckboxWidget as KitWidget>::parse_props(value)
     }
 
     #[test]
     fn null_props_produce_the_documented_defaults() {
-        let props = parse(serde_json::Value::Null).expect("null is the empty object shorthand");
+        let props = parse(&serde_json::Value::Null).expect("null is the empty object shorthand");
         assert!(!props.checked);
         assert_eq!(props.label, "Enabled");
         assert!(!props.disabled);
@@ -157,14 +174,14 @@ mod tests {
 
     #[test]
     fn a_non_boolean_checked_value_names_its_field() {
-        let error = parse(json!({"checked": "true"})).expect_err("a string is not a boolean");
+        let error = parse(&json!({"checked": "true"})).expect_err("a string is not a boolean");
         assert!(error.to_string().contains("checked"));
         assert!(error.to_string().contains("boolean"));
     }
 
     #[test]
     fn an_empty_label_is_refused() {
-        let error = parse(json!({"label": ""})).expect_err("an empty label is invalid");
+        let error = parse(&json!({"label": ""})).expect_err("an empty label is invalid");
         assert!(error.to_string().contains("label"));
     }
 }

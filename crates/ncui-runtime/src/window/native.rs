@@ -15,47 +15,7 @@ use ncui_webview::WindowRejection;
 
 use super::Windows;
 
-/// What one poll of a window's native event queue found.
-///
-/// The answers are distinct because the caller's next move is distinct: a window that is
-/// not a native window is a refusal, an empty queue is an honest answer to poll again
-/// later, and an event is the payload the method exists to carry. Collapsing any two —
-/// an `Option` chain, say — would make the caller guess which silence it was answered
-/// with.
-#[derive(Debug)]
-pub enum NativePoll {
-    /// The window is open but carries no native view: it is a page window, or its engine
-    /// has no native half.
-    NotNative,
-    /// The window is a native window and its queue is empty.
-    Empty,
-    /// The window's native view emitted this event.
-    Event(ncui_webview::NativeViewEvent),
-}
-
 impl Windows {
-    /// Polls one native-view event from `window`, when one is queued.
-    ///
-    /// The three answers are kept apart because they are different facts: a window that
-    /// is not open is the outer refusal, an open window without a native view is
-    /// [`NativePoll::NotNative`], and a native view answers either the event it queued or
-    /// the empty queue it honestly has.
-    pub fn poll_native_event(&self, window: WindowId) -> Result<NativePoll, WindowRejection> {
-        self.with_registry_mut(|registry| {
-            let entry = registry
-                .get(window)
-                .ok_or_else(|| WindowRejection::EngineUnavailable {
-                    reason: Some(format!("window {window} is not open")),
-                })?;
-            let Some(native) = entry.host.as_ref().and_then(|host| host.native_view()) else {
-                return Ok(NativePoll::NotNative);
-            };
-            Ok(native
-                .poll_native_event()
-                .map_or(NativePoll::Empty, NativePoll::Event))
-        })
-    }
-
     /// Drains every native-view event `window` has queued, with the count dropped since
     /// the last drain.
     ///

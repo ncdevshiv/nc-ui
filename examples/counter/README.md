@@ -96,10 +96,10 @@ page remains available and the button's refusal names the missing native host. I
 `standard` and `minimal` bundle profiles there is no GPUI dependency at all, so the same button
 is refused explicitly rather than opening a blank page.
 
-The manifest schema in this tree still accepts only a string `entry`. A native object as the
-application's first window is the remaining schema work in `ncui-app`; this example therefore
-demonstrates native content as a second window rather than pretending the entry form already
-exists.
+The manifest accepts a native object as `entry` — `{"kind": "native", "provider": "...",
+"props": {...}}` — so an application whose root window *is* a native view can say so. This
+example still demonstrates native content as a second window instead, because its root window
+is the page the rest of the tour is about.
 
 ## What the plugin demonstrates
 

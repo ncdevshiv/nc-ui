@@ -18,7 +18,9 @@ use gpui::AppContext as _;
 
 use crate::GpuiHostError;
 use crate::engine::{EngineWindow, OpenWindowOutcome, OpenWindowSpec};
-use crate::provider::{NativeEventSink, NativeViewContext, NativeViewInstance, providers};
+use crate::provider::{
+    NativeEventSink, NativeViewContext, NativeViewInstance, NativeViewProvider, providers,
+};
 
 /// The window-root wrapper: the concrete type every native window shares.
 ///
@@ -116,6 +118,128 @@ pub(crate) fn window_options(
     }
 }
 
+/// How a provider's build ended when it did not build, as the closure reports it
+/// through the slot.
+///
+/// The distinction is typed rather than a marker inside the reason's wording because
+/// the two endings are different kinds of fact: a refusal is the provider's decision —
+/// the props named a view it will not build — while a panic is a defect in trusted
+/// code, which the provider decided nothing about. An operator reading the engine's
+/// log needs to tell them apart without parsing sentences.
+enum BuildFailure {
+    /// The provider refused its props, with its own reason.
+    Refused(String),
+    /// The provider panicked while the view was being built.
+    Panicked,
+}
+
+/// The slot a window's build closure writes its outcome into.
+///
+/// The closure handed to gpui's `open_window` must produce a root entity whether or not
+/// the provider's build succeeded — its return type has no room for failure — so the
+/// outcome travels through this shared memory instead: the instance the provider built,
+/// or the way it did not. The bridge reads it once the window call returns.
+type BuildOutcomeSlot = Arc<Mutex<Option<Result<Box<dyn NativeViewInstance>, BuildFailure>>>>;
+
+/// The provider a window-open names, or the typed refusal with the operator's warning
+/// already written.
+///
+/// A window naming a provider nobody registered is the caller's mistake surfacing where
+/// it was made: the refusal is typed for the caller and the warning is for the operator
+/// reading the engine's own account of the night.
+fn lookup_provider(spec: &OpenWindowSpec) -> Result<Arc<dyn NativeViewProvider>, GpuiHostError> {
+    let Some(provider) = providers().get(&spec.provider) else {
+        let error = GpuiHostError::UnknownProvider {
+            provider: spec.provider.clone(),
+        };
+        tracing::warn!(
+            window = %spec.window,
+            provider = %spec.provider,
+            error_code = error.code(),
+            "native window open refused: no provider is registered under the name asked for"
+        );
+        return Err(error);
+    };
+    Ok(provider)
+}
+
+/// The closure gpui's `open_window` builds the window's root with.
+///
+/// The closure reports and the bridge interprets: what happened inside the build is
+/// written to the slot as data, and the logging happens when the outcome is read — one
+/// report, in one place, at the moment the typed error is constructed with its stable
+/// code. The closure itself says nothing not because it could not — the identities are
+/// there to capture — but because a second report would be one failure logged twice,
+/// and a reader grepping the night would have to learn to ignore one of them.
+fn build_closure(
+    provider: Arc<dyn NativeViewProvider>,
+    context: NativeViewContext,
+    outcome: BuildOutcomeSlot,
+) -> impl FnOnce(&mut gpui::Window, &mut gpui::App) -> gpui::Entity<NativeRoot> {
+    move |window: &mut gpui::Window, cx: &mut gpui::App| {
+        let built = catch_unwind(AssertUnwindSafe(|| provider.build(context, window, cx)));
+        match built {
+            Ok(Ok((view, instance))) => {
+                if let Ok(mut slot) = outcome.lock() {
+                    *slot = Some(Ok(instance));
+                }
+                cx.new(|_| NativeRoot { view })
+            }
+            Ok(Err(reason)) => {
+                if let Ok(mut slot) = outcome.lock() {
+                    *slot = Some(Err(BuildFailure::Refused(reason)));
+                }
+                empty_root(cx)
+            }
+            Err(_) => {
+                if let Ok(mut slot) = outcome.lock() {
+                    *slot = Some(Err(BuildFailure::Panicked));
+                }
+                empty_root(cx)
+            }
+        }
+    }
+}
+
+/// What a failed build means for the window-open: the typed error, with the failure
+/// logged at the level its kind deserves.
+///
+/// The levels are the failure's meaning rather than its surface. A refusal is the
+/// provider's decision — the props named a view it will not build — and decisions are
+/// warnings: the caller learns theirs typed, and the operator reads what the provider
+/// said. A panic is a defect in trusted code, which the provider decided nothing about,
+/// so it is an error even though contractually it is still the provider's answer: the
+/// window is refused either way.
+fn build_failure_error(spec: &OpenWindowSpec, failure: BuildFailure) -> GpuiHostError {
+    match failure {
+        BuildFailure::Refused(reason) => {
+            let error = GpuiHostError::ProviderRefused {
+                provider: spec.provider.clone(),
+                reason,
+            };
+            tracing::warn!(
+                window = %spec.window,
+                error_code = error.code(),
+                %error,
+                "native window open failed: the provider refused its props"
+            );
+            error
+        }
+        BuildFailure::Panicked => {
+            let error = GpuiHostError::ProviderRefused {
+                provider: spec.provider.clone(),
+                reason: "the provider panicked while the view was being built".to_owned(),
+            };
+            tracing::error!(
+                window = %spec.window,
+                error_code = error.code(),
+                "native window open failed: the provider panicked while its view was being built"
+            );
+            error
+        }
+    }
+}
+
 /// Opens one native window: build the view inside gpui's closure, keep the instance.
 ///
 /// The provider's build can only happen inside `open_window`'s closure — that is the
@@ -124,16 +248,15 @@ pub(crate) fn window_options(
 /// bridge reads afterwards: a failed build closes the window it just made and reports
 /// the provider's refusal, rather than leaving an empty window on the screen as a
 /// monument to a view that never built.
+///
+/// The spec is borrowed rather than consumed because nothing in the open moves out of
+/// it: the props and the provider name are cloned into the places that outlive the call.
 pub(crate) fn open_window(
     cx: &mut gpui::AsyncApp,
-    spec: OpenWindowSpec,
+    spec: &OpenWindowSpec,
     windows: &mut HashMap<WindowId, EngineWindow>,
 ) -> Result<OpenWindowOutcome, GpuiHostError> {
-    let provider = providers()
-        .get(&spec.provider)
-        .ok_or_else(|| GpuiHostError::UnknownProvider {
-            provider: spec.provider.clone(),
-        })?;
+    let provider = lookup_provider(spec)?;
 
     let sink = Arc::new(NativeEventSink::new());
     let alive = Arc::new(AtomicBool::new(true));
@@ -143,55 +266,46 @@ pub(crate) fn open_window(
         events: Arc::clone(&sink),
     };
 
-    let options = cx.update(|cx| window_options(&spec.request, cx)).map_err(|error| {
-        GpuiHostError::EngineUnavailable {
-            reason: format!("the application could not prepare the window's frame: {error}"),
-        }
-    })?;
+    let options = cx
+        .update(|cx| window_options(&spec.request, cx))
+        .map_err(|error| {
+            // The failures the platform answers for — a frame the application could not
+            // prepare, a window gpui could not create — are errors rather than warnings:
+            // a healthy engine does not produce them at all.
+            let failure = GpuiHostError::EngineUnavailable {
+                reason: format!("the application could not prepare the window's frame: {error}"),
+            };
+            tracing::error!(
+                window = %spec.window,
+                provider = %spec.provider,
+                error_code = failure.code(),
+                %error,
+                "the gpui application could not prepare a window's frame"
+            );
+            failure
+        })?;
 
     // The slot the closure writes. `Rc` would do on one thread, but the closure is
     // `Send`-bound through gpui's types in some configurations and the mutex costs
     // nothing here — it is locked twice in the lifetime of the window.
-    let build_outcome: Arc<Mutex<Option<Result<Box<dyn NativeViewInstance>, String>>>> =
-        Arc::new(Mutex::new(None));
-    let closure_outcome = Arc::clone(&build_outcome);
+    let build_outcome: BuildOutcomeSlot = Arc::new(Mutex::new(None));
+    let build = build_closure(provider, context, Arc::clone(&build_outcome));
 
-    let build = move |window: &mut gpui::Window, cx: &mut gpui::App| {
-        let built = catch_unwind(AssertUnwindSafe(|| provider.build(context, window, cx)));
-        match built {
-            Ok(Ok((view, instance))) => {
-                if let Ok(mut slot) = closure_outcome.lock() {
-                    *slot = Some(Ok(instance));
-                }
-                cx.new(|_| NativeRoot { view })
-            }
-            Ok(Err(reason)) => {
-                if let Ok(mut slot) = closure_outcome.lock() {
-                    *slot = Some(Err(reason));
-                }
-                empty_root(cx)
-            }
-            Err(_) => {
-                if let Ok(mut slot) = closure_outcome.lock() {
-                    *slot = Some(Err(
-                        "the provider panicked while the view was being built".to_owned()
-                    ));
-                }
-                empty_root(cx)
-            }
-        }
-    };
-
-    let handle = cx
-        .open_window(options, build)
-        .map_err(|error| GpuiHostError::EngineUnavailable {
+    let handle = cx.open_window(options, build).map_err(|error| {
+        let failure = GpuiHostError::EngineUnavailable {
             reason: format!("gpui could not create the window: {error}"),
-        })?;
+        };
+        tracing::error!(
+            window = %spec.window,
+            provider = %spec.provider,
+            error_code = failure.code(),
+            %error,
+            "gpui could not create the window"
+        );
+        failure
+    })?;
 
-    let outcome = build_outcome
-        .lock()
-        .ok()
-        .and_then(|mut slot| slot.take());
+    let outcome = build_outcome.lock().ok().and_then(|mut slot| slot.take());
     match outcome {
         Some(Ok(instance)) => {
             windows.insert(
@@ -203,27 +317,40 @@ pub(crate) fn open_window(
                     provider: spec.provider.clone(),
                 },
             );
+            tracing::info!(
+                window = %spec.window,
+                provider = %spec.provider,
+                "native window opened"
+            );
             Ok(OpenWindowOutcome {
                 events: sink,
                 alive,
             })
         }
-        Some(Err(reason)) => {
+        Some(Err(failure)) => {
+            let error = build_failure_error(spec, failure);
             let _ = handle.update(cx, |_, window, _| {
                 window.remove_window();
             });
-            Err(GpuiHostError::ProviderRefused {
-                provider: spec.provider.clone(),
-                reason,
-            })
+            Err(error)
         }
         None => {
+            // The closure ran — the window exists — yet wrote no outcome. That is not
+            // a provider failure but a violation of the slot contract itself, which
+            // only a defect in this crate can produce.
+            let error = GpuiHostError::EngineUnavailable {
+                reason: "the view's build neither succeeded nor reported its failure".to_owned(),
+            };
+            tracing::error!(
+                window = %spec.window,
+                provider = %spec.provider,
+                error_code = error.code(),
+                "a view's build neither succeeded nor reported its failure"
+            );
             let _ = handle.update(cx, |_, window, _| {
                 window.remove_window();
             });
-            Err(GpuiHostError::EngineUnavailable {
-                reason: "the view's build neither succeeded nor reported its failure".to_owned(),
-            })
+            Err(error)
         }
     }
 }
@@ -239,6 +366,11 @@ pub(crate) fn close_window(
         let _ = engine_window.handle.update(cx, |_, window, _| {
             window.remove_window();
         });
+        tracing::info!(
+            window = %window,
+            provider = %engine_window.provider,
+            "native window closed"
+        );
     }
 }
 
@@ -249,11 +381,15 @@ pub(crate) fn close_window(
 /// that the application no longer lists is a window that went — its liveness is flipped
 /// and its instance dropped, which is what lets the host answer `is_alive` truthfully
 /// without ever round-tripping.
-pub(crate) fn reconcile_windows(cx: &mut gpui::AsyncApp, windows: &mut HashMap<WindowId, EngineWindow>) {
-    let live: Vec<gpui::AnyWindowHandle> = cx
-        .update(|cx| cx.windows())
-        .unwrap_or_default();
-    let live_ids: Vec<u64> = live.iter().map(|handle| handle.window_id().as_u64()).collect();
+pub(crate) fn reconcile_windows(
+    cx: &mut gpui::AsyncApp,
+    windows: &mut HashMap<WindowId, EngineWindow>,
+) {
+    let live: Vec<gpui::AnyWindowHandle> = cx.update(|cx| cx.windows()).unwrap_or_default();
+    let live_ids: Vec<u64> = live
+        .iter()
+        .map(|handle| handle.window_id().as_u64())
+        .collect();
     let gone: Vec<WindowId> = windows
         .iter()
         .filter(|(_, engine_window)| !live_ids.contains(&engine_window.handle.window_id().as_u64()))
@@ -262,18 +398,29 @@ pub(crate) fn reconcile_windows(cx: &mut gpui::AsyncApp, windows: &mut HashMap<W
     for id in gone {
         if let Some(engine_window) = windows.remove(&id) {
             engine_window.alive.store(false, Ordering::SeqCst);
+            // A window the reconciliation finds gone is one nobody asked the engine to
+            // close: the platform dropped it — the user closing the chrome is the
+            // ordinary case — so the close is recorded with its origin rather than as
+            // one more host-requested close.
+            tracing::info!(
+                window = %id,
+                provider = %engine_window.provider,
+                "native window closed by the platform"
+            );
         }
     }
 }
 
 /// The window lookup every operation shares: present-and-tracked, or the typed refusal.
-pub(crate) fn tracked<'a>(
+pub(crate) fn tracked(
     window: WindowId,
-    windows: &'a mut HashMap<WindowId, EngineWindow>,
-) -> Result<&'a mut EngineWindow, GpuiHostError> {
-    windows.get_mut(&window).ok_or_else(|| GpuiHostError::WindowGone {
-        window: window.to_string(),
-    })
+    windows: &mut HashMap<WindowId, EngineWindow>,
+) -> Result<&mut EngineWindow, GpuiHostError> {
+    windows
+        .get_mut(&window)
+        .ok_or_else(|| GpuiHostError::WindowGone {
+            window: window.to_string(),
+        })
 }
 
 /// Replaces one window's props through the instance that knows what they mean.
@@ -288,9 +435,7 @@ pub(crate) fn update_props(
     let provider = engine_window.provider.clone();
     let instance = &mut engine_window.instance;
     handle
-        .update(cx, |_, window, cx| {
-            instance.update_props(props, window, cx)
-        })
+        .update(cx, |_, window, cx| instance.update_props(props, window, cx))
         .map_err(|_| GpuiHostError::WindowGone {
             window: window.to_string(),
         })?

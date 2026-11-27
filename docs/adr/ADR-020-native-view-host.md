@@ -204,8 +204,11 @@ delivering props updates and verb invocations — covered by the pipeline tests 
 nc-ui-kit widgets with strictly validated props, tested headlessly through GPUI's own test
 platform in `crates/ncui-kit-providers/tests/providers.rs`. The layering is enforced —
 `ncui-gpui` sits at layer 3 beside `ncui-webview-wry`, and `ncui-kit-providers` at layer
-4 — by the same `ncui-arch` check that has always enforced it. What remains open: the
-manifest schema does not yet declare a native root window (a native window is opened
-through the window surface, not named as an application's entry), GPUI 0.2.2's asset
-source is fixed at application construction so provider SVG assets are not yet installed,
-and neither Linux nor macOS has been verified.
+4 — by the same `ncui-arch` check that has always enforced it. The manifest declares
+native entries (`crates/ncui-app/tests/manifest_entry.rs`) and the launcher opens a native
+root window without a page present (`crates/ncui-runtime/tests/native_entry_launch.rs`).
+The composition root installs the kit's asset source through
+`GpuiHostFactory::with_asset_source`, so provider SVG assets resolve in hosted windows —
+the plumbing is proven headlessly in `crates/ncui-gpui`'s lib tests and end to end by the
+display-gated `the_asset_source_reaches_the_running_application`. What genuinely remains
+open is platform coverage: neither Linux nor macOS has been verified.

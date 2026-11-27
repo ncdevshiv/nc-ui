@@ -244,7 +244,18 @@ fn native_host() -> NativeHostOutcome {
         let registered = ncui_kit_providers::register_all();
         tracing::info!(registered, "nc-ui-kit native view providers registered");
     }
-    match ncui_gpui::GpuiHostFactory::new() {
+    // The asset source is decided here because here is the only place it honestly can be:
+    // gpui fixes the source when the application is constructed, the engine is
+    // process-wide, and construction happens below. The kit's own source serves its icons
+    // and theme files; a build without the kit has no stock provider set whose assets the
+    // CLI could know, so the bare constructor is the honest answer there.
+    #[cfg(feature = "kit-providers")]
+    let factory = ncui_gpui::GpuiHostFactory::with_asset_source(std::sync::Arc::new(
+        ncui_kit_providers::assets::asset_source(),
+    ));
+    #[cfg(not(feature = "kit-providers"))]
+    let factory = ncui_gpui::GpuiHostFactory::new();
+    match factory {
         Ok(factory) => NativeHostOutcome::Ready(Box::new(factory)),
         Err(error) => NativeHostOutcome::Failed(error.to_string()),
     }

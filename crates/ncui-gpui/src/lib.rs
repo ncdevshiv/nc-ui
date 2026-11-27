@@ -39,9 +39,9 @@ pub mod error;
 #[cfg(feature = "gpui-engine")]
 pub mod engine;
 #[cfg(feature = "gpui-engine")]
-mod ops;
-#[cfg(feature = "gpui-engine")]
 pub mod host;
+#[cfg(feature = "gpui-engine")]
+mod ops;
 #[cfg(feature = "gpui-engine")]
 pub mod provider;
 

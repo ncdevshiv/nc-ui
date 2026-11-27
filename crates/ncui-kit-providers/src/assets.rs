@@ -13,11 +13,14 @@
 //! a partial installation was never asked for explicitly. The development fallback is
 //! always returned as a last resort and carries its completeness flag honestly.
 //!
-//! One integration boundary is outside this crate's control: gpui 0.2.2 accepts an
+//! The integration boundary is respected rather than crossed: gpui 0.2.2 accepts an
 //! [`gpui::AssetSource`] only through `Application::with_assets` before the application
-//! runs. `ncui-gpui` constructs its application internally without one, so [`KitAssets`]
-//! is correct and ready but cannot yet be installed by this bridge alone. The consequence
-//! is missing SVG glyphs, not inert widgets: hit regions, text, keyboard handling and
+//! runs, so [`KitAssets`] cannot install itself. It is instead handed to the engine by the
+//! composition root — `ncui-cli` builds the factory with
+//! `GpuiHostFactory::with_asset_source` when the kit-providers feature is on — because the
+//! composition root is the one place that owns both sides of that handoff. Were the source
+//! ever absent, the consequence would be missing SVG glyphs, not inert widgets: hit
+//! regions, text, keyboard handling and
 //! event wiring do not depend on those files.
 
 use std::borrow::Cow;

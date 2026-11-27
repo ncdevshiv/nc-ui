@@ -50,6 +50,23 @@ pub enum GpuiHostError {
         /// Why the platform cannot do it.
         reason: String,
     },
+    /// The asset source a factory was configured with cannot be honoured, because the
+    /// engine is already running and gpui fixes the application's asset source at
+    /// construction.
+    ///
+    /// This is an ordering failure, not a missing capability: the first construction
+    /// wins, so a factory that needs its own source must be the one that starts the
+    /// engine — or must share, by `Arc` identity, the source the running engine was
+    /// built with. The field distinguishes the two ways the conflict arises, because
+    /// they are different composition mistakes: an engine with no asset source means
+    /// assets were never configured, while an engine carrying one means two different
+    /// sources were configured and only the first could win.
+    AssetSourceConflict {
+        /// Whether the running engine carries any asset source at all: `false` means it
+        /// was constructed with gpui's empty default, `true` means it carries one that
+        /// is not the one being asked for.
+        engine_has_assets: bool,
+    },
 }
 
 impl GpuiHostError {
@@ -67,6 +84,7 @@ impl GpuiHostError {
             Self::ProviderRefused { .. } => "gpui_provider_refused",
             Self::WrongContentKind { .. } => "gpui_wrong_content_kind",
             Self::UnsupportedOperation { .. } => "gpui_unsupported_operation",
+            Self::AssetSourceConflict { .. } => "gpui_asset_source_conflict",
         }
     }
 }
@@ -93,6 +111,20 @@ impl core::fmt::Display for GpuiHostError {
             Self::UnsupportedOperation { operation, reason } => {
                 write!(f, "the platform cannot {operation}: {reason}")
             }
+            Self::AssetSourceConflict { engine_has_assets } => {
+                let installed = if *engine_has_assets {
+                    "a different asset source"
+                } else {
+                    "gpui's empty default asset source"
+                };
+                write!(
+                    f,
+                    "the asset source cannot be installed: the GPUI engine is already running \
+                     with {installed}, and gpui fixes the application's asset source at \
+                     construction — the factory carrying assets must start the engine, share \
+                     the running engine's source, or accept the running engine as it is"
+                )
+            }
         }
     }
 }
@@ -106,13 +138,32 @@ mod tests {
     #[test]
     fn every_variant_has_a_distinct_stable_code() {
         let errors = [
-            GpuiHostError::EngineUnavailable { reason: "x".to_owned() },
-            GpuiHostError::EngineTimeout { operation: "x".to_owned() },
-            GpuiHostError::WindowGone { window: "x".to_owned() },
-            GpuiHostError::UnknownProvider { provider: "x".to_owned() },
-            GpuiHostError::ProviderRefused { provider: "x".to_owned(), reason: "y".to_owned() },
-            GpuiHostError::WrongContentKind { kind: "x".to_owned() },
-            GpuiHostError::UnsupportedOperation { operation: "x".to_owned(), reason: "y".to_owned() },
+            GpuiHostError::EngineUnavailable {
+                reason: "x".to_owned(),
+            },
+            GpuiHostError::EngineTimeout {
+                operation: "x".to_owned(),
+            },
+            GpuiHostError::WindowGone {
+                window: "x".to_owned(),
+            },
+            GpuiHostError::UnknownProvider {
+                provider: "x".to_owned(),
+            },
+            GpuiHostError::ProviderRefused {
+                provider: "x".to_owned(),
+                reason: "y".to_owned(),
+            },
+            GpuiHostError::WrongContentKind {
+                kind: "x".to_owned(),
+            },
+            GpuiHostError::UnsupportedOperation {
+                operation: "x".to_owned(),
+                reason: "y".to_owned(),
+            },
+            GpuiHostError::AssetSourceConflict {
+                engine_has_assets: false,
+            },
         ];
         let mut codes: Vec<&str> = errors.iter().map(GpuiHostError::code).collect();
         let count = codes.len();
@@ -123,7 +174,9 @@ mod tests {
 
     #[test]
     fn display_messages_render_the_values_that_caused_them() {
-        let error = GpuiHostError::UnknownProvider { provider: "kit::gallery".to_owned() };
+        let error = GpuiHostError::UnknownProvider {
+            provider: "kit::gallery".to_owned(),
+        };
         assert!(error.to_string().contains("kit::gallery"));
     }
 }

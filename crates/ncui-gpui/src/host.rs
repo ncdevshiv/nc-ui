@@ -23,7 +23,9 @@ use ncui_webview::{
 };
 
 use crate::GpuiHostError;
-use crate::engine::{ENGINE_REPLY_TIMEOUT, EngineCommand, EngineSender, OpenWindowOutcome, OpenWindowSpec, engine};
+use crate::engine::{
+    ENGINE_REPLY_TIMEOUT, EngineCommand, EngineSender, OpenWindowOutcome, OpenWindowSpec, engine,
+};
 use crate::provider::NativeEventSink;
 
 /// Sends one command into the engine and waits for its answer.
@@ -33,27 +35,53 @@ use crate::provider::NativeEventSink;
 /// and there is no honest way to tell those apart from outside; and a disconnected reply
 /// means the command's answer died with a panic inside the bridge. All three are engine
 /// failures rather than window failures, which is why they share the one error.
+///
+/// Each failure is logged where it is observed, because these are the paths an operator
+/// debugs at 3am: a typed error travels back to the caller, but the caller is a pump
+/// that cannot say when it happened or what else was failing beside it. The levels are
+/// the failure's own meaning. A refused send is a symptom — the engine's end was already
+/// logged at its source — so it is a warning. A timeout is a discovery: the engine
+/// looked alive and did not answer, which is the partial hang ADR-020 names as the two
+/// loops' shared failure mode. A lost answer is a defect — the command panicked inside
+/// the bridge — and defects are errors.
 fn roundtrip<T>(
     engine: &EngineSender,
     operation: &'static str,
     command: impl FnOnce(flume::Sender<Result<T, GpuiHostError>>) -> EngineCommand,
 ) -> Result<T, GpuiHostError> {
     let (reply_tx, reply_rx) = flume::bounded(1);
-    engine
-        .send(command(reply_tx))
-        .map_err(|_| GpuiHostError::EngineUnavailable {
+    if engine.send(command(reply_tx)).is_err() {
+        tracing::warn!(
+            operation,
+            "a gpui engine command could not be sent: the engine thread is gone"
+        );
+        return Err(GpuiHostError::EngineUnavailable {
             reason: "the engine thread is gone: the command channel is closed".to_owned(),
-        })?;
+        });
+    }
     match reply_rx.recv_timeout(ENGINE_REPLY_TIMEOUT) {
         Ok(result) => result,
-        Err(flume::RecvTimeoutError::Timeout) => Err(GpuiHostError::EngineTimeout {
-            operation: operation.to_owned(),
-        }),
-        Err(flume::RecvTimeoutError::Disconnected) => Err(GpuiHostError::EngineUnavailable {
-            reason: format!(
-                "the answer to {operation} was lost: the command panicked inside the engine"
-            ),
-        }),
+        Err(flume::RecvTimeoutError::Timeout) => {
+            tracing::error!(
+                operation,
+                timeout_ms = ENGINE_REPLY_TIMEOUT.as_millis() as u64,
+                "the gpui engine did not answer a command in time"
+            );
+            Err(GpuiHostError::EngineTimeout {
+                operation: operation.to_owned(),
+            })
+        }
+        Err(flume::RecvTimeoutError::Disconnected) => {
+            tracing::error!(
+                operation,
+                "the answer to a gpui engine command was lost with the command"
+            );
+            Err(GpuiHostError::EngineUnavailable {
+                reason: format!(
+                    "the answer to {operation} was lost: the command panicked inside the engine"
+                ),
+            })
+        }
     }
 }
 
@@ -88,7 +116,10 @@ impl core::fmt::Debug for GpuiWindowHost {
 
 impl GpuiWindowHost {
     /// Records a failure so `last_error` can answer for it, returning the failure.
-    fn note<T>(&self, error: GpuiHostError) -> Option<T> {
+    ///
+    /// The error is borrowed because recording is all that happens to it: the string is
+    /// the host's copy, and nothing here consumes the typed value.
+    fn note<T>(&self, error: &GpuiHostError) -> Option<T> {
         if let Ok(mut slot) = self.error.lock() {
             *slot = Some(error.to_string());
         }
@@ -129,7 +160,6 @@ impl WebViewBackend for GpuiWindowHost {
         false
     }
 
-
     fn geometry(&self) -> Option<WindowGeometry> {
         let window = self.window;
         match roundtrip(&self.engine, "geometry", |reply| EngineCommand::Geometry {
@@ -137,7 +167,7 @@ impl WebViewBackend for GpuiWindowHost {
             reply,
         }) {
             Ok(geometry) => Some(geometry),
-            Err(error) => self.note(error),
+            Err(error) => self.note(&error),
         }
     }
 
@@ -165,7 +195,7 @@ impl WebViewBackend for GpuiWindowHost {
             });
         match result {
             Ok(()) => None,
-            Err(error) => self.note(error),
+            Err(error) => self.note(&error),
         }
     }
 
@@ -219,7 +249,7 @@ impl WebViewBackend for GpuiWindowHost {
             EngineCommand::WindowTheme { window, reply }
         }) {
             Ok(theme) => Some(theme),
-            Err(error) => self.note(error),
+            Err(error) => self.note(&error),
         }
     }
 
@@ -312,14 +342,54 @@ pub struct GpuiHostFactory {
 impl GpuiHostFactory {
     /// Builds the factory, starting the engine thread if this process has not already.
     ///
+    /// The engine's application is constructed with gpui's default asset source — the
+    /// `()` that answers every load with absence. A factory whose windows need real
+    /// assets is built with [`GpuiHostFactory::with_asset_source`] instead.
+    ///
     /// # Errors
     ///
     /// Returns [`GpuiHostError::EngineUnavailable`] when the engine thread could not
     /// start or has already died — the reason inside is the platform's own account:
     /// a failed device, a missing display, or a loop that ended.
     pub fn new() -> Result<Self, GpuiHostError> {
+        Self::start(None)
+    }
+
+    /// Builds the factory with the asset source the engine's application is constructed
+    /// with.
+    ///
+    /// gpui fixes the asset source at application construction — `with_assets` exists on
+    /// the application builder and nowhere else — so the source is a birthright, not a
+    /// setting: the factory whose construction starts the engine is the factory whose
+    /// source the application carries. That is why this is a constructor rather than a
+    /// builder method on an existing factory, and why the factory does not keep a copy
+    /// once construction has answered: after the engine is built the source lives inside
+    /// the application, and a retained copy would pretend at a per-factory asset
+    /// pipeline that one process cannot have.
+    ///
+    /// The source is type-erased because the composition root cannot name the concrete
+    /// type — this crate is layer 3 and the sources live in layer 4 — and `Arc` because
+    /// the engine is process-wide: every later factory built with the *same* source is
+    /// accepted, and identity is the only comparison two type-erased trait objects can
+    /// honestly support.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GpuiHostError::EngineUnavailable`] when the engine thread could not
+    /// start or has already died. Returns [`GpuiHostError::AssetSourceConflict`] when
+    /// the engine is already running with a different source — or with no source at all
+    /// — because the first construction wins. A caller that can accept the running
+    /// engine's configuration falls back to [`GpuiHostFactory::new`]; a caller that
+    /// cannot must construct this factory before anything else starts the engine.
+    pub fn with_asset_source(source: Arc<dyn gpui::AssetSource>) -> Result<Self, GpuiHostError> {
+        Self::start(Some(source))
+    }
+
+    /// The one construction path both public constructors share: whatever the engine is
+    /// asked for, the asking is the same.
+    fn start(assets: Option<Arc<dyn gpui::AssetSource>>) -> Result<Self, GpuiHostError> {
         Ok(Self {
-            engine: engine()?,
+            engine: engine(assets)?,
             error: Mutex::new(None),
         })
     }
@@ -332,11 +402,20 @@ impl HostFactory for GpuiHostFactory {
         request: &ncui_webview::WindowRequest,
         _seam: &Arc<ncui_webview::HostSeam>,
     ) -> Option<Box<dyn WebViewBackend>> {
-        let ncui_webview::WindowContent::Native { provider, props } = &request.content
-        else {
+        let ncui_webview::WindowContent::Native { provider, props } = &request.content else {
             let error = GpuiHostError::WrongContentKind {
                 kind: request.content.kind_name().to_owned(),
             };
+            // This factory is the backstop for a routing decision the registry already
+            // made upstream — the registry routes native content here and everything
+            // else away. The backstop firing therefore means the routing itself is
+            // broken, which is a defect rather than a refusal, and a defect is logged.
+            tracing::warn!(
+                window = %window,
+                kind = request.content.kind_name(),
+                error_code = error.code(),
+                "the gpui host was asked for content that is not native: the routing upstream is broken"
+            );
             if let Ok(mut slot) = self.error.lock() {
                 *slot = Some(error.to_string());
             }
@@ -392,3 +471,68 @@ impl HostFactory for GpuiHostFactory {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The smallest asset source that is not gpui's default: it proves the plumbing is
+    /// about the configured object rather than about the `()` the engine carries when
+    /// nobody configures one.
+    #[derive(Debug)]
+    struct TestAssets;
+
+    impl gpui::AssetSource for TestAssets {
+        fn load(&self, _path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+            Ok(None)
+        }
+
+        fn list(&self, _path: &str) -> gpui::Result<Vec<gpui::SharedString>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// The ordering invariant this test relies on: it is the *only* lib test that starts
+    /// the engine, because the engine is process-wide and the first construction decides
+    /// what the application carries. Any future lib test that constructs a factory must
+    /// go through this one or accept whatever ordering the parallel runner chooses —
+    /// which is why none may. The display-gated integration suite proves the source
+    /// actually reaches the running application; what this test proves is the factory
+    /// half: construction succeeds, identity is honoured, and a mismatch is the typed
+    /// conflict rather than a silent drop.
+    #[test]
+    fn a_factory_configured_with_an_asset_source_carries_it_into_the_engine() {
+        let source: Arc<dyn gpui::AssetSource> = Arc::new(TestAssets);
+        let factory = match GpuiHostFactory::with_asset_source(Arc::clone(&source)) {
+            Ok(factory) => factory,
+            Err(GpuiHostError::EngineUnavailable { .. }) => {
+                // No display on this machine: the engine cannot start, so the test skips
+                // rather than fails — the same contract the integration suite keeps.
+                return;
+            }
+            Err(error) => {
+                panic!("the factory failed in a way the test does not understand: {error}")
+            }
+        };
+        drop(factory);
+
+        // The running engine carries this source, so asking for the very same
+        // allocation again is accepted: identity is the honest comparison.
+        GpuiHostFactory::with_asset_source(Arc::clone(&source))
+            .expect("the running engine's own source is accepted");
+        // A factory asking for nothing accepts whatever the engine carries.
+        GpuiHostFactory::new().expect("a factory without a source accepts the running engine");
+        // A different source cannot be installed — gpui fixes the source at
+        // construction — and the refusal is the typed conflict, with the field that
+        // says the engine does carry one.
+        let conflict = GpuiHostFactory::with_asset_source(Arc::new(TestAssets));
+        assert!(
+            matches!(
+                conflict,
+                Err(GpuiHostError::AssetSourceConflict {
+                    engine_has_assets: true
+                })
+            ),
+            "a different asset source on a running engine is a typed conflict: {conflict:?}"
+        );
+    }
+}

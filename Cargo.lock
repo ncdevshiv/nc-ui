@@ -4278,13 +4278,16 @@ name = "ncui-bench"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "gpui",
  "ncui-a11y",
  "ncui-abi",
  "ncui-app",
  "ncui-component",
  "ncui-core",
  "ncui-gpu-renderer",
+ "ncui-gpui",
  "ncui-ipc",
+ "ncui-kit-providers",
  "ncui-native",
  "ncui-observability",
  "ncui-runtime",
@@ -4367,6 +4370,7 @@ dependencies = [
  "ncui-webview",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]

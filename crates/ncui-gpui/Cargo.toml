@@ -18,13 +18,23 @@ default = []
 # whole workspace — compiles and tests on a machine with no display and no graphics
 # stack, exactly like the wry host's `wry-engine` feature. ADR-012 records gpui as a
 # deliberate dependency exception, confined to this crate and the kit bridge.
-gpui-engine = ["dep:gpui", "dep:flume"]
+#
+# `tracing` is tied to the feature rather than unconditional because every instrumented
+# statement lives in the engine's modules: the feature-off build is a documentation
+# stand-in with no running machinery, and a dependency nothing uses would be a lie about
+# what the stand-in needs.
+gpui-engine = ["dep:gpui", "dep:flume", "dep:tracing"]
 
 [dependencies]
 ncui-webview = { workspace = true }
 ncui-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Structured instrumentation for the engine thread's lifecycle, the window operations it
+# performs and the failure paths an operator reads at 3am. Events are emitted with typed
+# fields rather than formatted strings, matching the runtime's convention, so one filter
+# governs the crate's output the way it governs every other crate's.
+tracing = { workspace = true, optional = true }
 
 # ADR-012 eleventh exception: a native immediate-mode UI is Win32 windowing, DirectX rendering
 # and DirectWrite text, all foreign functions, and `unsafe_code = "forbid"` rejects calling

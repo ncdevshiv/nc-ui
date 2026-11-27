@@ -49,6 +49,19 @@ impl NativeEventSink {
     /// [`NativeViewEvent::is_within_bounds`] before emitting, and a sink that accepted
     /// everything would move the boundary's cost into the runtime. When the queue is full
     /// the oldest event is dropped to make room, and the drop is counted.
+    ///
+    /// The drop is also logged, because the count is only read when somebody drains:
+    /// the moment of loss is the moment an operator needs, and a queue that stays full
+    /// is the runtime falling behind in real time. What the line cannot say is *which*
+    /// window is losing events — the sink honestly does not know. It is shared memory
+    /// constructed before the window exists, handed into the view beside the window's
+    /// identity rather than carrying it, and tests construct sinks with no window at
+    /// all; the window-level correlation is the runtime's, which logs the drain-side
+    /// deltas with the window's identity in `ncui-runtime`'s native handler. This line
+    /// is the loss itself. The cadence is the powers of two rather than every drop: a
+    /// full queue during a drag drops at emit rate, and a log that matched it would
+    /// drown the signal it exists to carry — the escalating count in the field tells
+    /// the truth about acceleration instead.
     pub fn emit(&self, event: NativeViewEvent) {
         if !event.is_within_bounds() {
             return;
@@ -56,7 +69,14 @@ impl NativeEventSink {
         if let Ok(mut queue) = self.queue.lock() {
             if queue.len() >= MAX_QUEUED_NATIVE_EVENTS {
                 queue.pop_front();
-                self.dropped.fetch_add(1, Ordering::Relaxed);
+                let dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                if dropped.is_power_of_two() {
+                    tracing::warn!(
+                        dropped,
+                        capacity = MAX_QUEUED_NATIVE_EVENTS,
+                        "native events are being dropped to a full queue"
+                    );
+                }
             }
             queue.push_back(event);
         }
@@ -271,8 +291,14 @@ mod tests {
         let sink = NativeEventSink::new();
         sink.emit(NativeViewEvent::new("a", "first"));
         sink.emit(NativeViewEvent::new("b", "second"));
-        assert_eq!(sink.poll().map(|event| event.action).as_deref(), Some("first"));
-        assert_eq!(sink.poll().map(|event| event.action).as_deref(), Some("second"));
+        assert_eq!(
+            sink.poll().map(|event| event.action).as_deref(),
+            Some("first")
+        );
+        assert_eq!(
+            sink.poll().map(|event| event.action).as_deref(),
+            Some("second")
+        );
         assert!(sink.poll().is_none());
     }
 
@@ -290,9 +316,8 @@ mod tests {
     #[test]
     fn an_out_of_bounds_event_is_refused_silently() {
         let sink = NativeEventSink::new();
-        let payload = serde_json::Value::String(
-            "x".repeat(ncui_webview::native::MAX_NATIVE_PAYLOAD_BYTES),
-        );
+        let payload =
+            serde_json::Value::String("x".repeat(ncui_webview::native::MAX_NATIVE_PAYLOAD_BYTES));
         sink.emit(NativeViewEvent::new("editor", "changed").with_payload(payload));
         assert!(sink.poll().is_none());
         assert_eq!(sink.dropped(), 0, "a refused event is not a dropped one");

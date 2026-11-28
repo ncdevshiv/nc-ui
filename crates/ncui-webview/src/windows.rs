@@ -20,7 +20,7 @@ use crate::lifecycle::{HostState, WindowLifecycle};
 use crate::navigation::{NavigationPolicy, NavigationRequest};
 use crate::request::WindowRequest;
 use crate::seam::{ActionTable, HostSeam};
-use crate::{ChildPageMessage, PageMessage};
+use crate::{ChildPageMessage, PageMessage, TrustedServiceSeamFactory};
 
 /// The maximum number of windows one registry will hold open.
 ///
@@ -917,7 +917,6 @@ impl std::error::Error for WindowRejection {}
 /// Kept in a `BTreeMap` keyed by identity so that the order of `ncui.window.list` is
 /// deterministic. A `Vec` would answer in insertion order, which changes as windows are
 /// closed and makes an agent's view of the list unstable across two identical calls.
-#[derive(Debug)]
 pub struct WindowRegistry {
     windows: BTreeMap<WindowId, Window>,
     default_navigation: NavigationPolicy,
@@ -937,6 +936,31 @@ pub struct WindowRegistry {
     /// runtime does not say.
     default_locale: String,
     default_text_direction: String,
+    /// Builds the trusted service seam one native window carries, when the runtime offers one.
+    ///
+    /// The factory is the runtime's own, installed once at startup the way the locale is: the
+    /// registry cannot know what services exist — they are the runtime's command table — but
+    /// it is the registry that knows a window is being born and what its narrowed grant is.
+    /// The closure receives exactly those two facts and nothing else, so the seam it returns
+    /// can spend only the authority this one window was actually given. `None` means the
+    /// runtime offers no in-process services, and a native view is told so honestly.
+    service_seam_factory: Option<TrustedServiceSeamFactory>,
+}
+
+impl core::fmt::Debug for WindowRegistry {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // The factory closure has no meaningful Debug of its own — what an operator needs
+        // is whether one is installed, not the bytes of a function pointer.
+        f.debug_struct("WindowRegistry")
+            .field("windows", &self.windows)
+            .field("default_navigation", &self.default_navigation)
+            .field("default_grant", &self.default_grant)
+            .field("actions", &self.actions)
+            .field("default_locale", &self.default_locale)
+            .field("default_text_direction", &self.default_text_direction)
+            .field("service_seam_factory", &self.service_seam_factory.is_some())
+            .finish()
+    }
 }
 
 impl Default for WindowRegistry {
@@ -960,6 +984,7 @@ impl WindowRegistry {
             actions: ActionTable::new(),
             default_locale: "und".to_owned(),
             default_text_direction: "ltr".to_owned(),
+            service_seam_factory: None,
         }
     }
 
@@ -989,6 +1014,19 @@ impl WindowRegistry {
     #[must_use]
     pub fn with_default_grant(mut self, grant: CapabilityGrant) -> Self {
         self.default_grant = grant;
+        self
+    }
+
+    /// Installs the factory that builds a native window's trusted service seam.
+    ///
+    /// The runtime installs this once, the way it installs the locale: services are the
+    /// runtime's command table, but the window's birth — and the narrowed grant the seam
+    /// must close over — are the registry's facts. The factory is consulted only for
+    /// windows whose content is native; a page window's seam carries no in-process
+    /// channel because a page could never use one.
+    #[must_use]
+    pub fn with_service_seam_factory(mut self, factory: TrustedServiceSeamFactory) -> Self {
+        self.service_seam_factory = Some(factory);
         self
     }
 
@@ -1208,6 +1246,58 @@ impl WindowRegistry {
         self.windows.values().map(Window::summary).collect()
     }
 
+    /// Validates the initial navigation a new window is born with.
+    ///
+    /// The engine permits a window's own initial load without asking the policy: the host
+    /// asked for that URL, and the allow-list governs what a *page* may reach. That exemption
+    /// is only safe if the host has already vetted the URL, so it is vetted here — the one
+    /// place a window is created with a URL the runtime chose. A native window is exempt
+    /// rather than rejected: it has no URL and no navigation, so there is nothing for the
+    /// policy to decide — validation has already refused a native request that tried to
+    /// carry one.
+    fn validate_initial_navigation(&self, request: &WindowRequest) -> Result<(), WindowRejection> {
+        if request.content.is_native() {
+            return Ok(());
+        }
+        let Some(navigation) = NavigationRequest::from_url(&request.url, true) else {
+            return Err(WindowRejection::Unreachable {
+                url: request.url.clone(),
+                reason: "the URL cannot be read, and a URL the policy cannot read is refused"
+                    .to_owned(),
+            });
+        };
+        if let crate::navigation::Verdict::Deny { reason } =
+            self.default_navigation.evaluate(&navigation)
+        {
+            return Err(WindowRejection::Unreachable {
+                url: request.url.clone(),
+                reason,
+            });
+        }
+        Ok(())
+    }
+
+    /// Attaches this window's trusted service channel when its content is native.
+    ///
+    /// The channel is built at the window's birth because the grant is never wider than at
+    /// birth; constructing it later could only guess at the authority the window actually
+    /// received. A page window carries no channel: the bridge is its only way to ask.
+    fn with_trusted_services(
+        &self,
+        seam: HostSeam,
+        native: bool,
+        window: WindowId,
+        grant: CapabilitySet,
+    ) -> HostSeam {
+        if !native {
+            return seam;
+        }
+        match &self.service_seam_factory {
+            Some(factory) => seam.with_services(factory(window, grant)),
+            None => seam,
+        }
+    }
+
     /// Opens a window.
     ///
     /// The grant is *narrowed to the default* rather than taken from the caller: a page is
@@ -1239,30 +1329,7 @@ impl WindowRegistry {
             });
         }
 
-        // The engine permits a window's own initial load without asking the policy: the
-        // host asked for that URL, and the allow-list governs what a *page* may reach.
-        // That exemption is only safe if the host has already vetted the URL, so it is
-        // vetted here — the one place a window is created with a URL the runtime chose.
-        // A native window is exempt rather than rejected: it has no URL and no navigation,
-        // so there is nothing for the policy to decide — validation has already refused a
-        // native request that tried to carry one.
-        if !request.content.is_native() {
-            let Some(navigation) = NavigationRequest::from_url(&request.url, true) else {
-                return Err(WindowRejection::Unreachable {
-                    url: request.url.clone(),
-                    reason: "the URL cannot be read, and a URL the policy cannot read is refused"
-                        .to_owned(),
-                });
-            };
-            if let crate::navigation::Verdict::Deny { reason } =
-                self.default_navigation.evaluate(&navigation)
-            {
-                return Err(WindowRejection::Unreachable {
-                    url: request.url.clone(),
-                    reason,
-                });
-            }
-        }
+        self.validate_initial_navigation(request)?;
 
         // A page grant is the intersection of the default and what was asked for. Asking
         // for nothing yields the default; asking for more yields only what the default
@@ -1297,6 +1364,8 @@ impl WindowRegistry {
                 self.default_locale.clone(),
                 self.default_text_direction.clone(),
             );
+        let seam =
+            self.with_trusted_services(seam, request.content.is_native(), id, grant.granted());
         let seam = Arc::new(seam);
         let host = factory.spawn(id, request, &seam);
         let window = Window {

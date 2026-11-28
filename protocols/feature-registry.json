@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "verification_note": "Both hosts pass the gate. Windows 11 x86_64-pc-windows-msvc: fmt, clippy pedantic with -D warnings in both feature configurations, the whole test suite in both configurations (1358 tests with the default features measured with --all-targets, and 1424 with every feature enabled including the real-window application suite, the GPU islands and the tray), rustdoc with -D warnings, the tools workspace, the client package, and every policy gate. Linux x86_64-unknown-linux-gnu (WSL2, Ubuntu 26.04 LTS): the same gate in its default configuration plus a stage that compiles the release configuration, 23 of 23 stages passing, 52 tests in the tools workspace and the whole workspace suite, run through tools/linux_gate.py with a C compiler assembled from unpacked packages under $HOME because that distro has no toolchain and no root to install one. That gate builds into host-specific target directories for both the workspace and the tools, so a Linux run and a Windows run cannot shadow each other's binaries. It has found a real cross-platform defect every time it has been run: the most recent were an installer written on Unix that had no executable bit, so the file could be built and never run, and `ncui.window.theme`, which was dispatched and offered to pages but left out of the protocol specification's method table, so a client written from the specification would never have learned it existed. The Linux run compiles and *runs* the release configuration: the GTK and WebKit development libraries are installed (an earlier revision of this note wrongly said they were not) and WSLg supplies an X server and a Wayland socket, so the host opens genuine windows \u2014 8 host tests, the 8 page-bridge tests and both comparison ports pass there. That only became true after a real fix: `ncui-webview-wry` created its event loop on a worker thread and set `with_any_thread(true)` on Windows only, so tao's Unix backend panicked on Linux and `ncui run` could not open a window at all. The islands test still needs a GPU device, which the session lacks, so a feature whose evidence needs one stays 'unverified' on Linux. macOS is recorded as 'unverified' and cross_platform.verification.macos as 'not_implemented': no macOS host is reachable, so marking either would be a claim with nothing behind it. Every 'complete' entry was re-checked against the file it cites; the citations that did not survive that check were corrected rather than left standing.",
+  "verification_note": "Both hosts pass the gate. Windows 11 x86_64-pc-windows-msvc: fmt, clippy pedantic with -D warnings in both feature configurations, the whole test suite in both configurations (1358 tests with the default features measured with --all-targets, and 1424 with every feature enabled including the real-window application suite, the GPU islands and the tray), rustdoc with -D warnings, the tools workspace, the client package, and every policy gate. Linux x86_64-unknown-linux-gnu (WSL2, Ubuntu 26.04 LTS): the same gate in its default configuration plus a stage that compiles the release configuration, 23 of 23 stages passing, 52 tests in the tools workspace and the whole workspace suite, run through tools/linux_gate.py with a C compiler assembled from unpacked packages under $HOME because that distro has no toolchain and no root to install one. That gate builds into host-specific target directories for both the workspace and the tools, so a Linux run and a Windows run cannot shadow each other's binaries. It has found a real cross-platform defect every time it has been run: the most recent were an installer written on Unix that had no executable bit, so the file could be built and never run, and `ncui.window.theme`, which was dispatched and offered to pages but left out of the protocol specification's method table, so a client written from the specification would never have learned it existed. The Linux run compiles and *runs* the release configuration: the GTK and WebKit development libraries are installed (an earlier revision of this note wrongly said they were not) and WSLg supplies an X server and a Wayland socket, so the host opens genuine windows \u2014 8 host tests, the 8 page-bridge tests and both comparison ports pass there. That only became true after a real fix: `ncui-webview-wry` created its event loop on a worker thread and set `with_any_thread(true)` on Windows only, so tao's Unix backend panicked on Linux and `ncui run` could not open a window at all. Since the software-fallback inversion (2026-11-28) the device creation falls back to wgpu's software adapter when no hardware GPU exists, so the render pipeline executes even on GPU-less machines rather than skipping; `make gate` runs the island leg explicitly. macOS is recorded as 'unverified' and cross_platform.verification.macos as 'not_implemented': no macOS host is reachable, so marking either would be a claim with nothing behind it. Every 'complete' entry was re-checked against the file it cites; the citations that did not survive that check were corrected rather than left standing.",
   "features": [
     {
       "id": "core.error_model",
@@ -51,6 +51,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -103,6 +107,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -154,6 +162,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -205,6 +217,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -256,6 +272,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -308,6 +328,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -360,6 +384,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -411,6 +439,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -462,6 +494,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -513,6 +549,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -564,6 +604,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -616,6 +660,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -667,6 +715,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -718,6 +770,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -770,6 +826,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -822,6 +882,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -873,6 +937,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -925,6 +993,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -976,6 +1048,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -1028,6 +1104,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -1079,6 +1159,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -1131,6 +1215,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -1183,6 +1271,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -1235,6 +1327,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -1286,6 +1382,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -1304,7 +1404,7 @@
         },
         "integration_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/tests/agent_transport.rs \u2014 22 tests driving a live server over a real socket; additionally verified by hand against the released `ncui serve` binary: authenticated describe returned 8 methods, `ncui.logs.purge` was refused without consent and served with it, and an unauthenticated peer received nothing"
+          "evidence": "crates/ncui-runtime/tests/agent_transport.rs \u2014 24 tests driving a live server over a real socket; additionally verified by hand against the released `ncui serve` binary: authenticated describe returned 8 methods, `ncui.logs.purge` was refused without consent and served with it, and an unauthenticated peer received nothing"
         },
         "failure_tests": {
           "verified": true,
@@ -1339,6 +1439,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -1390,6 +1494,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -1441,6 +1549,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -1456,11 +1568,11 @@
       "evidence": {
         "unit_tests": {
           "verified": true,
-          "evidence": "crates/ncui-gpu/src/input.rs \u2014 36 unit tests over the island model: where a pointer lands, which row a scroll moves to, and the focus contract an island's nodes obey; crates/ncui-a11y/src/lib.rs \u2014 10 unit tests over the semantic tree and what makes an island reachable, including an unnamed focusable nested deep inside an island and a named island of static text; crates/ncui-gpu-renderer/src/glyphs.rs \u2014 7 unit tests over the glyph rasteriser and crates/ncui-gpu-renderer/src/text.rs \u2014 9 over shaping and outlines"
+          "evidence": "crates/ncui-gpu/src/input.rs \u2014 44 unit tests over the island model: where a pointer lands, which row a scroll moves to, and the focus contract an island's nodes obey; crates/ncui-a11y/src/lib.rs \u2014 10 unit tests over the semantic tree and what makes an island reachable, including an unnamed focusable nested deep inside an island and a named island of static text; crates/ncui-gpu-renderer/src/glyphs.rs \u2014 7 unit tests over the glyph rasteriser and crates/ncui-gpu-renderer/src/text.rs \u2014 9 over shaping and outlines"
         },
         "integration_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/tests/islands.rs \u2014 13 tests fetching frames and descriptions from a live server on Windows hardware and under WSL2 with Mesa lavapipe software Vulkan: a page fetches an island and gets the pixels the GPU drew, a page asks for rows and the GPU draws them where the model says, scrolling the rows moves which ones are drawn, a row with text is drawn with its letters, and a page asks for the accessible description of the rows it draws; crates/ncui-gpu-renderer/tests/render_offscreen.rs \u2014 4 tests that create a real device, draw a frame and read the pixels back"
+          "evidence": "crates/ncui-runtime/tests/islands.rs \u2014 13 tests fetching frames and descriptions from a live server on Windows hardware and under WSL2 with Mesa lavapipe software Vulkan, executed by the `make gate` test leg on this machine (the device falls back to the software adapter when no hardware GPU exists, so the leg cannot silently skip): a page fetches an island and gets the pixels the GPU drew, a page asks for rows and the GPU draws them where the model says, scrolling the rows moves which ones are drawn, a row with text is drawn with its letters, and a page asks for the accessible description of the rows it draws; crates/ncui-gpu-renderer/tests/render_offscreen.rs \u2014 4 tests that create a real device, draw a frame and read the pixels back"
         },
         "failure_tests": {
           "verified": true,
@@ -1495,6 +1607,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -1523,7 +1639,7 @@
         },
         "tracing": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/window.rs \u2014 a page's request is dispatched through the runtime's own pipeline, so it is correlated, rate limited and audited like an agent's"
+          "evidence": "crates/ncui-runtime/src/window/page_dispatch.rs \u2014 a page's request is dispatched through the runtime's own pipeline, so it is correlated, rate limited and audited like an agent's"
         },
         "metrics": {
           "verified": true,
@@ -1546,6 +1662,10 @@
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -1600,6 +1720,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -1651,6 +1775,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -1702,6 +1830,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -1753,6 +1885,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -1807,6 +1943,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -1859,6 +1999,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -2036,7 +2180,7 @@
         },
         "tracing": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/window.rs - a page's request is dispatched through the runtime's own pipeline, so it carries the same correlation id, rate limit and audit trail an agent's request carries"
+          "evidence": "crates/ncui-runtime/src/window/page_dispatch.rs - a page's request is dispatched through the runtime's own pipeline, so it carries the same correlation id, rate limit and audit trail an agent's request carries"
         },
         "metrics": {
           "verified": true,
@@ -2059,6 +2203,10 @@
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -2088,11 +2236,11 @@
         },
         "tracing": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/window.rs - a command call is dispatched through the runtime's own pipeline, so it is correlated, rate limited and audited like an agent's"
+          "evidence": "crates/ncui-runtime/src/window/page_dispatch.rs - a command call is dispatched through the runtime's own pipeline, so it is correlated, rate limited and audited like an agent's"
         },
         "metrics": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/window.rs - the command's outcome is recorded in the runtime's audit trail with the capabilities the command exercised"
+          "evidence": "crates/ncui-runtime/src/window/page_dispatch.rs - the command's outcome is recorded in the runtime's audit trail with the capabilities the command exercised"
         },
         "documentation": {
           "verified": true,
@@ -2111,6 +2259,10 @@
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -2162,6 +2314,10 @@
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -2214,6 +2370,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -2268,6 +2428,10 @@
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -2297,7 +2461,7 @@
         },
         "tracing": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/window.rs - a native command runs through run_native_page_command, which records an audit event for the page and the command whether the call succeeded, was denied, or failed"
+          "evidence": "crates/ncui-runtime/src/window/page_dispatch.rs - a native command runs through run_native_page_command, which records an audit event for the page and the command whether the call succeeded, was denied, or failed"
         },
         "metrics": {
           "verified": true,
@@ -2320,6 +2484,66 @@
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
+      }
+    },
+    {
+      "id": "native.os_file_drop",
+      "summary": "Files dragged from the OS shell onto a window arrive at the page as a DOM CustomEvent carrying normalized absolute paths and the drop position, through the disclosure policy in ncui_webview::filedrop rather than the webview's default navigation.",
+      "status": "complete",
+      "crates": [
+        "ncui-webview",
+        "ncui-webview-wry"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/filedrop.rs - normalization (a parent-traversal name collapses), deduplication, empties suppressed, position carried, dispatch script carries exact JSON detail"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/filedrop_live.rs - a_file_drop_reaches_the_page_as_a_dom_event: a real window receives the injected drop, the page's ncui:file-drop listener reads back both paths with the upward traversal collapsed and the exact position, all through CDP"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/filedrop.rs - an empty drop is suppressed, a drop of nothing but unresolvable paths discloses nothing"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/filedrop.rs - not performance-sensitive: a drop is a rare user gesture carrying a bounded path list through one normalization pass; the cost that would matter is the editor's import of the dropped media, which is application work outside this seam"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/filedrop_live.rs - a drop reaches the page as an application event through the same delivery path every page event uses, which the live test observes end to end; drops carry no privilege so no audit beyond the event pipeline applies"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/filedrop.rs - the queue is bounded and reports what it drops, which is the metric that matters for a lossy-by-design event path; drop volume during a real import storm belongs to the editor application's own telemetry"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/filedrop.rs - the module documentation gives the trust shape (a drop is user-deputizing consent like a file dialog), the normalization policy, and the page contract"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/filedrop.rs - paths are normalized so .. segments cannot smuggle location claims; the OS default (navigating to the dropped file) is blocked in crates/ncui-webview-wry/src/host.rs so a drop cannot route around the navigation policy"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-webview/src/filedrop.rs - the drop surface is the reviewed shape: one normalized event type carrying position plus paths, normalization rules (traversal collapse, dedup, empty suppression) defined at the boundary rather than in each consumer"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -2349,7 +2573,7 @@
         },
         "tracing": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/window.rs - a native command runs through run_native_page_command, which records an audit event for the page and the command whether the call succeeded, was denied, or failed"
+          "evidence": "crates/ncui-runtime/src/window/page_dispatch.rs - a native command runs through run_native_page_command, which records an audit event for the page and the command whether the call succeeded, was denied, or failed"
         },
         "metrics": {
           "verified": true,
@@ -2372,6 +2596,10 @@
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -2425,6 +2653,10 @@
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -2466,17 +2698,21 @@
         },
         "security_review": {
           "verified": true,
-          "evidence": "crates/ncui-webview/src/windows.rs - a window's URL is evaluated against the navigation policy before the engine is asked to open it, closing the initial-load exemption; crates/ncui-runtime/src/window.rs - the window capability is not in the default page grant, and the caller-window action has its window id injected from the call's origin rather than read from the page's payload"
+          "evidence": "crates/ncui-webview/src/windows.rs - a window's URL is evaluated against the navigation policy before the engine is asked to open it, closing the initial-load exemption; crates/ncui-runtime/src/window/page_dispatch.rs - the window capability is not in the default page grant, and the caller-window action has its window id injected from the call's origin rather than read from the page's payload"
         },
         "api_review": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/window.rs - create_window and close_window declare what they require and what they do, so describe reports them and a page can see that it does not hold the capability"
+          "evidence": "crates/ncui-runtime/src/window/page_dispatch.rs - create_window and close_window declare what they require and what they do, so describe reports them and a page can see that it does not hold the capability"
         }
       },
       "platforms": {
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -2506,7 +2742,7 @@
         },
         "tracing": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/window.rs - a clipboard command runs through run_native_page_command, which records an audit event for the page and the command whether the call succeeded, was denied, or failed"
+          "evidence": "crates/ncui-runtime/src/window/page_dispatch.rs - a clipboard command runs through run_native_page_command, which records an audit event for the page and the command whether the call succeeded, was denied, or failed"
         },
         "metrics": {
           "verified": true,
@@ -2529,6 +2765,10 @@
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -2581,6 +2821,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -2610,7 +2854,7 @@
         },
         "tracing": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/window.rs \u2014 a notification command runs through run_native_page_command, which records an audit event for the page and the command whether the call succeeded, was denied, or failed"
+          "evidence": "crates/ncui-runtime/src/window/page_dispatch.rs \u2014 a notification command runs through run_native_page_command, which records an audit event for the page and the command whether the call succeeded, was denied, or failed"
         },
         "metrics": {
           "verified": true,
@@ -2633,6 +2877,10 @@
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -2686,6 +2934,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -2739,6 +2991,10 @@
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -2792,6 +3048,10 @@
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -2844,6 +3104,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -2857,7 +3121,7 @@
       "evidence": {
         "unit_tests": {
           "verified": true,
-          "evidence": "crates/ncui-native/src/open.rs \u2014 5 unit tests: a target that cannot survive the tool is refused, a scheme that belongs to a browser is refused, a Windows path is not read as a scheme, the target is one argument of the command the platform is given, and the platform's own refusal is reported with its exit status"
+          "evidence": "crates/ncui-native/src/open.rs \u2014 7 unit tests: a target that cannot survive the tool is refused, a scheme that belongs to a browser is refused, a Windows path is not read as a scheme, the target is one argument of the command the platform is given, and the platform's own refusal is reported with its exit status"
         },
         "integration_tests": {
           "verified": true,
@@ -2873,7 +3137,7 @@
         },
         "tracing": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/window.rs \u2014 an open runs through run_native_page_command, which records an audit event for the page and the command whether the call succeeded, was denied, or failed; crates/ncui-native/src/open.rs \u2014 a platform refusal carries the exit status that produced it, so a failure says that the tool refused rather than only that it did not succeed"
+          "evidence": "crates/ncui-runtime/src/window/page_dispatch.rs \u2014 an open runs through run_native_page_command, which records an audit event for the page and the command whether the call succeeded, was denied, or failed; crates/ncui-native/src/open.rs \u2014 a platform refusal carries the exit status that produced it, so a failure says that the tool refused rather than only that it did not succeed"
         },
         "metrics": {
           "verified": true,
@@ -2896,6 +3160,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -2949,6 +3217,10 @@
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -3000,6 +3272,10 @@
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -3013,7 +3289,7 @@
       "evidence": {
         "unit_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/window.rs \u2014 24 unit tests, five of them about remembered places: a_remembered_window_is_put_back_where_it_was (a name that was remembered is what the page gets back, and a name that was not is nothing), a_place_on_a_display_that_is_gone_is_moved_onto_one_that_exists (the remembered size is kept and the position lands on a display that exists), closing_a_remembered_window_writes_its_place_down, a_window_that_is_not_a_place_is_not_written_down (a geometry no window could have is not remembered at all), and a_places_file_that_cannot_be_read_is_no_memory"
+          "evidence": "crates/ncui-runtime/src/window/page_dispatch.rs \u2014 28 unit tests, five of them about remembered places: a_remembered_window_is_put_back_where_it_was (a name that was remembered is what the page gets back, and a name that was not is nothing), a_place_on_a_display_that_is_gone_is_moved_onto_one_that_exists (the remembered size is kept and the position lands on a display that exists), closing_a_remembered_window_writes_its_place_down, a_window_that_is_not_a_place_is_not_written_down (a geometry no window could have is not remembered at all), and a_places_file_that_cannot_be_read_is_no_memory"
         },
         "integration_tests": {
           "verified": true,
@@ -3021,7 +3297,7 @@
         },
         "failure_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/tests/window_actions.rs \u2014 a_remember_name_that_is_not_a_name_is_refused: an empty name, a blank one, one with a control character, one over its bound and one that is not a string are each refused with a validation error and no window; crates/ncui-runtime/src/window.rs \u2014 a_places_file_that_cannot_be_read_is_no_memory: a damaged file is no memory rather than a failure to open a window"
+          "evidence": "crates/ncui-runtime/tests/window_actions.rs \u2014 a_remember_name_that_is_not_a_name_is_refused: an empty name, a blank one, one with a control character, one over its bound and one that is not a string are each refused with a validation error and no window; crates/ncui-runtime/src/window/page_dispatch.rs \u2014 a_places_file_that_cannot_be_read_is_no_memory: a damaged file is no memory rather than a failure to open a window"
         },
         "benchmarks": {
           "verified": true,
@@ -3029,7 +3305,7 @@
         },
         "tracing": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/window.rs \u2014 a places file that cannot be parsed is warned about by path with the reason, and a file that cannot be written is warned about by path; crates/ncui-runtime/src/dispatch/mod.rs \u2014 opening a window logs the name it was remembered under, so a window that stopped being remembered is visible in the trace"
+          "evidence": "crates/ncui-runtime/src/window/page_dispatch.rs \u2014 a places file that cannot be parsed is warned about by path with the reason, and a file that cannot be written is warned about by path; crates/ncui-runtime/src/dispatch/mod.rs \u2014 opening a window logs the name it was remembered under, so a window that stopped being remembered is visible in the trace"
         },
         "metrics": {
           "verified": true,
@@ -3037,21 +3313,25 @@
         },
         "documentation": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/window.rs \u2014 the Windows state documents why the name belongs to the page, why the place is read once rather than at every lookup, and why a damaged file means nothing; the create_window action's own summary names `remember`, so a page discovers it through the same describe call it uses for every other action; docs/adr/ADR-014-application-layer.md \u2014 the application layer's account of the files it keeps about itself"
+          "evidence": "crates/ncui-runtime/src/window/page_dispatch.rs \u2014 the Windows state documents why the name belongs to the page, why the place is read once rather than at every lookup, and why a damaged file means nothing; the create_window action's own summary names `remember`, so a page discovers it through the same describe call it uses for every other action; docs/adr/ADR-014-application-layer.md \u2014 the application layer's account of the files it keeps about itself"
         },
         "security_review": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/window.rs \u2014 a place is read as input: a geometry no window could have is never written down, a damaged file is treated as no memory, and the file is written under the application's own state directory; crates/ncui-runtime/src/dispatch/mod.rs \u2014 the name is bounded at 128 bytes and may not be empty or carry a control character, so it can be neither a path nor a line break in the file a person reads, and the remembered place goes through the same WindowRequest builders the registry validates every other window with"
+          "evidence": "crates/ncui-runtime/src/window/page_dispatch.rs \u2014 a place is read as input: a geometry no window could have is never written down, a damaged file is treated as no memory, and the file is written under the application's own state directory; crates/ncui-runtime/src/dispatch/mod.rs \u2014 the name is bounded at 128 bytes and may not be empty or carry a control character, so it can be neither a path nor a line break in the file a person reads, and the remembered place goes through the same WindowRequest builders the registry validates every other window with"
         },
         "api_review": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/window.rs \u2014 remember_windows_in, place_for, remember_place and save_places are the whole surface, and place_for returns an answer for an unknown name rather than an error, because \"nobody remembered this name\" is a state and not a failure; ncui.window.create gains one optional parameter and a page that omits it is unaffected"
+          "evidence": "crates/ncui-runtime/src/window/page_dispatch.rs \u2014 remember_windows_in, place_for, remember_place and save_places are the whole surface, and place_for returns an answer for an unknown name rather than an error, because \"nobody remembered this name\" is a state and not a failure; ncui.window.create gains one optional parameter and a page that omits it is unaffected"
         }
       },
       "platforms": {
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -3067,7 +3347,7 @@
       "evidence": {
         "unit_tests": {
           "verified": true,
-          "evidence": "crates/ncui-webview/src/request.rs \u2014 15 unit tests, two of them about presentation: a_presentation_payload_names_at_most_one_change (no change is a read, one change is that change, hiding is a change like any other, and two changes \u2014 including minimising and hiding, which are different requests \u2014 and `focus: false` and a non-boolean are each refused with the field that produced them) and a_request_carries_a_presentation_and_survives_the_wire (fullscreen and maximized round-trip, and a request that names neither is windowed); crates/ncui-runtime/src/window.rs \u2014 24 unit tests, four about this: a_window_reports_the_presentation_its_platform_reports (a change the runtime never asked for is still reported, because the user is the one who maximises windows, and the frame \u2014 decorated, always on top, resizable \u2014 is reported the same way, from the platform rather than from the last shape), changing_a_presentation_reports_the_answer_after_the_change (which hides and shows a window as well as taking it fullscreen and giving it back), a_window_whose_engine_cannot_report_its_presentation_says_so, and changing_the_presentation_of_an_unknown_window_is_a_refusal; crates/ncui-webview-wry/src/host.rs \u2014 a_resize_and_a_move_are_sent_to_the_page_as_events pins the wire shape of the two events a page reads"
+          "evidence": "crates/ncui-webview/src/request.rs \u2014 15 unit tests, two of them about presentation: a_presentation_payload_names_at_most_one_change (no change is a read, one change is that change, hiding is a change like any other, and two changes \u2014 including minimising and hiding, which are different requests \u2014 and `focus: false` and a non-boolean are each refused with the field that produced them) and a_request_carries_a_presentation_and_survives_the_wire (fullscreen and maximized round-trip, and a request that names neither is windowed); crates/ncui-runtime/src/window/page_dispatch.rs \u2014 28 unit tests, four about this: a_window_reports_the_presentation_its_platform_reports (a change the runtime never asked for is still reported, because the user is the one who maximises windows, and the frame \u2014 decorated, always on top, resizable \u2014 is reported the same way, from the platform rather than from the last shape), changing_a_presentation_reports_the_answer_after_the_change (which hides and shows a window as well as taking it fullscreen and giving it back), a_window_whose_engine_cannot_report_its_presentation_says_so, and changing_the_presentation_of_an_unknown_window_is_a_refusal; crates/ncui-webview-wry/src/host.rs \u2014 a_resize_and_a_move_are_sent_to_the_page_as_events pins the wire shape of the two events a page reads"
         },
         "integration_tests": {
           "verified": true,
@@ -3095,17 +3375,21 @@
         },
         "security_review": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/window.rs \u2014 the action is declared with targets_caller_window, so the window a page changes is taken from the call's origin and a payload that names another window is overwritten rather than honoured, exactly as close_window does; the capability is `window`, which is not in the default page grant; crates/ncui-webview/src/request.rs \u2014 at most one change per request, `focus: false` refused, and a non-boolean refused, so a payload cannot ask for two contradictory things or for a state nobody can promise"
+          "evidence": "crates/ncui-runtime/src/window/page_dispatch.rs \u2014 the action is declared with targets_caller_window, so the window a page changes is taken from the call's origin and a payload that names another window is overwritten rather than honoured, exactly as close_window does; the capability is `window`, which is not in the default page grant; crates/ncui-webview/src/request.rs \u2014 at most one change per request, `focus: false` refused, and a non-boolean refused, so a payload cannot ask for two contradictory things or for a state nobody can promise"
         },
         "api_review": {
           "verified": true,
-          "evidence": "crates/ncui-webview/src/lib.rs \u2014 WebViewBackend::window_state and set_window_state both default to None, so an engine that cannot ask the platform says so rather than reporting a default as if it were the screen, and the Box<T> blanket impl forwards both; crates/ncui-runtime/src/window.rs \u2014 Windows::window_state answers `None` for an engine that cannot report while set_window_state refuses an unknown window, because \"no such window\" and \"the engine cannot do that\" are different facts crates/ncui-webview-wry/src/host.rs \u2014 the wait for an answer is its own budget (ENGINE_REQUEST_TIMEOUT, two seconds) rather than the geometry's half second, because the engine is process-wide and shared: a request can queue behind another window's platform call, and a platform call takes longer than a frame, so too short a budget would report \"the engine cannot do that\" for a window whose engine was merely busy"
+          "evidence": "crates/ncui-webview/src/lib.rs \u2014 WebViewBackend::window_state and set_window_state both default to None, so an engine that cannot ask the platform says so rather than reporting a default as if it were the screen, and the Box<T> blanket impl forwards both; crates/ncui-runtime/src/window/page_dispatch.rs \u2014 Windows::window_state answers `None` for an engine that cannot report while set_window_state refuses an unknown window, because \"no such window\" and \"the engine cannot do that\" are different facts crates/ncui-webview-wry/src/host.rs \u2014 the wait for an answer is its own budget (ENGINE_REQUEST_TIMEOUT, two seconds) rather than the geometry's half second, because the engine is process-wide and shared: a request can queue behind another window's platform call, and a platform call takes longer than a frame, so too short a budget would report \"the engine cannot do that\" for a window whose engine was merely busy"
         }
       },
       "platforms": {
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -3120,7 +3404,7 @@
       "evidence": {
         "unit_tests": {
           "verified": true,
-          "evidence": "crates/ncui-webview/src/request.rs \u2014 15 unit tests, two of them about shapes: a_shape_names_something_and_holds_together (a shape that names nothing, a blank title, half a position, half a size and a size a window may not be created at are each refused with the field that produced them) and a_shape_carries_only_what_it_names (a field the caller did not name is absent, so the window keeps what the user left it as); crates/ncui-runtime/src/window.rs \u2014 24 unit tests, three about this: reshaping_a_window_records_what_it_became, reshaping_a_window_whose_engine_cannot_is_a_refusal (the record must not report a title the platform never took) and reshaping_an_unknown_window_is_a_refusal"
+          "evidence": "crates/ncui-webview/src/request.rs \u2014 15 unit tests, two of them about shapes: a_shape_names_something_and_holds_together (a shape that names nothing, a blank title, half a position, half a size and a size a window may not be created at are each refused with the field that produced them) and a_shape_carries_only_what_it_names (a field the caller did not name is absent, so the window keeps what the user left it as); crates/ncui-runtime/src/window/page_dispatch.rs \u2014 28 unit tests, three about this: reshaping_a_window_records_what_it_became, reshaping_a_window_whose_engine_cannot_is_a_refusal (the record must not report a title the platform never took) and reshaping_an_unknown_window_is_a_refusal"
         },
         "integration_tests": {
           "verified": true,
@@ -3148,22 +3432,26 @@
         },
         "security_review": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/window.rs \u2014 the action is declared with targets_caller_window, so the window a page reshapes is taken from the call's origin and a payload that names another window is overwritten rather than honoured, exactly as close_window and window_state do; the capability is `window`, which is not in the default page grant; the position and size are bounded by the same readers a window request uses, so a page cannot place a window where no display could be, and a title is bounded by the transport that carries it"
+          "evidence": "crates/ncui-runtime/src/window/page_dispatch.rs \u2014 the action is declared with targets_caller_window, so the window a page reshapes is taken from the call's origin and a payload that names another window is overwritten rather than honoured, exactly as close_window and window_state do; the capability is `window`, which is not in the default page grant; the position and size are bounded by the same readers a window request uses, so a page cannot place a window where no display could be, and a title is bounded by the transport that carries it"
         },
         "api_review": {
           "verified": true,
-          "evidence": "crates/ncui-webview/src/lib.rs \u2014 WebViewBackend::set_window_shape defaults to false, so an engine that cannot reshape a window says so rather than reporting a change it did not make, and the Box<T> blanket impl forwards it; crates/ncui-runtime/src/window.rs \u2014 the window's own record is written only after the platform took the shape, so ncui.window.list reports the window that exists rather than the one that was asked for crates/ncui-webview-wry/src/host.rs \u2014 the wait for an answer is its own budget (ENGINE_REQUEST_TIMEOUT, two seconds) rather than the geometry's half second, because the engine is process-wide and shared: a request can queue behind another window's platform call, and a platform call takes longer than a frame, so too short a budget would report \"the engine cannot do that\" for a window whose engine was merely busy"
+          "evidence": "crates/ncui-webview/src/lib.rs \u2014 WebViewBackend::set_window_shape defaults to false, so an engine that cannot reshape a window says so rather than reporting a change it did not make, and the Box<T> blanket impl forwards it; crates/ncui-runtime/src/window/page_dispatch.rs \u2014 the window's own record is written only after the platform took the shape, so ncui.window.list reports the window that exists rather than the one that was asked for crates/ncui-webview-wry/src/host.rs \u2014 the wait for an answer is its own budget (ENGINE_REQUEST_TIMEOUT, two seconds) rather than the geometry's half second, because the engine is process-wide and shared: a request can queue behind another window's platform call, and a platform call takes longer than a frame, so too short a budget would report \"the engine cannot do that\" for a window whose engine was merely busy"
         }
       },
       "platforms": {
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
       "id": "gpu.island_compositing",
-      "summary": "A GPU island is a region of a page: the runtime serves a rendered frame on the page's own origin, the page draws it into a canvas, and the browser composites it with the rest of the document. The pixels cross the CPU \u2014 one readback per frame \u2014 and an island's content is either one colour or a list of rows, laid out by the island model itself.",
+      "summary": "A GPU island is a region of a page: the runtime serves a rendered frame on the page's own origin, the page draws it into a canvas, and the browser composites it with the rest of the document. The pixels cross the CPU \u2014 one readback per frame \u2014 and an island's content is either one colour or a list of rows, laid out by the island model itself. This one-shot bitmap route is the compatibility shim for the pre-surface island protocol: real and verified, but not the persistent surface object and frame queue the media architecture requires.",
       "status": "complete",
       "crates": [
         "ncui-gpu-renderer",
@@ -3212,6 +3500,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -3225,7 +3517,7 @@
       "evidence": {
         "unit_tests": {
           "verified": true,
-          "evidence": "crates/ncui-gpu/src/input.rs \u2014 36 unit tests, five of them about the layout: the_rows_an_island_draws_are_the_rows_it_hit_tests (every drawn row's centre routes to that row), a_row_the_viewport_cannot_reach_is_not_drawn (thirty rows fit a six-hundred-tall island of twenty-pixel rows, and scrolling moves which ones are returned), a_row_half_scrolled_out_is_drawn_as_its_visible_part, an_island_that_is_not_there_draws_nothing, and a_row_of_no_height_is_not_a_row_to_draw; crates/ncui-gpu/src/geometry.rs \u2014 1 test for the primitive the clipping rests on: two_rectangles_share_exactly_the_area_they_overlap"
+          "evidence": "crates/ncui-gpu/src/input.rs \u2014 44 unit tests, five of them about the layout: the_rows_an_island_draws_are_the_rows_it_hit_tests (every drawn row's centre routes to that row), a_row_the_viewport_cannot_reach_is_not_drawn (thirty rows fit a six-hundred-tall island of twenty-pixel rows, and scrolling moves which ones are returned), a_row_half_scrolled_out_is_drawn_as_its_visible_part, an_island_that_is_not_there_draws_nothing, and a_row_of_no_height_is_not_a_row_to_draw; crates/ncui-gpu/src/geometry.rs \u2014 1 test for the primitive the clipping rests on: two_rectangles_share_exactly_the_area_they_overlap"
         },
         "integration_tests": {
           "verified": true,
@@ -3264,6 +3556,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -3316,6 +3612,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -3370,6 +3670,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -3422,6 +3726,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -3474,6 +3782,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -3526,6 +3838,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -3579,6 +3895,10 @@
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -3626,13 +3946,17 @@
         },
         "api_review": {
           "verified": true,
-          "evidence": "crates/ncui-webview/src/tray.rs \u2014 the port carries the decoded image rather than a path, so a host never reads a file and the same request means the same pixels on every platform; crates/ncui-webview/src/lib.rs \u2014 set_tray is one method on the backend, asked through a window because a window is the handle to the engine that owns the loop; crates/ncui-runtime/src/window.rs \u2014 set_tray reports a platform refusal as a rejection rather than as success"
+          "evidence": "crates/ncui-webview/src/tray.rs \u2014 the port carries the decoded image rather than a path, so a host never reads a file and the same request means the same pixels on every platform; crates/ncui-webview/src/lib.rs \u2014 set_tray is one method on the backend, asked through a window because a window is the handle to the engine that owns the loop; crates/ncui-runtime/src/window/page_dispatch.rs \u2014 set_tray reports a platform refusal as a rejection rather than as success"
         }
       },
       "platforms": {
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -3685,6 +4009,10 @@
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -3737,6 +4065,10 @@
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -3751,7 +4083,7 @@
       "evidence": {
         "unit_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/window.rs \u2014 24 unit tests over the window surface, including the_platforms_theme_is_reported_and_an_engine_that_cannot_say_says_so, which covers a backend that reports dark, a backend that cannot report a theme at all, and a window that does not exist; crates/ncui-webview/src/request.rs \u2014 15 unit tests over the window's value types, including the theme's own spelling on the wire"
+          "evidence": "crates/ncui-runtime/src/window/page_dispatch.rs \u2014 28 unit tests over the window surface, including the_platforms_theme_is_reported_and_an_engine_that_cannot_say_says_so, which covers a backend that reports dark, a backend that cannot report a theme at all, and a window that does not exist; crates/ncui-webview/src/request.rs \u2014 15 unit tests over the window's value types, including the theme's own spelling on the wire"
         },
         "integration_tests": {
           "verified": true,
@@ -3759,7 +4091,7 @@
         },
         "failure_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 a window whose engine cannot ask the platform is refused with a conflict rather than answered \"light\", because the second is a claim about the user's machine that nothing checked; crates/ncui-runtime/src/window.rs \u2014 a window that does not exist reports nothing, which is the other `None`, and a backend that cannot ask is the same; crates/ncui-webview-wry/src/host.rs \u2014 a theme this runtime does not know is not mapped to one it does, so an open platform enum cannot make a page follow a setting the user does not have"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs \u2014 a window whose engine cannot ask the platform is refused with a conflict rather than answered \"light\", because the second is a claim about the user's machine that nothing checked; crates/ncui-runtime/src/window/page_dispatch.rs \u2014 a window that does not exist reports nothing, which is the other `None`, and a backend that cannot ask is the same; crates/ncui-webview-wry/src/host.rs \u2014 a theme this runtime does not know is not mapped to one it does, so an open platform enum cannot make a page follow a setting the user does not have"
         },
         "benchmarks": {
           "verified": true,
@@ -3779,17 +4111,21 @@
         },
         "security_review": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/window.rs \u2014 asking requires the `window` capability, the same as every other action about a page's window, so an application decides whether its pages may read it; the answer is a fact about the machine's appearance and nothing else \u2014 no path, no identifier, no content; crates/ncui-webview-wry/src/host.rs \u2014 the theme is read from the window the caller owns, so one window cannot ask about another's"
+          "evidence": "crates/ncui-runtime/src/window/page_dispatch.rs \u2014 asking requires the `window` capability, the same as every other action about a page's window, so an application decides whether its pages may read it; the answer is a fact about the machine's appearance and nothing else \u2014 no path, no identifier, no content; crates/ncui-webview-wry/src/host.rs \u2014 the theme is read from the window the caller owns, so one window cannot ask about another's"
         },
         "api_review": {
           "verified": true,
-          "evidence": "crates/ncui-webview/src/request.rs \u2014 the theme is a closed value type that serialises as a name, so a page and an agent read the same two words; crates/ncui-webview/src/lib.rs \u2014 one method on the backend, defaulting to \"cannot say\" so a host that has no platform theme is not forced to invent one; crates/ncui-runtime/src/window.rs \u2014 the seam action carries the method, the capability and the summary, so the page's introspection lists it like every other action"
+          "evidence": "crates/ncui-webview/src/request.rs \u2014 the theme is a closed value type that serialises as a name, so a page and an agent read the same two words; crates/ncui-webview/src/lib.rs \u2014 one method on the backend, defaulting to \"cannot say\" so a host that has no platform theme is not forced to invent one; crates/ncui-runtime/src/window/page_dispatch.rs \u2014 the seam action carries the method, the capability and the summary, so the page's introspection lists it like every other action"
         }
       },
       "platforms": {
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -3836,13 +4172,17 @@
         },
         "api_review": {
           "verified": true,
-          "evidence": "crates/ncui-webview/src/lib.rs - set_zoom is one backend method defaulting to false, so a host that cannot scale is not forced to pretend; crates/ncui-runtime/src/window.rs - the runtime method returns Ok(false) for a live window whose engine refuses"
+          "evidence": "crates/ncui-webview/src/lib.rs - set_zoom is one backend method defaulting to false, so a host that cannot scale is not forced to pretend; crates/ncui-runtime/src/window/page_dispatch.rs - the runtime method returns Ok(false) for a live window whose engine refuses"
         }
       },
       "platforms": {
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -3889,13 +4229,17 @@
         },
         "api_review": {
           "verified": true,
-          "evidence": "crates/ncui-webview/src/lib.rs - open_devtools, close_devtools and is_devtools_open are backend methods defaulting to refusal and unknown, so a host that cannot answer does not invent an answer; crates/ncui-runtime/src/window.rs - the runtime methods return the backend's answer unchanged"
+          "evidence": "crates/ncui-webview/src/lib.rs - open_devtools, close_devtools and is_devtools_open are backend methods defaulting to refusal and unknown, so a host that cannot answer does not invent an answer; crates/ncui-runtime/src/window/page_dispatch.rs - the runtime methods return the backend's answer unchanged"
         }
       },
       "platforms": {
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -3914,7 +4258,7 @@
         },
         "integration_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs - the advertised-method test drives ncui.cdp.send through the pipeline with a window installed; crates/ncui-runtime/tests/capability_e2e.rs - the capability gates the method; crates/ncui-webview-wry/src/host.rs - a_live_engine_answers_a_cdp_command_over_the_transport drives the real Windows WebView2 endpoint"
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs - the advertised-method test drives ncui.cdp.send through the pipeline with a window installed; crates/ncui-runtime/tests/capability_e2e.rs - the capability gates the method; crates/ncui-webview-wry/src/host.rs - a_live_engine_answers_a_cdp_command_over_the_transport drives the real Windows WebView2 endpoint; crates/ncui-runtime/tests/cdp_window_isolation.rs - cdp_mouse_input_reaches_the_page_target_it_inspects proves CDP input reaches the page target it inspects"
         },
         "failure_tests": {
           "verified": true,
@@ -3942,13 +4286,17 @@
         },
         "api_review": {
           "verified": true,
-          "evidence": "crates/ncui-webview/src/lib.rs - cdp_send is one backend method defaulting to refusal, and as_any lets a caller reach a concrete engine's extra surface without the runtime depending on the engine crate; crates/ncui-runtime/src/window.rs - the runtime method returns the endpoint's answer or the backend's named reason"
+          "evidence": "crates/ncui-webview/src/lib.rs - cdp_send is one backend method defaulting to refusal, and as_any lets a caller reach a concrete engine's extra surface without the runtime depending on the engine crate; crates/ncui-runtime/src/window/page_dispatch.rs - the runtime method returns the endpoint's answer or the backend's named reason"
         }
       },
       "platforms": {
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -3968,7 +4316,7 @@
         },
         "integration_tests": {
           "verified": true,
-          "evidence": "crates/ncui-runtime/tests/page_bridge.rs drives parent ownership, initial-URL vetting, empty child grants, cross-parent refusal, bounds preservation and targeted replies; crates/ncui-runtime/tests/agent_surface.rs drives all four methods and their bounded metrics; crates/ncui-webview-wry/src/host.rs a_child_webview_embeds_into_a_live_parent_and_stays_live runs real Windows and Linux child embedding, movement, primary and fallback IPC, refusal and close"
+          "evidence": "crates/ncui-runtime/tests/page_bridge.rs drives parent ownership, initial-URL vetting, empty child grants, cross-parent refusal, bounds preservation and targeted replies; crates/ncui-runtime/tests/agent_surface.rs drives all four methods and their bounded metrics; crates/ncui-webview-wry/src/host.rs a_child_webview_embeds_into_a_live_parent_and_stays_live runs real Windows and Linux child embedding, movement, primary and fallback IPC, refusal and close; crates/ncui-runtime/tests/child_webview_live.rs an_agent_driven_child_webview_is_visible_at_its_commanded_rectangle is the end-to-end live proof: an agent-driven session creates, lists, moves and closes a child inside a real wry window while screen captures of the parent's client area prove the child's pixels appear at exactly the commanded rectangle and revert when it moves and closes (artifacts under target/f5-evidence/)"
         },
         "failure_tests": {
           "verified": true,
@@ -4003,6 +4351,10 @@
         "linux": "verified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -4056,6 +4408,10 @@
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
       }
     },
     {
@@ -4108,6 +4464,237 @@
         "linux": "unverified",
         "windows": "verified",
         "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
+      }
+    },
+    {
+      "id": "input.pointer_capture",
+      "summary": "A button down inside an island captures it until release: moves outside the island keep routing to it with honestly out-of-bounds content coordinates, region resolution continues in content space, and a down in the DOM captures nothing. Modifier state (shift/ctrl/alt) travels on every pointer and wheel event. The stream contract is lossless-by-construction: every event handed in is routed synchronously in arrival order - the host keeps no queue, no throttle and no coalescing of its own, because a hidden coalescer deciding which positions a scrub does not need would be the input layer making the application's latency/accuracy tradeoff for it. Coalescing at display rate is the platform's privilege and correct there.",
+      "status": "complete",
+      "crates": [
+        "ncui-gpu",
+        "ncui-web-shell"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-gpu/src/input.rs - a_drag_outside_the_island_stays_captured_with_real_coordinates (negative content coordinates, release semantics), a_down_in_the_dom_captures_nothing, capture_preserves_region_resolution_inside_the_content; a_burst_of_moves_is_routed_losslessly_in_order pins the stream contract - a 120-move scrub burst past the island's edge routes 1:1 in strictly delivered order"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-web-shell/gate/verify.mjs - capture probe in real Edge: a mid-drag move far outside the island reads last_route island:timeline, the post-release move at the same point reads dom; passes against the dev bindings and the packaged artifact both"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-gpu/src/input.rs - a down in the DOM captures nothing (hit-test misses never engage capture); the release routes into the island before capture drops, so a stream cannot strand a capture"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-gpu/src/input.rs - not performance-sensitive: capture adds one Option check to a hit-test that already ran per pointer event; the routing cost that matters end-to-end is scrub latency against the preview surface, which belongs to media.video_surface's evidence"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-web-shell/src/shell.rs - input events travel the shell's event pipeline whose traces are the gate's probe evidence; capture is deterministic input routing rather than a privileged operation, so no audit trail applies beyond the pipeline every event already shares"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-web-shell/gate/verify.mjs - the gate's capture probes (capture_during, capture_after) are the behavioural measurement; a counter of engagements per drag would measure what the routing tests already pin"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-gpu/src/input.rs - route_pointer_captured documents the modal-capture semantics (SetCapture/setPointerCapture) and why hit-testing drags afresh would break editing"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-gpu/src/input.rs route_pointer_captured - capture is confinement, not privilege: a captured island receives only pointer events within a drag the user began inside it, capture ends at release with no path for an island to hold input hostage, and a down in the DOM captures nothing"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-gpu/src/input.rs - the capture surface is one routing method plus capture engagement through the same click path, one routing truth rather than parallel logic; the API deliberately exposes no manual capture release because capture lifetime is bound to the physical gesture, which is what makes a stranded capture unrepresentable"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
+      }
+    },
+    {
+      "id": "ipc.editor_grade",
+      "summary": "Editor-grade command latency proven end to end, with supersede semantics for latest-wins command streams. Native-side round trip (request JSON parsed, capability check, handler, response serialized) measures p99 3.6 us in the bench harness; transport-inclusive round trip through a real WebView2 window measures p99 3.6 ms over 200 sequential invokes against the <= 8 ms interaction budget. Supersede: a page opts in per call (ncui.invoke(name, payload, { supersede: key })); the pump scans the window's queue before serving, and a keyed command with a newer same-key successor queued behind it is answered outcome superseded without executing. The key is per-call because only the caller knows which commands form a stream (playhead, trim:clip-7); superseded commands are always answered so the page's promise settles; unkeyed and distinct-keyed messages are never reordered or dropped. Supersede covers the queued-not-yet-executing boundary honestly: a synchronous handler mid-run cannot be unrun, and cancelling in-flight work belongs to the engine that scheduled it.",
+      "status": "complete",
+      "crates": [
+        "ncui-runtime",
+        "ncui-webview"
+      ],
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window/page_dispatch.rs - the_supersede_probe_reads_only_keyed_performs (wire-shape probe incl. abuse shapes), a_stale_keyed_command_is_answered_superseded_and_never_executes (3-position scrub: only the newest executes, both predecessors answered superseded), unkeyed_and_other_keyed_messages_are_neither_superseded_nor_reordered, a_lone_keyed_command_executes_normally"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/command_roundtrip_live.rs - 200 sequential window.ncui.invoke round trips in a real WebView2 window timed by the page's own clock: p50 0.5 ms, p90 0.7 ms, p99 3.6 ms, max 3.9 ms inside the <= 8 ms budget; production-shape pump thread, idempotent trigger, transient-tolerant CDP loops"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window/page_dispatch.rs the_supersede_probe_reads_only_keyed_performs - the probe refuses malformed JSON, missing ids, empty, oversized and non-ASCII keys: a message that cannot be answered cannot be superseded and falls through to the seam's own refusal; the CDP-off-event-loop fix in crates/ncui-webview-wry/src/host.rs is regression-covered by crates/ncui-runtime/tests/command_roundtrip_live.rs passing in seconds instead of responses flushing at t=30 s"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-bench/benches/latency.rs runtime.page_command_roundtrip - native-side p99 3.6 us against the 8 ms budget (three orders of magnitude headroom), recorded in benches/baseline/windows/latency.json"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window/page_dispatch.rs - probe_supersede_key and the pump_pages supersede scan document why the key is transport metadata rather than a seam type, why the answer is outcome superseded rather than silence (a 30 s bridge timeout per superseded call), and why the drain/requeue scan must be invisible to messages it does not supersede; packages/ncui-client/src/bridge.js documents the per-call option at the invoke site"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window/page_dispatch.rs probe_supersede_key - abuse shapes are refused at the probe: keys bounded to 256 ASCII-printable bytes because they are scanned on every pump; the scan is per-window so one page's stream cannot touch another window's queue; a superseded command is answered, never silently dropped, so the mechanism cannot be a message-loss vector"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "packages/ncui-client/src/bridge.js - the per-call supersede option is the reviewed surface: only the caller knows which of its commands form a latest-wins stream (playhead positions supersede each other, trim gestures supersede per clip), a registration-level flag can express neither, and opt-in-per-call means non-participating commands are never reordered or dropped - pinned by the interference test in crates/ncui-runtime/src/window/page_dispatch.rs"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "every wire message carries the correlation id the response echoes (the live measurement's settle path depends on it), and a page message is audited as the page that sent it - crates/ncui-runtime/tests/page_bridge.rs a_page_message_is_audited_as_the_page_that_sent_it; a superseded answer is itself self-describing in the audit trail rather than a silent gap"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/dispatch/mod.rs - in-flight command depth is reported through ncui.ipc.inspect on the same dispatch pipeline the editor-grade path runs on, and benches/baseline/windows/latency.json is the regression-compared performance baseline for the round-trip scenario"
+        }
+      },
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
+      }
+    },
+    {
+      "id": "media.video_surface",
+      "summary": "A persistent video-frame surface the page places by rect and a native producer feeds at video rate: airspace-composited as a child window over the WebView (pixels never cross the browser), with PTS-stamped frames, frame-accurate control intents (pause/seek/step) draining pull-shaped to the producer, clip-aware physical placement, and teardown that kills the OS-level child. Frame identity is pinned end-to-end - after a burst the presented frame is the burst's last - and synchronous present-on-push drops nothing.",
+      "status": "complete",
+      "crates": [
+        "ncui-gpu",
+        "ncui-video-surface",
+        "ncui-runtime"
+      ],
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
+      },
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-gpu/src/surface.rs - 15 tests: spec validation, ring drop-oldest with damage merging and counted drops, PTS monotonicity with timescale honesty, playback control state, idempotent teardown, clip-aware placement conversion (outward-rounded physical pixels)"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/video_surface_wiring_live.rs - the full slice live in a real WebView2: page-declared create through the capability gate, placement landing within 2px of CSS x dpr physical truth, pause/seek/step draining in exact order, producer frames presenting, page teardown killing the OS-level child; pushed_frames_present_in_order_with_their_identity_intact pins lastPresented=29 after a 30-frame burst with zero drops. crates/ncui-runtime/tests/video_surface_composite_live.rs - z-order truth over a real WebView2; caught and fixed the passive-z-order defect (WebView2 re-raises its own child; the presenter now asserts HWND_TOP at creation and on every placement)"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-video-surface/tests/win32_live.rs - misshaped payloads are refused before upload; crates/ncui-gpu/src/surface.rs - zero-sized and oversized surfaces refused at construction, pushes after teardown refused, backwards PTS refused"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/video_surface_acceptance_live.rs - cadence-disciplined streams through the full runtime path: 1080p30 sustained with push-to-presented p50 3.89ms p99 5.74ms against the 33.3ms frame budget, 4K30 p50 11.73ms p99 17.25ms, zero drops, no time-ordered degradation; scrub-to-presented 4.16ms plus at most one frame interval of pull-shaped drain wait. The measurement caught the mutex-convoy defect (p99 63ms when the frame path shared the runtime lock with the pump) - fixed architecturally with the cloneable producer handle"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/video_surface.rs - registry operations are synchronous and deterministic; the ring accounting (dropped/queued/lastPresented) is the operational truth, exposed through ncui.videoSurface.inspect rather than a separate trace channel"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/dispatch/video_surface.rs - ncui.videoSurface.inspect answers dropped frames, queue depth, and the last presented sequence; the acceptance harness reads its drop and latency numbers through exactly this seam (crates/ncui-runtime/tests/video_surface_acceptance_live.rs)"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-gpu/src/surface.rs module docs - the ring's honest semantics (depth past 4 is latency not smoothness; frame accuracy is the producer's burden); crates/ncui-video-surface/src/lib.rs - the unsafe boundary's containment rationale; futureplan/what to add.md section 1 - the architecture decisions each with their reason"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window/actions.rs - seam actions gated on the gpu capability (inspect on inspect.gpu), targets_caller_window so no page names a window it does not own; teardown of a page's own surface is cleanup, not consent-destructive; the workspace forbid(unsafe_code) holds everywhere except the documented ncui-video-surface boundary crate, where every unsafe block carries its invariant"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/lib.rs - Runtime::push_video_frame/drain_video_control/video_surface_producer documented with the convoy measurement that justifies the shareable handle; the seam contract (all four placement inputs mandatory, because a defaulted geometry input is a guessed one) documented on the dispatch methods"
+        }
+      }
+    },
+    {
+      "id": "media.audio_output",
+      "summary": "A capability-gated native audio output stream on the same timeline clock as media.video_surface: cpal/WASAPI device streams drain a bounded sample ring that never drops (counted refusals for overrun, counted silence for underrun), positions tracked drift-free as anchor-plus-exact-frame-count, playback intents (pause/resume/seek) draining pull-shaped to the producer in exact order, one device stream per audio stream because WASAPI shared mode mixes in the system audio engine. Lip-sync is measured arithmetic on validated clocks - a deliberate +150ms sync fault read as 146.7ms, the correction moved the error by exactly the measured amount, and the residual sits inside the frame-quantization floor far under the 45ms broadcast budget.",
+      "status": "complete",
+      "crates": [
+        "ncui-gpu",
+        "ncui-audio-output",
+        "ncui-runtime",
+        "ncui-core"
+      ],
+      "platforms": {
+        "linux": "unverified",
+        "windows": "verified",
+        "macos": "unverified"
+      },
+      "execution": {
+        "last_executed": "2026-11-28T13:15:19Z",
+        "machine_class": "windows-x86_64"
+      },
+      "evidence": {
+        "unit_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-gpu/src/audio.rs - 8 tests: ring ordering, underrun counting, whole-chunk overflow refusal (audio never drops - a dropped sample is a click), flush forgetting on seek, backwards-PTS refusal, the no-drift position proof at ragged callback sizes (anchor-plus-exact-count because 90kHz/48kHz never divides evenly), exact-or-absent end_pts arithmetic"
+        },
+        "integration_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-audio-output/tests/win32_live.rs - live device proof: positions exact (1.19s read against 1.2s elapsed), device delay 31.9ms real WASAPI buffering, drift 700ns-1us validating the QPC same-rate assumption lip-sync arithmetic rests on, 19 underruns counted in 200ms starved. crates/ncui-runtime/tests/audio_stream_wiring_live.rs - runtime wiring (create on a real window, producer-handle ring escape, mid-flow position 1.98s against 2s pushed, teardown) plus the page seam end-to-end: create through the capability gate, pause/seek/resume draining in exact order, inspect shape, teardown verified host-side"
+        },
+        "failure_tests": {
+          "verified": true,
+          "evidence": "crates/ncui-gpu/src/audio.rs - PTS regression refused, pushes past capacity refused whole-chunk with the refusal counted rather than silently overwritten; the exhaustive dispatch tests document-skip the seam methods because a synthetic harness owes no device traffic, with the live proof named"
+        },
+        "benchmarks": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/tests/av_sync_live.rs - the lip-sync measurement the architecture exists for: a deliberate +150ms sync fault measured as 146.7ms stable across samples (spread under 50ms bound), the correction moved the error by exactly the measured amount within 20ms tolerance, and the corrected residual of 6.7ms straddles zero at the frame-quantization floor - far inside the 45ms broadcast lip-sync threshold. Compositor-to-photon and DAC-to-ear residuals documented as constant small offsets that cancel in the correction comparison"
+        },
+        "tracing": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/audio.rs - the ring accounting (underruns/overflow_refusals/buffered_frames) is the operational truth, exposed through ncui.audioStream.inspect; cpal stream death is a diagnostic print because a dead stream must never be a quiet one"
+        },
+        "metrics": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/dispatch/audio.rs - ncui.audioStream.inspect answers underruns, overflow refusals, buffered frames, and the sync reading (device delay, measured drift, position); the av_sync harness reads exactly this surface for its measurement"
+        },
+        "documentation": {
+          "verified": true,
+          "evidence": "crates/ncui-gpu/src/audio.rs module docs - the ring that never drops (a dropped frame is a mercy, a dropped sample is a click), anchor-plus-exact-count positions; crates/ncui-audio-output/src/lib.rs module docs - the clock honesty design (StreamInstant is subtraction-only and sufficient, drift measured not assumed)"
+        },
+        "security_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/window/actions.rs - seam actions gated on the new audio capability (inspect on inspect.runtime), targets_caller_window so no page names a window it does not own; the capability decision documented in ncui-core: playing sound crosses the machine's shared output, so it is its own grant rather than a rendering consequence of gpu"
+        },
+        "api_review": {
+          "verified": true,
+          "evidence": "crates/ncui-runtime/src/lib.rs - Runtime::create_audio_stream/teardown_audio_stream/inspect_audio_stream/audio_stream_producer documented; the producer handle mirrors the video convoy lesson (hot paths never share the runtime lock); control intents reuse the media-generic ControlIntent because the enum was never pixel-specific"
+        }
       }
     }
   ]

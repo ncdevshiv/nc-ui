@@ -252,7 +252,7 @@ fn run_app(
         if std::env::var("NCUI_COMPARISON_HOST").as_deref() == Ok("1") {
             runtime.set_consent_prompter(std::sync::Arc::new(ComparisonConsentPrompter));
         } else {
-            runtime.set_consent_prompter(std::sync::Arc::new(
+            runtime.set_default_consent_prompter(std::sync::Arc::new(
                 ncui_runtime::consent::NativeConsentPrompter::new(),
             ));
         }
@@ -855,10 +855,10 @@ fn serve(role: Option<&str>, registry: Option<Value>) -> CommandResult {
                     "the window host could not be composed: no page host is available".to_owned(),
                 );
             };
+            runtime.set_default_consent_prompter(std::sync::Arc::new(
+                ncui_runtime::consent::NativeConsentPrompter::new(),
+            ));
             runtime = runtime
-                .with_consent_prompter(std::sync::Arc::new(
-                    ncui_runtime::consent::NativeConsentPrompter::new(),
-                ))
                 .with_host_factory(factory, &ncui_runtime::window::hosted_origins())
                 .map_err(|error| format!("cannot install the window host: {error}"))?;
             if let Some(reason) = native_error.as_deref() {

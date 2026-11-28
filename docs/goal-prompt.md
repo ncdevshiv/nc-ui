@@ -232,7 +232,18 @@ a reason in `known-gaps.md`. Each new dependency needs an ADR-012 exception.
   bridge over the platform WebView (WKWebView / Android WebView), with the capability model
   intact. Scope it as a new layer-3 adapter crate (`ncui-webview-mobile`) behind a feature, the
   way `ncui-webview-wry` is. This is the single largest new subsystem and should be its own ADR
-  before any code.
+  before any code. iOS is an explicit evidence target, not a compile-only target.
+
+### B5. Browser/WebGPU target breadth — distinct from hosting web pages
+- NC-UI already hosts web-authored pages in native windows; that is **not** a browser target.
+  The additional goal is a shell where nc-ui-native rendering and input run in a real browser
+  through WebGPU, with canvas/rAF/ResizeObserver, clipboard, text services, lifecycle,
+  accessibility and packaging treated as platform work.
+- **Required:** a target-contract ADR separating (1) web-authored pages in native windows,
+  (2) nc-ui-native content in a browser/WebGPU shell, and (3) nc-ui-native content on iOS.
+  No target is supported because it compiles; it is supported when its real-browser or
+  real-device gate runs. This broadens the target matrix; it does not remove B4's existing
+  Android requirement.
 
 ---
 
@@ -301,6 +312,17 @@ React, Svelte, Vue, Solid, vanilla-TS, and a WASM/Rust frontend, each a working 
   - Bridge/`IslandDescriptor` must carry locale + text direction so a screen reader is told the
     language and direction.
   - App manifests declare a default locale; the runtime exposes the platform locale to the page.
+  - Native text editing is part of language support: nc-ui-kit/native text fields must implement
+    gpui's `InputHandler` contract rather than key-character-only editing — marked text,
+    candidate placement, commit/cancel, selection, UTF-8↔UTF-16 range mapping, and rich-text
+    spans that survive editing.
+  - Links inside native text runs must be keyboard-operable focus targets. gpui 0.2.2
+    `InteractiveText` hit-tests click/hover ranges but has no focus API, so the runtime/kit
+    text contract must add per-link Tab/Shift+Tab focus, Enter/Space activation, Menu/Shift+F10
+    secondary actions, and accessibility bounds/state.
+  - Native surfaces need an AccessKit-backed accessibility tree (or an explicitly justified
+    equivalent) rather than only the island JSON mirror; platform assistive technology must see
+    controls, text, links and focus state.
 - **Measured status [E-measured] — the non-GPU half is shipped.** `IslandDescriptor` carries
   `locale` + `direction`; manifests declare a validated `default_locale`; and `describe` answers
   with the platform `locale` and a `text_direction` derived from it (so the two cannot disagree),
@@ -452,8 +474,11 @@ These are why the project is trustworthy; none of the goals above may violate th
 4. **Phase 4 — macOS** (B3). Unlocks the third desktop platform and the macOS leg of F1.
 5. **Phase 5 — command-language breadth** (C3, *done*: sidecar + JS commands) + **consent enforcement**
    (E1, *implemented*; native dialog acceptance evidence remains).
-6. **Phase 6 — mobile** (B4). Largest, last, own ADR.
-7. **Phase 7 — enforcement** (F2) once dedicated runners exist.
+6. **Phase 6 — mobile + browser/WebGPU target shells** (B4+B5). Largest, last, own ADR.
+7. **Phase 7 — native interaction correctness** (AccessKit, IME/rich text, per-link keyboard
+   focus). Parallel-safe after the native host proof, but blocking any claim that native views
+   are first-class application UI.
+8. **Phase 8 — enforcement** (F2) once dedicated runners exist.
 
 ---
 
@@ -466,6 +491,9 @@ These are why the project is trustworthy; none of the goals above may violate th
       human-verified modal open recorded in `known-gaps.md`, and Windows DevTools open-state
       observation remains partial.
 - [ ] Mobile host exists and its gate runs on real iOS + Android hardware.
+- [ ] Browser/WebGPU target shell exists and its gate runs in real browsers.
+- [ ] Native text/a11y correctness exists: AccessKit-backed native trees, live IME composition
+      in a rich-text field, and keyboard-focusable links inside text runs.
 - [ ] Bundler + `ncui new` templates land; a TS app builds, runs and reloads with state.
 - [x] Sidecar command registration works, capability-gated (done — any-language stdin/stdout
       JSON contract, `process.spawn`-gated, contained by the `process` runner).
@@ -486,5 +514,10 @@ These are why the project is trustworthy; none of the goals above may violate th
       limits (no directional marks, no bracket pairing, numbers follow their run) are recorded in
       `docs/known-gaps.md`. Latin ligature substitution is the font's own feature, not this code's.)*
 - [ ] Consent is an unforgeable token; bundles are signed.
+      *(Consent shipped: runtime-minted tokens bound to subject, method, capability and exact
+      parameters, spent once; prompts are asked with no runtime lock held. The signing pipeline
+      exists — `bundle.json` digests verified on install/update, detached release signing in the
+      supply-chain leg — but no signing key is configured on this machine, so the signature step
+      is built, not exercised.)*
 - [ ] Internal benchmark gate is **enforcing** on dedicated runners.
 - [ ] Full gate green on Windows, Linux, macOS (+ mobile where applicable); changelog appended.

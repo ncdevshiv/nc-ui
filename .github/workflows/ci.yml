@@ -108,6 +108,9 @@ jobs:
       - name: Clippy over every feature
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      # The GPU tests cannot silently skip here: the renderer falls back to wgpu's software
+      # adapter (llvmpipe/WARP) when the runner has no hardware GPU, so the render pipeline
+      # genuinely executes on every OS rather than reporting "skipped" on GPU-less runners.
       - name: Tests over every feature
         run: cargo test --workspace --all-targets --all-features
 

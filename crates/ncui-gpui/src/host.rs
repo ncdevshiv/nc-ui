@@ -400,7 +400,7 @@ impl HostFactory for GpuiHostFactory {
         &self,
         window: WindowId,
         request: &ncui_webview::WindowRequest,
-        _seam: &Arc<ncui_webview::HostSeam>,
+        seam: &Arc<ncui_webview::HostSeam>,
     ) -> Option<Box<dyn WebViewBackend>> {
         let ncui_webview::WindowContent::Native { provider, props } = &request.content else {
             let error = GpuiHostError::WrongContentKind {
@@ -427,6 +427,11 @@ impl HostFactory for GpuiHostFactory {
             provider: provider.clone(),
             props: props.clone(),
             request: request.clone(),
+            // The seam the registry built for this window carries the runtime's service
+            // channel when it offers one — with this window's narrowed grant already
+            // closed over, so what reaches the provider can never be wider than what
+            // the window was actually given.
+            services: seam.services().cloned(),
         };
         let result: Result<OpenWindowOutcome, GpuiHostError> =
             roundtrip(&self.engine, "open_window", |reply| {

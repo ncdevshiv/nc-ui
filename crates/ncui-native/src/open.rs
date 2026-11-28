@@ -193,6 +193,58 @@ pub fn open_with_default(target: &str) -> Result<(), OpenError> {
     platform_open(target)
 }
 
+/// Reveals a file or folder in the platform's file manager — the shell's
+/// `showItemInFolder`: the manager opens with the item selected, not merely
+/// the folder shown.
+///
+/// The target must be a path that exists. A URL is refused outright: the file
+/// manager is for the file system, and a scheme is a promise this function
+/// does not keep.
+///
+/// On Windows the reveal is `explorer /select,` — spawned detached, never
+/// waited on, and deliberately outside the process containment the rest of
+/// this crate keeps: the hand-off to the already-running shell is the point,
+/// and explorer's exit code is famously meaningless (it reports failure when
+/// the hand-off to an existing instance succeeds). Success here means the
+/// path exists and the shell accepted the instruction — anything deeper would
+/// be a promise the platform does not make.
+///
+/// # Errors
+///
+/// [`OpenError::RefusedTarget`] when the target is a URL or does not exist,
+/// [`OpenError::Unavailable`] when the file manager cannot be started.
+pub fn reveal_in_folder(target: &str) -> Result<(), OpenError> {
+    if scheme_of(target).is_some() {
+        return Err(OpenError::RefusedTarget {
+            target: target.chars().take(400).collect(),
+            reason: "a URL cannot be revealed in a folder".to_owned(),
+        });
+    }
+    let path = Path::new(target);
+    if !path.exists() {
+        return Err(OpenError::RefusedTarget {
+            target: target.chars().take(400).collect(),
+            reason: "nothing exists there".to_owned(),
+        });
+    }
+    platform_reveal(path)
+}
+
+/// The Windows reveal: explorer's select switch, detached and never contained.
+#[cfg(windows)]
+fn platform_reveal(path: &Path) -> Result<(), OpenError> {
+    std::process::Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .spawn()
+        .map(|_child| ())
+        .map_err(|error| OpenError::Unavailable {
+            tool: match error.kind() {
+                std::io::ErrorKind::NotFound => "explorer (not found)",
+                _ => "explorer (refused to start)",
+            },
+        })
+}
+
 /// Maps a process failure onto the open error shape.
 fn tool_error(tool: &'static str, error: &ProcessError) -> OpenError {
     match error {
@@ -316,6 +368,37 @@ fn platform_open(_target: &str) -> Result<(), OpenError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reveal_refuses_urls_and_paths_that_do_not_exist() {
+        let url = reveal_in_folder("https://example.test/file.txt").expect_err("refused");
+        assert_eq!(
+            url.code(),
+            "open_target_refused",
+            "a URL is not a folder item"
+        );
+        let missing =
+            reveal_in_folder(r"C:\definitely-does-not-exist-9f3a.txt").expect_err("refused");
+        assert_eq!(
+            missing.code(),
+            "open_target_refused",
+            "a path that does not exist cannot be selected"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn reveal_of_a_real_file_is_accepted_by_the_shell() {
+        // The live leg: explorer either accepts the instruction or it does
+        // not. What the user sees is the shell's business — the contract here
+        // is that the instruction is honestly delivered.
+        let dir = std::env::temp_dir().join(format!("nc-reveal-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("the temp directory is created");
+        let file = dir.join("revealed.txt");
+        std::fs::write(&file, "evidence").expect("the file exists");
+        reveal_in_folder(&file.to_string_lossy()).expect("the shell accepts a real file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_target_that_cannot_survive_the_tool_is_refused() {

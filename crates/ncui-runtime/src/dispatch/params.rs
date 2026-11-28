@@ -175,6 +175,43 @@ pub(crate) fn invoke_window_drag_region(runtime: &mut Runtime, params: &Value) -
     }
 }
 
+/// `ncui.window.drag.edge` -- begin an edge-resize drag on a frameless window.
+///
+/// Called by the page when the user mousedowns on an edge-resize region — the
+/// complement of the drag region: a window the platform did not decorate has
+/// no borders to grab, so the page's own border asks the engine for the resize
+/// the user means. `edge` names which border: `north`, `south_east`, and so
+/// on — the eight directions the platform itself distinguishes.
+///
+/// The honest refusal shape matches the drag region's: a window with no
+/// engine, or an engine that cannot drag, is the refusal it is rather than a
+/// `dragging: true` nobody felt.
+pub(crate) fn invoke_window_drag_edge(runtime: &mut Runtime, params: &Value) -> Result<Value> {
+    let id = window_id_param(params)?;
+    let edge = ncui_webview::ResizeEdge::from_payload(params).ok_or_else(|| {
+        validation(
+            "edge",
+            "an edge-resize drag names one edge: north, north_east, east, south_east, south, south_west, west, north_west".to_owned(),
+        )
+        .operation("dispatch::window_drag_edge")
+    })?;
+    let dragged = runtime.windows.drag_resize(id, edge).map_err(|_| {
+        NcError::new(ErrorKind::NotFound {
+            kind: "window".to_owned(),
+            id: id.to_string(),
+        })
+        .operation("dispatch::window_drag_edge")
+    })?;
+    if dragged {
+        serde_json::to_value(json!({ "dragging": true, "edge": edge })).map_err(|e| json_error(&e))
+    } else {
+        Err(NcError::new(ErrorKind::Conflict {
+            reason: format!("the engine could not start an edge-resize drag for window {id}"),
+        })
+        .operation("dispatch::window_drag_edge"))
+    }
+}
+
 /// `ncui.window.zoom` -- scale a window's page by a factor.
 ///
 /// `1.0` is the platform default; the factor is applied by the platform, and the next

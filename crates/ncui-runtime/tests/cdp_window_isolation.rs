@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 
 static NEXT_COMMAND: AtomicU64 = AtomicU64::new(1);
 
-const PAGE_BODY: &str = "<!doctype html><title>CDP isolation</title>";
+const PAGE_BODY: &str = "<!doctype html><title>CDP isolation</title><button id=\"target\" onclick=\"window.__ncuiCdpClicks=(window.__ncuiCdpClicks||0)+1\">target</button>";
 
 fn command_id() -> u64 {
     NEXT_COMMAND.fetch_add(1, Ordering::Relaxed)
@@ -66,19 +66,32 @@ fn local_page() -> (String, Origin) {
     )
 }
 
-fn evaluate(runtime: &Runtime, window: WindowId, expression: &str) -> Result<Value, String> {
-    let answer = runtime
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "test helper — callers build owned json! values inline; a reference would add noise without saving a clone the callers do not have"
+)]
+fn cdp(runtime: &Runtime, window: WindowId, method: &str, params: Value) -> Result<Value, String> {
+    runtime
         .windows
         .cdp_send(
             window,
             &json!({
                 "id": command_id(),
-                "method": "Runtime.evaluate",
-                "params": { "expression": expression, "returnByValue": true },
+                "method": method,
+                "params": params,
             }),
         )
         .map_err(|rejection| format!("window {window} rejected the CDP request: {rejection:?}"))?
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())
+}
+
+fn evaluate(runtime: &Runtime, window: WindowId, expression: &str) -> Result<Value, String> {
+    let answer = cdp(
+        runtime,
+        window,
+        "Runtime.evaluate",
+        json!({ "expression": expression, "returnByValue": true }),
+    )?;
     if answer.get("exceptionDetails").is_some() {
         return Err(format!("Runtime.evaluate failed: {answer}"));
     }
@@ -86,6 +99,23 @@ fn evaluate(runtime: &Runtime, window: WindowId, expression: &str) -> Result<Val
         .pointer("/result/result/value")
         .cloned()
         .ok_or_else(|| format!("Runtime.evaluate returned no value: {answer}"))
+}
+
+/// Injects one click through the page target's own CDP channel.
+///
+/// This is the supported input path for interactive tests: OS-level synthesized input does
+/// not reliably reach `WebView2`'s embedded browser window, while CDP input is delivered to
+/// the same page target the test subsequently inspects.
+fn click(runtime: &Runtime, window: WindowId, x: u32, y: u32) -> Result<(), String> {
+    for event in ["mouseMoved", "mousePressed", "mouseReleased"] {
+        cdp(
+            runtime,
+            window,
+            "Input.dispatchMouseEvent",
+            json!({ "type": event, "x": x, "y": y, "button": "left", "clickCount": 1 }),
+        )?;
+    }
+    Ok(())
 }
 
 fn wait_until_evaluable(runtime: &Runtime, window: WindowId) {
@@ -156,4 +186,32 @@ fn two_windows_keep_runtime_evaluate_on_their_own_pages() {
             .expect("the second host reads its own page"),
         Value::String("second-page".to_owned())
     );
+}
+
+#[test]
+fn cdp_mouse_input_reaches_the_page_target_it_inspects() {
+    let mut runtime = Runtime::start(Limits::default()).expect("runtime starts");
+    let actions = runtime.page_commands.actions();
+    let grant = runtime.page_grant();
+    let (url, origin) = local_page();
+    runtime.windows = hosted_surface(&[origin], &actions, grant);
+
+    let window = runtime
+        .windows
+        .open(&WindowRequest::new(&url), None)
+        .expect("the real window opens");
+    wait_until_evaluable(&runtime, window);
+
+    click(&runtime, window, 24, 24).expect("CDP delivers the click");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if evaluate(&runtime, window, "window.__ncuiCdpClicks || 0") == Ok(json!(1)) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the click never reached the page"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }

@@ -109,7 +109,9 @@ fn gpui_and_wry_windows_coexist_in_one_process() {
     let gpui_factory = match GpuiHostFactory::new() {
         Ok(factory) => factory,
         Err(error) => {
-            note_skip(&format!("no display for the gpui engine, skipping: {error}"));
+            note_skip(&format!(
+                "no display for the gpui engine, skipping: {error}"
+            ));
             return;
         }
     };
@@ -189,7 +191,9 @@ fn a_native_window_outlives_the_close_of_a_page_window() {
     let gpui_factory = match GpuiHostFactory::new() {
         Ok(factory) => factory,
         Err(error) => {
-            note_skip(&format!("no display for the gpui engine, skipping: {error}"));
+            note_skip(&format!(
+                "no display for the gpui engine, skipping: {error}"
+            ));
             return;
         }
     };

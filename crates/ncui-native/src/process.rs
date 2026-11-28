@@ -154,7 +154,19 @@ impl ProcessRunner {
     }
 
     /// Resolves the program to start.
-    pub(crate) fn resolve_program(&self, program: &str) -> Result<PathBuf, ProcessError> {
+    ///
+    /// The containment answer, public because a caller that spawns through
+    /// another lane — a supervisor that owns lifecycle rather than a runner
+    /// that owns the call — still owes the program the same rule: a relative
+    /// name resolves inside the application, an absolute path outside it is
+    /// refused. Resolution is the guarantee, and the guarantee must not depend
+    /// on which spawn path the caller took.
+    ///
+    /// # Errors
+    ///
+    /// [`ProcessError::NotExecutable`] for a name that is empty or names
+    /// something the resolution refuses.
+    pub fn resolve_program(&self, program: &str) -> Result<PathBuf, ProcessError> {
         if program.trim().is_empty() {
             return Err(ProcessError::NotExecutable {
                 program: program.to_owned(),

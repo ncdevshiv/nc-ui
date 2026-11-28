@@ -31,9 +31,9 @@
 //! is swallowed, because a page waiting on a backend is owed an answer or a reason.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, ErrorKind as IoErrorKind, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::io::{BufRead, BufReader, ErrorKind as IoErrorKind, Read, Write};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -118,17 +118,26 @@ type Answer = Result<Value, SidecarError>;
 /// two shares this one, because the state that makes it worth keeping alive is the state
 /// one program holds.
 pub struct StreamingSidecar {
-    stdin: Mutex<ChildStdin>,
-    child: Mutex<Child>,
+    stdin: Mutex<Box<dyn Write + Send>>,
+    /// The process, when this sidecar spawned it. `None` when a supervisor owns
+    /// the lifecycle — the transport stays alive across incarnations, so the
+    /// sidecar's liveness question is answered by the transport then.
+    child: Mutex<Option<Child>>,
     /// On Windows, the job that holds the program and everything it starts: dropping it
     /// is the kill switch that reaches a detached grandchild a direct kill cannot.
+    /// `None` when a supervisor owns the process — its own job is the kill switch.
     #[cfg(windows)]
     job: Option<win32job::Job>,
+    /// Whether the byte path is open. The reader's EOF is the only writer: for
+    /// a self-spawned sidecar it means the program is gone; for a supervised
+    /// one it means the supervisor is gone — either way, calls stop being
+    /// answerable and the truth is the same.
+    transport_open: Arc<AtomicBool>,
     pending: Arc<Mutex<HashMap<u64, Sender<Answer>>>>,
     next_id: AtomicU64,
     stderr_tail: Arc<Mutex<Vec<u8>>>,
     _reader: JoinHandle<()>,
-    _stderr: JoinHandle<()>,
+    _stderr: Option<JoinHandle<()>>,
     label: String,
 }
 
@@ -219,12 +228,17 @@ impl StreamingSidecar {
             Arc::new(Mutex::new(HashMap::new()));
         let stderr_tail: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
 
-        let reader = spawn_reader(stdout, Arc::clone(&pending), Arc::clone(&stderr_tail)).map_err(
-            |error| ProcessError::SpawnFailed {
-                program: program.to_owned(),
-                reason: format!("the sidecar's reader thread did not start: {error}"),
-            },
-        )?;
+        let transport_open = Arc::new(AtomicBool::new(true));
+        let reader = spawn_reader(
+            stdout,
+            Arc::clone(&pending),
+            Arc::clone(&stderr_tail),
+            Arc::clone(&transport_open),
+        )
+        .map_err(|error| ProcessError::SpawnFailed {
+            program: program.to_owned(),
+            reason: format!("the sidecar's reader thread did not start: {error}"),
+        })?;
         let stderr_drain =
             spawn_stderr_drain(stderr, Arc::clone(&stderr_tail)).map_err(|error| {
                 ProcessError::SpawnFailed {
@@ -234,16 +248,68 @@ impl StreamingSidecar {
             })?;
 
         Ok(Self {
-            stdin: Mutex::new(stdin),
-            child: Mutex::new(child),
+            stdin: Mutex::new(Box::new(stdin)),
+            child: Mutex::new(Some(child)),
             #[cfg(windows)]
             job,
+            transport_open,
             pending,
             next_id: AtomicU64::new(1),
             stderr_tail,
             _reader: reader,
-            _stderr: stderr_drain,
+            _stderr: Some(stderr_drain),
             label: program.to_owned(),
+        })
+    }
+
+    /// Wraps an externally-owned transport in the request/response wire.
+    ///
+    /// This is the composition point for a supervised sidecar: the caller —
+    /// `ncui-sidecar`'s `Supervisor` — owns the process, its job object and its
+    /// restart policy, and hands over the *stable* pipe ends. The supervisor's
+    /// transport survives restart: a crash-and-respawn is invisible here
+    /// except that calls pending at the crash time out, which is the bounded,
+    /// honest way to say "the incarnation that owed you an answer is gone".
+    ///
+    /// There is no standard error to drain: the supervisor decides the
+    /// child's stderr posture, and today that is silence — diagnostics for a
+    /// supervised backend come through the supervisor's status, not a tail.
+    ///
+    /// # Errors
+    ///
+    /// [`ProcessError::SpawnFailed`] when the reader thread cannot start — the
+    /// pipes are returned to the caller on that path by drop, untouched.
+    pub fn from_pipes(
+        stdin: impl Write + Send + 'static,
+        stdout: impl Read + Send + 'static,
+        label: String,
+    ) -> Result<Self, ProcessError> {
+        let pending: Arc<Mutex<HashMap<u64, Sender<Answer>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let stderr_tail: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let transport_open = Arc::new(AtomicBool::new(true));
+        let reader = spawn_reader(
+            stdout,
+            Arc::clone(&pending),
+            Arc::clone(&stderr_tail),
+            Arc::clone(&transport_open),
+        )
+        .map_err(|error| ProcessError::SpawnFailed {
+            program: label.clone(),
+            reason: format!("the sidecar's reader thread did not start: {error}"),
+        })?;
+        Ok(Self {
+            stdin: Mutex::new(Box::new(stdin)),
+            child: Mutex::new(None),
+            #[cfg(windows)]
+            job: None,
+            transport_open,
+            pending,
+            next_id: AtomicU64::new(1),
+            stderr_tail,
+            _reader: reader,
+            _stderr: None,
+            label,
         })
     }
 
@@ -294,13 +360,21 @@ impl StreamingSidecar {
     }
 
     /// Whether the program is still running.
+    ///
+    /// For a supervised sidecar — one built with [`Self::from_pipes`] — the
+    /// process is the supervisor's business and may have been restarted since
+    /// the last call; what this answers then is whether the *transport* is
+    /// open, which is the question a caller of this wire is actually asking.
     #[must_use]
     pub fn is_alive(&self) -> bool {
-        self.child
+        let mut child = self
+            .child
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .try_wait()
-            .is_ok_and(|status| status.is_none())
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match child.as_mut() {
+            Some(child) => child.try_wait().is_ok_and(|status| status.is_none()),
+            None => self.transport_open.load(Ordering::Acquire),
+        }
     }
 
     /// Stops the program and fails every call waiting on it.
@@ -318,8 +392,11 @@ impl StreamingSidecar {
             .child
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _ = child.kill();
-        let _ = child.wait();
+        if let Some(child) = child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.transport_open.store(false, Ordering::Release);
         drop(child);
         let mut pending = self
             .pending
@@ -411,8 +488,10 @@ impl Drop for StreamingSidecar {
             .child
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _ = child.kill();
-        let _ = child.wait();
+        if let Some(child) = child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
@@ -421,9 +500,10 @@ const STDERR_TAIL_BYTES: usize = 4096;
 
 /// Reads the program's answers and routes each to the call waiting on it.
 fn spawn_reader(
-    stdout: std::process::ChildStdout,
+    stdout: impl Read + Send + 'static,
     pending: Arc<Mutex<HashMap<u64, Sender<Answer>>>>,
     stderr_tail: Arc<Mutex<Vec<u8>>>,
+    transport_open: Arc<AtomicBool>,
 ) -> std::io::Result<JoinHandle<()>> {
     std::thread::Builder::new()
         .name("ncui-sidecar-stdout".to_owned())
@@ -488,6 +568,7 @@ fn spawn_reader(
                             format!("the sidecar exited: {stderr}")
                         };
                         fail_all(&pending, SidecarError::Transport { reason });
+                        transport_open.store(false, Ordering::Release);
                         return;
                     }
                     Err(error) => {
@@ -497,6 +578,7 @@ fn spawn_reader(
                                 reason: format!("the sidecar's output could not be read: {error}"),
                             },
                         );
+                        transport_open.store(false, Ordering::Release);
                         return;
                     }
                 }
@@ -565,8 +647,6 @@ fn read_line_bounded(reader: &mut impl BufRead, max: usize) -> std::io::Result<O
         }
     }
 }
-
-use std::io::Read as _;
 
 #[cfg(test)]
 mod tests {

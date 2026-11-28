@@ -59,6 +59,7 @@ const CLEAR: [u8; 4] = [0, 0, 0, 0];
 fn frame(size: SurfaceSize, island: IslandRect) -> Frame {
     let _ = size;
     Frame {
+        custom_islands: Vec::new(),
         clear_colour: CLEAR,
         islands: vec![island],
     }

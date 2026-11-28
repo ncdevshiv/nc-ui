@@ -15,10 +15,10 @@
 )]
 
 use core::time::Duration;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use ncui_core::{Limits, WindowId};
+use ncui_core::{Capability, CapabilitySet, Limits, WindowId};
 use ncui_runtime::Runtime;
 use ncui_runtime::agent::AgentSession;
 use ncui_runtime::dispatch::dispatch;
@@ -26,7 +26,7 @@ use ncui_runtime::rpc::{Request, Response};
 use ncui_security::authz::AgentRole;
 use ncui_webview::{
     HostFactory, NativeViewBackend, NativeViewCommand, NativeViewError, NativeViewEvent,
-    RoutingFactory,
+    RoutingFactory, TrustedServiceSeam,
 };
 use serde_json::{Value, json};
 
@@ -44,6 +44,9 @@ struct NativeState {
     /// The cumulative count of events dropped to a full queue, as a real backend counts
     /// it: monotonic, and owed to the drain as a delta rather than restated.
     dropped: Mutex<u64>,
+    /// The trusted service seam each native window was born with, keyed by the window so a
+    /// test can prove one window's authority is not another's.
+    services: Mutex<BTreeMap<WindowId, Arc<dyn TrustedServiceSeam>>>,
 }
 
 impl NativeState {
@@ -74,6 +77,15 @@ impl NativeState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    fn services(&self, window: &str) -> Option<Arc<dyn TrustedServiceSeam>> {
+        let window = window.parse::<WindowId>().expect("a window id");
+        self.services
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&window)
+            .cloned()
     }
 }
 
@@ -155,10 +167,17 @@ struct NativeFactory {
 impl HostFactory for NativeFactory {
     fn spawn(
         &self,
-        _window: WindowId,
+        window: WindowId,
         _request: &ncui_webview::WindowRequest,
-        _seam: &Arc<ncui_webview::HostSeam>,
+        seam: &Arc<ncui_webview::HostSeam>,
     ) -> Option<Box<dyn ncui_webview::WebViewBackend>> {
+        if let Some(services) = seam.services() {
+            self.state
+                .services
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(window, Arc::clone(services));
+        }
         Some(Box::new(NativeHost {
             state: Arc::clone(&self.state),
         }))
@@ -227,6 +246,31 @@ fn runtime() -> (Runtime, Arc<NativeState>) {
             )]),
         ))
         .with_factory(Box::new(routing));
+    (runtime, state)
+}
+
+/// A runtime wired the way production wires one: the host factory is installed through
+/// [`Runtime::with_host_factory`], so the registry carries the runtime's trusted-service
+/// factory rather than a test-only substitute.
+fn runtime_with_service_seam() -> (Runtime, Arc<NativeState>) {
+    let mut runtime = Runtime::start(Limits::default()).expect("runtime should start");
+    runtime.grant_page_capabilities(&[Capability::ReadLogs, Capability::ReadMetrics]);
+    let state = Arc::new(NativeState::default());
+    let routing = RoutingFactory::new()
+        .with_page_host(Box::new(PageFactory))
+        .with_native_host(Box::new(NativeFactory {
+            state: Arc::clone(&state),
+        }));
+    let runtime = runtime
+        .with_host_factory(
+            Box::new(routing),
+            &[ncui_webview::Origin::new(
+                ncui_webview::Scheme::Https,
+                "example.com",
+                None,
+            )],
+        )
+        .expect("the test host installs");
     (runtime, state)
 }
 
@@ -299,6 +343,82 @@ fn a_native_window_is_created_through_the_same_create_method() {
         .expect("the native window is listed");
     assert_eq!(mine["content"], "native");
     assert_eq!(mine["provider"], "test.panel");
+}
+
+#[test]
+fn trusted_services_close_over_the_native_window_grant() {
+    let (mut runtime, state) = runtime_with_service_seam();
+    let mut administrator = session(AgentRole::Administrator);
+    let echo_requires = CapabilitySet::empty().with(Capability::ReadLogs);
+    let restricted_requires = CapabilitySet::empty().with(Capability::ReadMetrics);
+    let _echo = runtime
+        .register_page_command("test.echo", echo_requires, "Echo the input", |input| {
+            Ok(json!({ "echo": input }))
+        })
+        .expect("the echo command registers");
+    let _restricted = runtime
+        .register_page_command(
+            "test.restricted",
+            restricted_requires,
+            "A command the narrow window was not granted",
+            |_input| Ok(json!({ "restricted": true })),
+        )
+        .expect("the restricted command registers");
+    runtime
+        .page_commands
+        .register_js_command(
+            "test.page",
+            CapabilitySet::empty(),
+            "A command the page itself answers",
+        )
+        .expect("the page command registers");
+
+    let narrow = create_window(
+        &mut runtime,
+        &mut administrator,
+        json!({
+            "content": { "kind": "native", "provider": "test.panel" },
+            "grant": ["read.logs"]
+        }),
+    );
+    let full = create_native_window(&mut runtime, &mut administrator);
+    let narrow_services = state
+        .services(&narrow)
+        .expect("the narrow native window is born with services");
+    let full_services = state
+        .services(&full)
+        .expect("the full native window is born with services");
+
+    let input = json!({ "value": 42 });
+    assert_eq!(
+        narrow_services
+            .invoke("test.echo", input.clone())
+            .expect("an allowed service call succeeds"),
+        json!({ "echo": input })
+    );
+    let denied = narrow_services
+        .invoke("test.restricted", json!({}))
+        .expect_err("the narrowed window cannot spend a capability it was not granted");
+    assert_eq!(denied.code, "capability_denied");
+    assert!(
+        full_services
+            .invoke("test.restricted", json!({}))
+            .expect("the default-granted window can call the restricted command")["restricted"]
+            .as_bool()
+            .expect("a boolean result")
+    );
+    let unknown = narrow_services
+        .invoke("test.missing", json!({}))
+        .expect_err("unknown services are refused");
+    assert_eq!(unknown.code, "unknown_service");
+    let runtime_method = narrow_services
+        .invoke("describe", json!({}))
+        .expect_err("runtime-internal methods stay out of the native service channel");
+    assert_eq!(runtime_method.code, "not_available");
+    let page_owned = narrow_services
+        .invoke("test.page", json!({}))
+        .expect_err("page-owned handlers stay out of the native service channel");
+    assert_eq!(page_owned.code, "not_available");
 }
 
 #[test]

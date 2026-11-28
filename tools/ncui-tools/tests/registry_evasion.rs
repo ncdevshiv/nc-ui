@@ -93,6 +93,7 @@ fn complete_feature(id: &str) -> Feature {
         crates: vec!["ncui-core".to_owned()],
         evidence: verified_evidence(),
         platforms: platforms(),
+        execution: None,
     }
 }
 
@@ -126,6 +127,7 @@ fn a_complete_feature_with_no_evidence_at_all_is_rejected() {
             api_review: EvidenceItem::absent(),
         },
         platforms: platforms(),
+        execution: None,
     };
 
     let result = registry::validate(&registry_of(vec![feature]), None);

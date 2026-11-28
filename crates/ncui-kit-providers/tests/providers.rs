@@ -63,6 +63,7 @@ fn build_provider(cx: &mut TestAppContext, id: &str, props: Value) -> BuiltProvi
             window: window_id,
             props: props.clone(),
             events: closure_events,
+            services: None,
         };
         let (view, instance) = provider
             .build(context, window, cx)
@@ -108,6 +109,7 @@ fn a_build_refusal_preserves_its_machine_readable_code(cx: &mut TestAppContext) 
                     window: WindowId::new(),
                     props: json!({"label": 3}),
                     events,
+                    services: None,
                 },
                 window,
                 cx,

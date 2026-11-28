@@ -428,7 +428,6 @@ const EVENT_PAGE: &str = r#"<!doctype html>
 </body></html>
 "#;
 
-
 /// Register the `record` page command the page-driven tests share: the page reports what it
 /// observed, the test asserts on what arrived.
 fn record_command(

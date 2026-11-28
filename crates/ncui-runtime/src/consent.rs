@@ -4,6 +4,8 @@
 //! host-issued, subject- and argument-bound token or asks the installed host prompter after
 //! authentication, rate limiting and standing authorization have succeeded.
 
+use std::sync::Arc;
+
 use ncui_core::{CapabilitySet, CorrelationId, ErrorKind, NcError, Result};
 #[cfg(feature = "dialogs")]
 use ncui_native::DialogBackend;
@@ -11,6 +13,7 @@ use ncui_native::dialog::MAX_CONFIRM_MESSAGE_BYTES;
 use ncui_security::authz::{
     Authorizer, ConsentToken, consent_payload_digest, validate_consent_binding,
 };
+use ncui_webview::WindowConfirmation;
 use serde_json::Value;
 
 use crate::Runtime;
@@ -129,6 +132,217 @@ pub trait ConsentPrompter: core::fmt::Debug + Send + Sync {
     fn confirm(&self, request: &ConsentRequest) -> Result<bool>;
 }
 
+/// What the caller must do about per-call consent before dispatching.
+///
+/// The human half of consent is unbounded — a person reading a dialog takes as
+/// long as they take. `Ask` hands the caller everything needed to wait for that
+/// answer with no runtime lock held: the prepared request and a surface that
+/// owns its handles. `&mut Runtime` is parked only for the two bookends —
+/// deciding in [`gate`] and consuming in [`settle`] — never for the wait
+/// between them.
+pub(crate) enum ConsentGate {
+    /// Dispatch normally: this call reaches no prompt. It needs no consent, the
+    /// caller supplied a token, or the pipeline itself produces the refusal the
+    /// gate saw coming — an ungranted capability, a malformed token, a request
+    /// too large to present, or no installed approval surface. Routing those
+    /// through the pipeline keeps one implementation of every refusal.
+    Dispatch,
+    /// Ask `surface` for `request` with no runtime lock held, then re-enter
+    /// dispatch with the answer [`settle`] produces.
+    Ask {
+        /// The exact operation the person is shown.
+        request: ConsentRequest,
+        /// The capabilities the method requires; [`settle`] binds them into the mint.
+        required: CapabilitySet,
+        /// The surface to ask through.
+        surface: ConsentSurface,
+    },
+}
+
+/// The prompt surface, held in a form that asks without the runtime lock.
+///
+/// Both variants own what they need — the prompter behind an `Arc`, the
+/// window's parented confirmation behind its `Box` — so neither borrows the
+/// runtime. That is the whole reason the gate exists.
+pub(crate) enum ConsentSurface {
+    /// The installed host prompter: the embedder's own boundary, or the
+    /// runtime-default native one.
+    Prompter(Arc<dyn ConsentPrompter>),
+    /// The asking window's own parented confirmation.
+    Windowed(Box<dyn WindowConfirmation>),
+}
+
+impl ConsentSurface {
+    /// Presents `request` and blocks on the person's answer.
+    ///
+    /// Called with no runtime lock held; the answer is delivered to [`settle`].
+    /// An error means the prompt could not be shown or completed, which
+    /// withholds approval exactly as the prompt paths inside [`resolve`] treat it.
+    pub(crate) fn ask(&self, request: &ConsentRequest) -> Result<bool> {
+        match self {
+            Self::Prompter(prompter) => prompter.confirm(request),
+            Self::Windowed(confirmation) => confirmation
+                .confirm(CONSENT_PROMPT_TITLE, request.message())
+                .map_err(|reason| {
+                    NcError::new(ErrorKind::Internal {
+                        operation: "runtime::consent::window".to_owned(),
+                        reason,
+                    })
+                    .operation("runtime::consent::window")
+                }),
+        }
+    }
+}
+
+/// Decides whether dispatching this call would reach the human prompt.
+///
+/// The answer must be taken under the runtime lock — it reads the installed
+/// prompter and the caller's authorization — but it changes nothing, so the
+/// lock is held only for the read. The order of checks mirrors [`resolve`]'s
+/// path to the prompt, so `Ask` is exactly the set of calls that would block
+/// on a person if dispatched in place.
+///
+/// `window_confirmation` is the asking window's parented surface, for the page
+/// path; agent transport calls pass `None`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mirrors resolve's inputs so the gate predicts exactly what resolve would do"
+)]
+pub(crate) fn gate(
+    runtime: &Runtime,
+    session: &AgentSession,
+    method: &str,
+    required: CapabilitySet,
+    destructive: bool,
+    params: &Value,
+    now: core::time::Duration,
+    window_confirmation: Option<Box<dyn WindowConfirmation>>,
+) -> ConsentGate {
+    if !(destructive || required.has_destructive()) {
+        return ConsentGate::Dispatch;
+    }
+    match crate::dispatch::consent_token_param(params) {
+        // A supplied token takes the pipeline's validation path and a malformed
+        // one takes its parse error — the prompt is involved in neither.
+        Ok(Some(_)) | Err(_) => return ConsentGate::Dispatch,
+        Ok(None) => {}
+    }
+    // Rate limiting precedes consent in the pipeline; a call the bucket would
+    // refuse is refused there, not asked about. `available` checks without
+    // spending — the spend stays the pipeline's own, in order.
+    if session.available(now) == 0 {
+        return ConsentGate::Dispatch;
+    }
+    // Standing authorization precedes the prompt in `resolve`; a call it
+    // refuses is refused there, not asked about.
+    if session.authorize(required).is_err() {
+        return ConsentGate::Dispatch;
+    }
+    let Ok(request) = ConsentRequest::new(&session.agent_id, method, required, params) else {
+        return ConsentGate::Dispatch;
+    };
+    // The surface ordering is `obtain_human_approval`'s: the embedder's own
+    // boundary is asked first, always; the window's parented surface outranks
+    // only the runtime-default native prompt; then the installed prompter.
+    // No surface at all fails closed in the pipeline, which is where that
+    // refusal stays.
+    let surface = if runtime.consent_prompter_custom {
+        runtime
+            .consent_prompter
+            .clone()
+            .map(ConsentSurface::Prompter)
+    } else if let (Some(confirmation), true) =
+        (window_confirmation, runtime.consent_prompter.is_some())
+    {
+        Some(ConsentSurface::Windowed(confirmation))
+    } else {
+        runtime
+            .consent_prompter
+            .clone()
+            .map(ConsentSurface::Prompter)
+    };
+    match surface {
+        Some(surface) => ConsentGate::Ask {
+            request,
+            required,
+            surface,
+        },
+        None => ConsentGate::Dispatch,
+    }
+}
+
+/// The transport's gate entry point: the method's authority comes from `table`,
+/// so a name the table does not know takes the pipeline's own not-found.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mirrors resolve's inputs so the gate predicts exactly what resolve would do"
+)]
+pub(crate) fn gate_for_method(
+    runtime: &Runtime,
+    session: &AgentSession,
+    request: &crate::rpc::Request,
+    table: &[crate::describe::MethodDescription],
+    now: core::time::Duration,
+    window_confirmation: Option<Box<dyn WindowConfirmation>>,
+) -> ConsentGate {
+    let Some(method) = table.iter().find(|m| m.name == request.method) else {
+        return ConsentGate::Dispatch;
+    };
+    gate(
+        runtime,
+        session,
+        &method.name,
+        method.requires,
+        method.destructive,
+        &request.params,
+        now,
+        window_confirmation,
+    )
+}
+
+/// Turns the answer a caller obtained outside the lock into what the pipeline
+/// consumes: a freshly minted token on approval, or the refusal a declined or
+/// failed prompt produces.
+///
+/// The outcomes are identical to resolving the prompt inside [`resolve`],
+/// because the answer is the only thing that moved — who waited for it.
+pub(crate) fn settle(
+    runtime: &mut Runtime,
+    session: &AgentSession,
+    method: &str,
+    required: CapabilitySet,
+    params: &Value,
+    approved: Result<bool>,
+) -> Result<ConsentToken> {
+    match approved {
+        Ok(true) => runtime.mint_consent(
+            CorrelationId::new(),
+            &session.agent_id,
+            method,
+            required,
+            params,
+        ),
+        Ok(false) => Err(consent_denied(
+            &session.agent_id,
+            "runtime::consent::prompt",
+            "the person declined the operation",
+        )),
+        Err(error) => {
+            tracing::warn!(
+                subject = %session.agent_id,
+                method,
+                %error,
+                "the host could not obtain destructive-operation approval"
+            );
+            Err(consent_denied(
+                &session.agent_id,
+                "runtime::consent::prompt",
+                "approval failed",
+            ))
+        }
+    }
+}
+
 /// Resolves per-call consent for an agent method or native page command.
 #[allow(
     clippy::too_many_arguments,
@@ -142,12 +356,23 @@ pub(crate) fn resolve(
     destructive: bool,
     params: &Value,
     supplied_token: Option<&ConsentToken>,
+    pre_approved: Option<Result<ConsentToken>>,
+    window_confirmation: Option<&dyn WindowConfirmation>,
     correlation: CorrelationId,
 ) -> Result<()> {
     session.authorize(required)?;
     let payload_digest = consent_payload_digest(params)?;
     let needs_consent = destructive || required.has_destructive();
 
+    // A caller that already ran the prompt outside the lock hands its answer in
+    // as a minted token, or as the refusal a declined or failed prompt produced.
+    // Either takes the supplied-token path, so an out-of-lock answer and a
+    // caller-supplied token are indistinguishable to validation.
+    let minted = match pre_approved {
+        Some(pre) => Some(pre?),
+        None => None,
+    };
+    let supplied_token = minted.as_ref().or(supplied_token);
     if let Some(token) = supplied_token {
         Authorizer.require_destructive_with_token(
             &session.agent_id,
@@ -185,26 +410,7 @@ pub(crate) fn resolve(
     }
 
     let request = ConsentRequest::new(&session.agent_id, method, required, params)?;
-    let prompter = runtime.consent_prompter.clone().ok_or_else(|| {
-        consent_denied(
-            &session.agent_id,
-            "runtime::consent::prompt",
-            "no host approval surface is installed",
-        )
-    })?;
-    let approved = prompter.confirm(&request).map_err(|error| {
-        tracing::warn!(
-            subject = %session.agent_id,
-            method,
-            %error,
-            "the host could not obtain destructive-operation approval"
-        );
-        consent_denied(
-            &session.agent_id,
-            "runtime::consent::prompt",
-            "approval failed",
-        )
-    })?;
+    let approved = obtain_human_approval(runtime, session, method, &request, window_confirmation)?;
     if !approved {
         return Err(consent_denied(
             &session.agent_id,
@@ -232,6 +438,89 @@ pub(crate) fn resolve(
         params,
     )?;
     Ok(())
+}
+
+/// Obtains the person's decision for one exact operation.
+///
+/// A window that can parent its prompt is asked through its own confirmation surface, and
+/// its failure is final: falling back to an unparented prompt would quietly re-create the
+/// orphaned dialog this path exists to remove. Without such a surface the installed host
+/// prompter is the approval boundary.
+fn obtain_human_approval(
+    runtime: &Runtime,
+    session: &AgentSession,
+    method: &str,
+    request: &ConsentRequest,
+    window_confirmation: Option<&dyn WindowConfirmation>,
+) -> Result<bool> {
+    // An embedder's own boundary is asked first, always: a test or embedding that
+    // substitutes the prompter expects the substitute to decide, and a window that
+    // could parent its own prompt must not bypass that substitution. The window's
+    // parented surface is preferred over only the runtime-default native prompt,
+    // whose unparented dialog is the orphaned-window failure this ordering removes.
+    if runtime.consent_prompter_custom {
+        let prompter = runtime.consent_prompter.clone().ok_or_else(|| {
+            consent_denied(
+                &session.agent_id,
+                "runtime::consent::prompt",
+                "no host approval surface is installed",
+            )
+        })?;
+        return prompter.confirm(request).map_err(|error| {
+            tracing::warn!(
+                subject = %session.agent_id,
+                method,
+                %error,
+                "the host could not obtain destructive-operation approval"
+            );
+            consent_denied(
+                &session.agent_id,
+                "runtime::consent::prompt",
+                "approval failed",
+            )
+        });
+    }
+    // The parented surface is the better form of the runtime-default native prompt, so it
+    // is asked only when that default is installed. A host that installs no approval
+    // surface at all must fail closed: inventing a prompt the host never asked for would
+    // turn "no consent boundary" into "the runtime consents on the host's behalf".
+    if let (Some(confirmation), true) = (window_confirmation, runtime.consent_prompter.is_some()) {
+        return confirmation
+            .confirm(CONSENT_PROMPT_TITLE, request.message())
+            .map_err(|error| {
+                tracing::warn!(
+                    subject = %session.agent_id,
+                    method,
+                    %error,
+                    "the asking window could not obtain destructive-operation approval"
+                );
+                consent_denied(
+                    &session.agent_id,
+                    "runtime::consent::prompt",
+                    "approval failed",
+                )
+            });
+    }
+    let prompter = runtime.consent_prompter.clone().ok_or_else(|| {
+        consent_denied(
+            &session.agent_id,
+            "runtime::consent::prompt",
+            "no host approval surface is installed",
+        )
+    })?;
+    prompter.confirm(request).map_err(|error| {
+        tracing::warn!(
+            subject = %session.agent_id,
+            method,
+            %error,
+            "the host could not obtain destructive-operation approval"
+        );
+        consent_denied(
+            &session.agent_id,
+            "runtime::consent::prompt",
+            "approval failed",
+        )
+    })
 }
 
 fn consent_denied(subject: &str, operation: &'static str, reason: &str) -> NcError {

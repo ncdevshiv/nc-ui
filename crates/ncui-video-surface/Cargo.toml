@@ -1,0 +1,67 @@
+[package]
+description = "Platform video presenter for the nc-ui video surface: a child window the OS composites, driven by wgpu — the airspace half of media.video_surface."
+license.workspace = true
+name = "ncui-video-surface"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors = ["NC-UI Contributors"]
+
+# This crate is the workspace's one deliberate unsafe boundary: raw window-system
+# FFI is its entire job — the workspace `forbid` is correct everywhere unsafe is
+# avoidable, and here it is not. The lints are the workspace's own copied wholesale
+# with exactly one difference: `unsafe_code` is `deny` rather than `forbid`, so the
+# win32 module can carry its documented exception in source — the project rule
+# that intentional exceptions live at the call site with a written reason,
+# applied to the crate that exists to hold them. Cargo does not support
+# workspace-inheritance with one lint overridden, which is the only reason the
+# list is duplicated rather than inherited.
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+unused_qualifications = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+nonstandard_style = { level = "warn", priority = -1 }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny" # ncui-allow-placeholder: the clippy lint key, not a marker
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+allow_attributes_without_reason = "warn"
+too_many_lines = "warn"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+similar_names = "allow"
+struct_excessive_bools = "allow"
+fn_params_excessive_bools = "allow"
+single_match_else = "allow"
+
+[dependencies]
+ncui-gpu = { workspace = true }
+wgpu = { workspace = true }
+raw-window-handle = { version = "0.6" }
+
+# Raw window creation, placement and destruction are Win32 calls — the one place
+# in the workspace where that is this crate's whole job, so the unsafe here is
+# small, contained, and documented at each use.
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.59"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+]

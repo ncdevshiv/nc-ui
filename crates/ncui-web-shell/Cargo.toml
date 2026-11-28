@@ -1,0 +1,53 @@
+[package]
+name = "ncui-web-shell"
+description = "Browser/WebGPU target shell: ncui-native rendering and input running in a real browser through WebGPU (ADR-021)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors = ["NC-UI Contributors"]
+
+[lints]
+workspace = true
+
+[lib]
+# cdylib for the wasm artifact; rlib so native tests can exercise the pure parts.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ncui-a11y = { workspace = true }
+ncui-core = { workspace = true }
+ncui-gpu = { workspace = true }
+ncui-gpu-renderer = { workspace = true }
+
+# ADR-012's tenth exception: wasm-bindgen/web-sys are the only honest way to talk to
+# browser platform APIs from Rust — there is no smaller interface, the way there is no
+# smaller interface to a GPU driver than wgpu. They are confined to this crate and
+# compiled only on wasm32, so native targets never build them.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# wgpu is wasm32-only here for the same reason: the shell talks to the browser
+# GPU directly, and native targets neither need nor build this half.
+wgpu = { workspace = true }
+wasm-bindgen = "=0.2.129"
+js-sys = "=0.3.106"
+web-sys = { version = "=0.3.106", features = [
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    "Window",
+    "Document",
+    "Element",
+    "Navigator",
+    "KeyboardEvent",
+    "MouseEvent",
+    "WheelEvent",
+    "InputEvent",
+    "CompositionEvent",
+    "DragEvent",
+    "DataTransfer",
+    "ResizeObserver",
+    "ResizeObserverEntry",
+    "Clipboard",
+    "Response",
+] }
+wasm-bindgen-futures = "=0.4.79"

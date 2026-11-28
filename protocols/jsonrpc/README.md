@@ -110,6 +110,15 @@ behind it, which is why `protocol_conformance.rs` checks this table against the 
 | `script` | `ncui.window.post` | The script to evaluate in the page |
 | `landscape`, `print_background`, `scale`, `paper_width`, `paper_height` | `ncui.window.print_to_pdf` | The print options the engine accepts: orientation, page backgrounds, a scale between 0.1 and 2.0, and paper size in inches between 1 and 100 |
 | `format`, `quality` | `ncui.window.screenshot` | The image format (`png` or `jpeg`) and, for JPEG, a quality between 0 and 100 |
+| `edge` | `ncui.window.drag.edge` | The border a resize drag acts on: `north`, `north_east`, `east`, `south_east`, `south`, `south_west`, `west` or `north_west` |
+| `width`, `height` | `ncui.videoSurface.create` | The frame size the surface's producer will deliver, in pixels |
+| `rect` | `ncui.videoSurface.create`, `ncui.videoSurface.place` | Where the surface sits over the page: `[x, y, width, height]` in CSS pixels |
+| `scroll` | `ncui.videoSurface.create`, `ncui.videoSurface.place` | The page's scroll offset as `[x, y]`, so a surface can follow content |
+| `surface` | `ncui.videoSurface.place`, `ncui.videoSurface.control`, `ncui.videoSurface.teardown`, `ncui.videoSurface.inspect` | The video surface's identity, from `ncui.videoSurface.create` |
+| `stream` | `ncui.audioStream.control`, `ncui.audioStream.teardown`, `ncui.audioStream.inspect` | The audio stream's identity, from `ncui.audioStream.create` |
+| `intent` | `ncui.videoSurface.control`, `ncui.audioStream.control` | The playback intent: `pause`, `resume`, `seek` or, for video, `step` |
+| `pts`, `timescale` | `ncui.videoSurface.control`, `ncui.audioStream.control` | A seek's target position and the timescale the position is expressed in |
+| `frames` | `ncui.videoSurface.control` | A step's signed frame count — negative steps backwards |
 
 ### Consent and host approval
 
@@ -208,6 +217,7 @@ is the one actually enforced.
 | `ncui.devtools.summary` | `inspect.runtime` | no | A summary of the devtools subsystem: event count, capacity, profile methods, and call count |
 | `ncui.app.emit` | `window` | no | Emit an application-defined event to a window's page (deep links, notification clicks, custom events) |
 | `ncui.window.drag.region` | `window` | no | Initiate a window drag from a drag region (titlebar) |
+| `ncui.window.drag.edge` | `window` | no | Initiate an edge-resize drag on a frameless window; `edge` names the border |
 | `ncui.window.create.child` | `window` | no | Open a child window with a narrowed grant |
 | `ncui.cdp.send` | `cdp` | **yes** | Send a CDP command to a window's own page target; requires exact host approval |
 | `ncui.trace.start` | `inspect.runtime` | no | Begin verbose tracing of operations |
@@ -216,6 +226,15 @@ is the one actually enforced.
 | `ncui.profile.stop` | `inspect.runtime` | no | End profiling |
 | `ncui.test.run` | `run.tests` | no | Run the project's test suite |
 | `ncui.benchmark.run` | `run.benchmarks` | no | Run the project's benchmark suite |
+| `ncui.videoSurface.create` | `gpu` | no | Declare a video surface and its placement over the page; the answer carries the surface's identity |
+| `ncui.videoSurface.place` | `gpu` | no | Update a video surface's placement as the page's geometry moves |
+| `ncui.videoSurface.control` | `gpu` | no | A playback intent for a video surface: pause, resume, seek or step |
+| `ncui.videoSurface.teardown` | `gpu` | no | Destroy a video surface before its window dies |
+| `ncui.videoSurface.inspect` | `inspect.gpu` | no | A video surface ring's drop count and queue depth |
+| `ncui.audioStream.create` | `audio` | no | Declare an audio output stream on a window; the answer carries the stream's identity |
+| `ncui.audioStream.control` | `audio` | no | A playback intent for an audio stream: pause, resume or seek |
+| `ncui.audioStream.teardown` | `audio` | no | Destroy an audio stream before its window dies |
+| `ncui.audioStream.inspect` | `inspect.runtime` | no | An audio stream's loss accounting and sync truth |
 
 ### Native windows
 

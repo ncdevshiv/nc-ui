@@ -124,6 +124,9 @@ impl ncui_webview::WebViewBackend for AlwaysAlive {
     fn drag_window(&self) -> bool {
         true
     }
+    fn drag_resize(&self, _edge: ncui_webview::ResizeEdge) -> bool {
+        true
+    }
 
     fn create_child_webview(
         &self,
@@ -242,6 +245,9 @@ fn params_for(name: &str, created_window: Option<WindowId>) -> Value {
         | "ncui.window.child.close" => {
             json!({ "window": named, "child": "child-0000000000000001" })
         }
+        "ncui.window.drag.edge" => {
+            json!({ "window": named, "edge": "south" })
+        }
         "ncui.window.child.create" => json!({
             "window": named,
             "url": "https://example.com",
@@ -356,6 +362,14 @@ fn the_advertised_surface_matches_the_enforced_surface() {
 
         if name == "ncui.test.run" || name == "ncui.benchmark.run" {
             // Subprocess-based; environment-dependent. Covered by their handlers existing.
+            continue;
+        }
+        if name.starts_with("ncui.videoSurface.") || name.starts_with("ncui.audioStream.") {
+            // Media methods create or act on surfaces bound to a real native
+            // window handle: the fixture's stand-in backend has no HWND to hand them,
+            // so every call here would end at the same honest refusal — "window is
+            // not open" — which proves the registration and nothing else. Their
+            // real exercise lives in the dedicated wiring and live tests.
             continue;
         }
         // `ncui.window.close` is exercised on a window of its own, so the window the

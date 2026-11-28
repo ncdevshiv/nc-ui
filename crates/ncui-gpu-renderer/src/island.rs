@@ -131,7 +131,11 @@ mod wgpu_join {
         }
         let plan = RenderPlan::from_frame(frame, size).map_err(IslandError::Plan)?;
         let target = OffscreenTarget::new(device.wgpu_device(), size);
-        let pipeline = QuadPipeline::new(device.wgpu_device(), wgpu::TextureFormat::Rgba8Unorm);
+        let pipeline = QuadPipeline::new(
+            device.wgpu_device(),
+            device.queue(),
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
         pipeline.draw(device.wgpu_device(), device.queue(), target.view(), &plan);
         let rgba = target
             .read_back(device.wgpu_device(), device.queue())

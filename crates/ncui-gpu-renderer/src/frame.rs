@@ -79,6 +79,14 @@ impl FrameKind {
 /// value with a reason rather than a panic or a truncated read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameError {
+    /// The bytes are structurally invalid in a way no other variant describes — an
+    /// unknown command tag, a role code nobody defined, a string that is not UTF-8.
+    /// The detail is static text rather than the offending bytes: an error crossing a
+    /// process boundary should not echo the input it refused.
+    Malformed {
+        /// What was wrong.
+        detail: &'static str,
+    },
     /// The bytes do not start with the frame magic.
     BadMagic {
         /// What was found instead.
@@ -127,6 +135,7 @@ pub enum FrameError {
 impl fmt::Display for FrameError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Malformed { detail } => write!(f, "frame is malformed: {detail}"),
             Self::BadMagic { found } => {
                 write!(
                     f,
@@ -235,7 +244,7 @@ impl FrameHeader {
             return Err(FrameError::BadMagic { found: magic });
         }
         let version = bytes[4];
-        if version != VERSION {
+        if version != VERSION && version != crate::wire_v2::VERSION_V2 {
             return Err(FrameError::UnsupportedVersion { found: version });
         }
         let Some(kind) = FrameKind::from_code(bytes[5]) else {
@@ -276,6 +285,47 @@ impl FrameHeader {
     }
 }
 
+/// One application-drawn island: a [`ncui_gpu::display::DisplayList`] and the viewport it is drawn through.
+///
+/// The solid-colour [`IslandRect`] is the degenerate case of island content — one rect
+/// filling the viewport. A `CustomIsland` is the general case the timeline needs: clips,
+/// waveforms, thumbnails, playheads, declared by application code in island-content
+/// coordinates, with the hit regions interleaved in the same stream so what is drawn and
+/// what is hit-tested cannot drift apart.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CustomIsland {
+    /// The viewport's left edge, in physical pixels.
+    pub x: f32,
+    /// The viewport's top edge.
+    pub y: f32,
+    /// The viewport's width.
+    pub width: f32,
+    /// The viewport's height.
+    pub height: f32,
+    /// The horizontal scroll offset within the content.
+    pub scroll_x: f32,
+    /// The vertical scroll offset within the content.
+    pub scroll_y: f32,
+    /// The content. The renderer walks the draw commands; the hit regions ride along so
+    /// the input host answers about exactly this geometry.
+    pub list: ncui_gpu::display::DisplayList,
+}
+
+impl CustomIsland {
+    /// Whether the viewport is one pixels could land in.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        self.x.is_finite()
+            && self.y.is_finite()
+            && self.width.is_finite()
+            && self.height.is_finite()
+            && self.width >= 0.0
+            && self.height >= 0.0
+            && self.scroll_x.is_finite()
+            && self.scroll_y.is_finite()
+    }
+}
+
 /// One compositor frame.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Frame {
@@ -283,6 +333,9 @@ pub struct Frame {
     pub clear_colour: [u8; 4],
     /// The islands to draw, in draw order.
     pub islands: Vec<IslandRect>,
+    /// The application-drawn islands, drawn after the solid ones — custom content is the
+    /// foreground of any frame it shares with flat islands.
+    pub custom_islands: Vec<CustomIsland>,
 }
 
 impl Frame {
@@ -311,6 +364,13 @@ impl Frame {
     /// [`MAX_ISLANDS`], and [`FrameError::TooLarge`] when the encoded frame would exceed
     /// [`MAX_FRAME_BYTES`].
     pub fn encode(&self) -> Result<Vec<u8>, FrameError> {
+        if !self.custom_islands.is_empty() {
+            // Custom content needs variable-length records v1 does not have, so the
+            // frame travels as v2. A solid-only frame still encodes as v1 — the
+            // smallest version the content needs — so a peer that only reads v1 never
+            // sees a byte it cannot parse.
+            return crate::wire_v2::encode_v2(self);
+        }
         if self.islands.len() as u64 > u64::from(MAX_ISLANDS) {
             return Err(FrameError::TooManyIslands {
                 declared: self.islands.len() as u32,
@@ -357,6 +417,18 @@ impl Frame {
     /// length costs nothing.
     pub fn decode(bytes: &[u8]) -> Result<Self, FrameError> {
         let header = FrameHeader::decode(bytes)?;
+        if bytes.len() > 4 && bytes[4] == crate::wire_v2::VERSION_V2 {
+            if header.payload_len > MAX_FRAME_BYTES {
+                return Err(FrameError::TooLarge {
+                    declared: header.payload_len,
+                    limit: MAX_FRAME_BYTES,
+                });
+            }
+            return crate::wire_v2::decode_v2(
+                &bytes[FrameHeader::WIRE_BYTES..],
+                header.payload_len,
+            );
+        }
         if header.payload_len > MAX_FRAME_BYTES {
             return Err(FrameError::TooLarge {
                 declared: header.payload_len,
@@ -408,6 +480,7 @@ impl Frame {
         Ok(Self {
             clear_colour,
             islands,
+            custom_islands: Vec::new(),
         })
     }
 }
@@ -424,6 +497,7 @@ mod tests {
 
     fn sample() -> Frame {
         Frame {
+            custom_islands: Vec::new(),
             clear_colour: [10, 20, 30, 255],
             islands: vec![
                 IslandRect {
@@ -454,6 +528,7 @@ mod tests {
     #[test]
     fn an_empty_frame_round_trips() {
         let frame = Frame {
+            custom_islands: Vec::new(),
             clear_colour: [0, 0, 0, 255],
             islands: Vec::new(),
         };
@@ -508,7 +583,7 @@ mod tests {
     #[test]
     fn a_future_version_is_refused_rather_than_misread() {
         let mut encoded = sample().encode().expect("encoded");
-        encoded[4] = VERSION + 1;
+        encoded[4] = crate::wire_v2::VERSION_V2 + 1;
         let error = Frame::decode(&encoded).expect_err("must be refused");
         assert!(
             matches!(error, FrameError::UnsupportedVersion { .. }),
@@ -530,6 +605,7 @@ mod tests {
     #[test]
     fn a_frame_with_more_islands_than_the_limit_is_refused() {
         let frame = Frame {
+            custom_islands: Vec::new(),
             clear_colour: [0, 0, 0, 255],
             islands: vec![
                 IslandRect {

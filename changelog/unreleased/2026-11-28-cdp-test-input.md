@@ -1,0 +1,1 @@
+- **Interactive-test input now has one documented supported path: page-targeted CDP.** `Input.dispatchMouseEvent`/`Input.dispatchKeyEvent` are the injection mechanism on Windows WebView2, with a live click regression test proving the input reaches the same page target the test inspects.

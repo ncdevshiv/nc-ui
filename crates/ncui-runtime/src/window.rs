@@ -15,26 +15,26 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
 
-use ncui_core::{CapabilitySet, CorrelationId, WindowId};
-use ncui_security::audit::{AuditEvent, AuditOutcome};
+use ncui_core::{CapabilitySet, WindowId};
 use ncui_webview::{
     ActionTable, ChildPageMessage, HostFactory, HostSeam, MountedComponent, PageMessage,
-    PageTarget, SeamError, WindowRegistry, WindowRejection, WindowRequest, WindowSummary,
+    PageTarget, TrustedServiceSeamFactory, WindowConfirmation, WindowRegistry, WindowRejection,
+    WindowRequest, WindowSummary,
 };
 
 use crate::Runtime;
-use crate::commands::CommandTarget;
 
 mod actions;
 mod native;
+mod page_dispatch;
 pub use actions::{SEAM_ACTIONS, SeamAction, default_page_grant};
+pub(crate) use page_dispatch::PendingPageConsent;
 
 /// The window surface available to agents.
 #[derive(Default)]
 pub struct Windows {
-    registry: Mutex<Option<WindowRegistry>>,
+    registry: Arc<Mutex<Option<WindowRegistry>>>,
     /// The next parent or child surface to poll, so a busy page cannot starve another.
     page_cursor: AtomicUsize,
     factory: Mutex<Option<Box<dyn HostFactory>>>,
@@ -56,6 +56,22 @@ pub struct Windows {
     /// memory the difference is taken against. Forgotten when the window closes, because a
     /// window that is gone has no queue left to account for.
     native_drops_reported: Mutex<BTreeMap<WindowId, u64>>,
+    /// The video surfaces every window owns, keyed inside the registry by window.
+    ///
+    /// Surfaces live here rather than in the registry entries because their lifecycle is
+    /// narrower than the window's — a page tears down and recreates them freely — while
+    /// their destruction is exactly as wide: no surface may outlive its window.
+    video_surfaces: Arc<crate::video_surface::VideoSurfaces>,
+    /// The audio streams every window owns, keyed inside the registry by window.
+    ///
+    /// Same lifecycle logic as video surfaces: streams die with their window because
+    /// the page that mixed them is gone — audio playing after its window closed would
+    /// be sound from nowhere.
+    audio_streams: Arc<crate::audio::AudioStreams>,
+    /// The live stream subscriptions every window owns, keyed inside the registry
+    /// by window — same lifecycle logic as surfaces: a stream's events are for the
+    /// page, and the page dying is the stream's end whether anyone said so or not.
+    stream_subscriptions: Arc<crate::stream::StreamSubscriptions>,
     /// The displays the host reported when it was installed.
     ///
     /// Asked for once, at installation, because that is when the engine starts: a remembered
@@ -94,7 +110,7 @@ impl Windows {
     /// the failure this project's capability module exists to prevent.
     #[must_use]
     pub fn with_registry(mut self, registry: WindowRegistry) -> Self {
-        self.registry = Mutex::new(Some(registry));
+        self.registry = Arc::new(Mutex::new(Some(registry)));
         self
     }
 
@@ -310,6 +326,14 @@ impl Windows {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&id);
+        // A surface may not outlive the window its presenter is childed into: the child
+        // dies with the parent either way, but the registry entry would linger presenting
+        // into a dead handle — teardown is the window's business, not the page's memory.
+        #[cfg(target_os = "windows")]
+        self.video_surfaces.teardown_window(id);
+        #[cfg(target_os = "windows")]
+        self.audio_streams.teardown_window(id);
+        self.stream_subscriptions.close_window(id);
         self.with_registry_mut(|registry| Ok(registry.close(id).is_some()))
     }
 
@@ -631,6 +655,44 @@ impl Windows {
         })
     }
 
+    /// Drains every page message currently queued for one window, in order.
+    ///
+    /// Part of the supersede machinery: the pump cannot know whether a keyed
+    /// command is stale without looking at what is queued behind it, and the
+    /// queue is the channel plus what the wait path already consumed. The
+    /// drained messages are handed back through
+    /// [`Windows::requeue_window_page_messages`] — nothing is ever dropped
+    /// here, because a scan that eats messages is not a scan.
+    pub fn drain_window_page_messages(&self, window: WindowId) -> Vec<PageMessage> {
+        self.with_registry_mut(|registry| {
+            let mut drained = Vec::new();
+            if let Some(entry) = registry.get_mut(window) {
+                while let Some(message) = entry.take_page_message() {
+                    drained.push(message);
+                }
+            }
+            Ok(drained)
+        })
+        .unwrap_or_default()
+    }
+
+    /// Returns drained page messages to one window's queue, in their original
+    /// order.
+    ///
+    /// The drain empties the queue, so pushing back in pull order reconstructs
+    /// it exactly; the scan these exist for must be invisible to every message
+    /// it does not supersede.
+    pub fn requeue_window_page_messages(&self, window: WindowId, messages: Vec<PageMessage>) {
+        let _: Result<(), WindowRejection> = self.with_registry_mut(|registry| {
+            if let Some(entry) = registry.get_mut(window) {
+                for message in messages {
+                    entry.push_page_message(message);
+                }
+            }
+            Ok(())
+        });
+    }
+
     /// Takes the next message sent by any child page.
     pub fn take_child_page_message(
         &self,
@@ -692,6 +754,22 @@ impl Windows {
             .map(|seam| seam.grant().granted()))
     }
 
+    /// The parented confirmation surface owned by `window`, when its backend can show one.
+    ///
+    /// The returned object is independent of the registry lock, so consent can block on a
+    /// person without holding the window map or starving unrelated windows.
+    #[must_use]
+    pub fn confirmation_for(&self, window: WindowId) -> Option<Box<dyn WindowConfirmation>> {
+        self.with_registry_mut(|registry| {
+            Ok(registry
+                .get(window)
+                .and_then(|entry| entry.host.as_ref())
+                .and_then(|host| host.confirmation()))
+        })
+        .ok()
+        .flatten()
+    }
+
     /// Evaluates a script in a window's page.
     ///
     /// The host-to-page direction of the bridge. A window that is not open, or whose engine
@@ -736,6 +814,31 @@ impl Windows {
                 .host
                 .as_ref()
                 .is_some_and(|engine| engine.drag_window()))
+        })
+    }
+
+    /// Asks one window's engine to start a platform edge-resize drag.
+    ///
+    /// The frameless-window complement of [`Windows::drag_window`]: the page's
+    /// own border regions ask for the resize the OS border would have owned.
+    /// `Ok(false)` keeps the honest refusal shape — open window, engine that
+    /// cannot drag.
+    pub fn drag_resize(
+        &self,
+        window: WindowId,
+        edge: ncui_webview::ResizeEdge,
+    ) -> Result<bool, WindowRejection> {
+        self.with_registry_mut(|registry| {
+            let entry =
+                registry
+                    .get_mut(window)
+                    .ok_or_else(|| WindowRejection::EngineUnavailable {
+                        reason: Some(format!("window {window} is not open")),
+                    })?;
+            Ok(entry
+                .host
+                .as_ref()
+                .is_some_and(|engine| engine.drag_resize(edge)))
         })
     }
 
@@ -842,6 +945,86 @@ impl Windows {
         self.with_registry_mut(|registry| registry.close_child_webview(parent, child))
     }
 
+    /// The platform-native handle of a window, when its backend can say.
+    ///
+    /// Video surfaces child into the host window at platform level; this is the truth they
+    /// child into. `None` covers both unknown windows and backends without a handle the
+    /// presenter understands — the registry's typed refusal names which, because a page
+    /// debugging the difference should not have to guess.
+    #[must_use]
+    pub fn native_window_handle(&self, window: WindowId) -> Option<Option<isize>> {
+        self.with_registry_mut(|registry| {
+            Ok(registry.get(window).map(|entry| {
+                entry
+                    .host
+                    .as_ref()
+                    .and_then(|host| host.native_window_handle())
+            }))
+        })
+        .ok()
+        .flatten()
+    }
+
+    /// The window's video surface registry — the surface operations the dispatch layer
+    /// drives when a page or an agent asks.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn video_surfaces(&self) -> &crate::video_surface::VideoSurfaces {
+        &self.video_surfaces
+    }
+
+    /// The producer's own handle onto the registry: cloneable, independent of
+    /// any lock the runtime or the pump holds, because frames are the hottest
+    /// path in the system and must never convoy behind page traffic.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn video_surface_producer(&self) -> crate::video_surface::VideoSurfaceProducer {
+        crate::video_surface::VideoSurfaceProducer::new(Arc::clone(&self.video_surfaces))
+    }
+
+    /// The shared window-registry handle the stream sinks post through — the
+    /// convoy position documented in the stream module: interaction-rate events
+    /// wait on the same exclusion the pump holds, and that is deliberate.
+    #[allow(
+        dead_code,
+        reason = "the streaming command path reaches the registry through this accessor; wired as the seam lands"
+    )]
+    pub(crate) fn registry_handle(&self) -> Arc<Mutex<Option<WindowRegistry>>> {
+        Arc::clone(&self.registry)
+    }
+
+    /// The stream subscription registry — where streaming commands open and
+    /// cancel subscriptions.
+    pub(crate) fn stream_subscriptions(&self) -> &crate::stream::StreamSubscriptions {
+        &self.stream_subscriptions
+    }
+
+    /// Builds the lock-free factory a streaming command captures: subscriptions
+    /// plus the shared registry, never the runtime itself.
+    #[must_use]
+    pub(crate) fn stream_factory(&self) -> crate::stream::StreamFactory {
+        crate::stream::StreamFactory::new(
+            (*self.stream_subscriptions).clone(),
+            Arc::clone(&self.registry),
+        )
+    }
+
+    /// The window's audio stream registry — the stream operations the dispatch layer
+    /// drives when a page or an agent asks.
+    #[cfg(target_os = "windows")]
+    #[allow(
+        dead_code,
+        reason = "the dispatch layer reaches the registry through this accessor; wired as the seam lands"
+    )]
+    pub(crate) fn audio_streams(&self) -> &crate::audio::AudioStreams {
+        &self.audio_streams
+    }
+
+    /// The producer's own handle onto the audio registry: cloneable, independent of
+    /// any lock the runtime or the pump holds — the same convoy lesson as video.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn audio_stream_producer(&self) -> crate::audio::AudioStreamProducer {
+        crate::audio::AudioStreamProducer::new(Arc::clone(&self.audio_streams))
+    }
+
     /// Lists every live child webview across open windows.
     #[must_use]
     pub fn list_child_webviews(&self) -> Vec<ncui_webview_child::ChildWebviewEntry> {
@@ -937,349 +1120,6 @@ impl Runtime {
     pub fn list_child_webviews(&self) -> Vec<ncui_webview_child::ChildWebviewEntry> {
         self.windows.list_child_webviews()
     }
-
-    pub fn pump_pages(&mut self, now: core::time::Duration) -> usize {
-        let mut handled = 0usize;
-        while let Ok(Some((target, body))) = self.windows.take_page_target_message() {
-            handled += 1;
-            self.serve_page_message(target, &body, now);
-        }
-        handled
-    }
-
-    /// Evaluates one message from one page and answers it.
-    ///
-    /// Two messages are not answered here and are handled before the seam's dispatcher runs:
-    /// a page-handled command, which is *started* (its answer comes back later), and a
-    /// handler's answer, which *settles* a call the runtime started earlier. Everything else
-    /// is dispatched and answered as it always was.
-    fn serve_page_message(&mut self, target: PageTarget, body: &str, now: core::time::Duration) {
-        let Ok(Some(seam)) = self.windows.seam_for_target(target) else {
-            return;
-        };
-        let Ok(Some(granted)) = self.windows.grant_for_target(target) else {
-            return;
-        };
-        let request = match ncui_webview::SeamRequest::parse(body) {
-            Ok(request) => request,
-            Err(refusal) => {
-                self.send_seam_response(target, &refusal);
-                return;
-            }
-        };
-        // The page's answer to a handler the runtime handed it: settle the call it completes.
-        if let ncui_webview::SeamMessage::CommandResult { ok, payload, error } = &request.message {
-            self.complete_page_handler(target, *ok, &request.id, payload.clone(), error.clone());
-            return;
-        }
-        // A page-handled command is started here and answered when the page posts its result.
-        if self.try_begin_page_handler(target, &seam, &request) {
-            return;
-        }
-        let mut response = seam.handle(&request.message, &mut |request, payload| {
-            self.dispatch_page_action(target, request, payload, granted, now)
-        });
-        response.id = Some(request.id);
-        self.send_seam_response(target, &response);
-    }
-
-    /// Sends a seam response to a window's page under the correlation id it carries.
-    fn send_seam_response(&mut self, target: PageTarget, response: &ncui_webview::SeamResponse) {
-        // The answer is embedded as a JSON object literal. JSON escaping is a superset of
-        // what a JavaScript string literal needs, and the bridge reads the object directly.
-        let Ok(encoded) = serde_json::to_string(&response) else {
-            tracing::warn!(?target, "the bridge response could not be serialised");
-            return;
-        };
-        let script = format!("window.ncui && window.ncui.__dispatch({encoded});");
-        if !self
-            .windows
-            .post_to_target(target, &script)
-            .unwrap_or(false)
-        {
-            tracing::warn!(
-                ?target,
-                "the bridge response could not be delivered to the page"
-            );
-        }
-    }
-
-    /// Starts a page-handled command: gate it, remember the call, and hand it to the page.
-    ///
-    /// Returns `true` when the message was a page-handled command and has been dealt with —
-    /// either started (its answer comes back later) or refused (the reply is already sent) —
-    /// so the caller sends nothing further. Returns `false` when the message is some other
-    /// action the caller should dispatch and answer as usual.
-    fn try_begin_page_handler(
-        &mut self,
-        target: PageTarget,
-        seam: &Arc<HostSeam>,
-        request: &ncui_webview::SeamRequest,
-    ) -> bool {
-        let ncui_webview::SeamMessage::Perform { name, payload } = &request.message else {
-            return false;
-        };
-        let Some(command) = self.page_commands.get(name) else {
-            return false;
-        };
-        if !matches!(command.target, CommandTarget::Page) {
-            return false;
-        }
-        // The same gate the seam applies to every action, applied here because a page command
-        // is started rather than run. Every refusal below is answered under the ORIGINAL id, so
-        // the page's own invoke settles (with the error) instead of hanging until it times out.
-        if let Err(error) = seam.authorize_perform(name) {
-            let mut refusal = ncui_webview::SeamResponse::failure(error);
-            refusal.id = Some(request.id.clone());
-            self.send_seam_response(target, &refusal);
-            return true;
-        }
-        let Some(reply_id) = self.page_commands.begin_page_call(target, &request.id) else {
-            let mut refusal = ncui_webview::SeamResponse::failure(SeamError::new(
-                "busy",
-                "too many page-handled calls are awaiting an answer",
-            ));
-            refusal.id = Some(request.id.clone());
-            self.send_seam_response(target, &refusal);
-            return true;
-        };
-        // Hand the command to the page: the bridge runs the registered handler and posts the
-        // result back under `reply_id`, which is what settles the original `invoke`.
-        let script = format!(
-            "window.ncui && window.ncui.__runCommand({},{},{});",
-            serde_json::to_string(&reply_id).unwrap_or_default(),
-            serde_json::to_string(name).unwrap_or_default(),
-            payload,
-        );
-        if !self
-            .windows
-            .post_to_target(target, &script)
-            .unwrap_or(false)
-        {
-            // The page could not be reached to run the handler, so the call will never be
-            // answered: take it back and refuse the original `invoke` rather than let it hang.
-            let _ = self.page_commands.take_page_call(&reply_id, target);
-            let mut refusal = ncui_webview::SeamResponse::failure(SeamError::unavailable(
-                "the page could not be reached to run its own handler",
-            ));
-            refusal.id = Some(request.id.clone());
-            self.send_seam_response(target, &refusal);
-            return true;
-        }
-        true
-    }
-
-    /// Settles the original `invoke` a page-handled command produced, with the handler's answer.
-    fn complete_page_handler(
-        &mut self,
-        target: PageTarget,
-        ok: bool,
-        reply_id: &str,
-        payload: serde_json::Value,
-        error: Option<SeamError>,
-    ) {
-        let Some(pending) = self.page_commands.take_page_call(reply_id, target) else {
-            // Not a reply to a call this runtime started (or already settled). Nothing is
-            // waiting on it, so there is nothing to answer — the bridge drops an id it has
-            // no pending promise for.
-            return;
-        };
-        let mut response = if ok {
-            ncui_webview::SeamResponse::ok("performed", Some(payload))
-        } else {
-            ncui_webview::SeamResponse::failure(error.unwrap_or_else(|| {
-                SeamError::dispatch("the page's handler failed without a reason")
-            }))
-        };
-        // The answer settles the *original* invoke, not the reply id: the bridge matches on
-        // the id the page minted when it called, which is what the runtime is holding.
-        response.id = Some(pending.original_id);
-        self.send_seam_response(pending.target, &response);
-    }
-
-    /// Dispatches a page's action through the runtime's own pipeline.
-    fn dispatch_page_action(
-        &mut self,
-        target: PageTarget,
-        request: &ncui_webview::CapabilityRequest,
-        payload: serde_json::Value,
-        granted: CapabilitySet,
-        now: core::time::Duration,
-    ) -> Result<serde_json::Value, SeamError> {
-        let Some(command) = self.page_commands.get(&request.action) else {
-            // The seam already refuses an undeclared action; this arm exists so that a
-            // mismatch between the seam's declarations and the runtime's table is a
-            // refusal with a reason rather than a dispatch to a method nobody chose.
-            return Err(SeamError::capability_denied(format!(
-                "`{}` is not an action this host offers",
-                request.action
-            )));
-        };
-        if !payload.is_null() && !payload.is_object() {
-            return Err(SeamError::new(
-                "invalid_params",
-                "an action payload must be a JSON object",
-            ));
-        }
-        let mut params = if payload.is_null() {
-            serde_json::json!({})
-        } else {
-            payload.clone()
-        };
-        if command.caller_window {
-            if target.is_child() {
-                return Err(SeamError::capability_denied(
-                    "a child page cannot act on its parent window",
-                ));
-            }
-            // The page's own window, taken from the call's origin. A page that could name
-            // a window could close one it does not own.
-            if let Some(object) = params.as_object_mut() {
-                object.insert(
-                    "window".to_owned(),
-                    serde_json::Value::String(target.parent().to_string()),
-                );
-            }
-        }
-        match command.target {
-            CommandTarget::RuntimeMethod(method) => {
-                let mut session = crate::agent::AgentSession::for_page(
-                    format!("page:{target}"),
-                    granted,
-                    self.page_limiter(),
-                )
-                .map_err(|error| seam_error(&error))?;
-                let call = crate::rpc::Request::new(serde_json::Value::Null, method, params);
-                match crate::dispatch::dispatch_with(
-                    self,
-                    &mut session,
-                    &call,
-                    now,
-                    None,
-                    crate::dispatch::method_table_cached(),
-                ) {
-                    Some(response) => match response.result {
-                        Some(value) => Ok(value),
-                        None => match response.error {
-                            Some(error) => Err(SeamError {
-                                code: error.data.ncui_code,
-                                message: error.message,
-                                retryable: error.data.retryable,
-                            }),
-                            None => Err(SeamError::dispatch("the action produced no result")),
-                        },
-                    },
-                    None => Ok(serde_json::Value::Null),
-                }
-            }
-            CommandTarget::Native(handler) => self.run_native_page_command(PageCall {
-                target,
-                name: &request.action,
-                requires: command.requires,
-                handler,
-                payload,
-                granted,
-                now,
-            }),
-            // A page command is intercepted in `serve_page_message` before this dispatcher runs,
-            // because its answer comes back from the page over a second message rather than as
-            // this call's return value. Reaching here means that interception was bypassed, so
-            // the honest answer is a refusal rather than a fabricated result.
-            CommandTarget::Page => Err(SeamError::dispatch(
-                "a page-handled command is answered by the page and cannot be run here",
-            )),
-        }
-    }
-
-    /// Runs an application command through the same checks a runtime method receives.
-    fn run_native_page_command(
-        &mut self,
-        call: PageCall<'_>,
-    ) -> Result<serde_json::Value, SeamError> {
-        let PageCall {
-            target,
-            name,
-            requires,
-            handler,
-            payload,
-            granted,
-            now,
-        } = call;
-        let mut correlation = CorrelationId::new();
-        let mut session = crate::agent::AgentSession::for_page(
-            format!("page:{target}"),
-            granted,
-            self.page_limiter(),
-        )
-        .map_err(|error| seam_error(&error))?;
-        let outcome = (|| -> Result<serde_json::Value, SeamError> {
-            session
-                .rate_limit(now, 1)
-                .map_err(|error| seam_error(&error))?;
-            let consent_token = crate::dispatch::consent_token_param(&payload)
-                .map_err(|error| seam_error(&error))?;
-            if let Some(token) = &consent_token {
-                correlation = token.correlation();
-            }
-            crate::consent::resolve(
-                self,
-                &session,
-                name,
-                requires,
-                requires.has_destructive(),
-                &payload,
-                consent_token.as_ref(),
-                correlation,
-            )
-            .map_err(|error| seam_error(&error))?;
-            handler(payload)
-        })();
-        let audit_outcome = match &outcome {
-            Ok(_) => AuditOutcome::Allowed,
-            Err(error) if error.code == "capability_denied" || error.code == "limit_exceeded" => {
-                AuditOutcome::Denied
-            }
-            Err(_) => AuditOutcome::Failed,
-        };
-        if let Ok(event) = AuditEvent::new(
-            SystemTime::now(),
-            &session.agent_id,
-            correlation,
-            format!("page.{name}"),
-            name,
-            audit_outcome,
-            requires,
-        ) {
-            self.audit.record(event);
-        }
-        outcome
-    }
-}
-
-/// One page command call, gathered so the execution path takes one argument.
-struct PageCall<'a> {
-    /// The window or child whose page made the call.
-    target: PageTarget,
-    /// The command name.
-    name: &'a str,
-    /// What the command requires of the page.
-    requires: CapabilitySet,
-    /// The command body.
-    handler: crate::commands::CommandHandler,
-    /// The page's payload.
-    payload: serde_json::Value,
-    /// What the page holds.
-    granted: CapabilitySet,
-    /// The clock the rate limiter reads.
-    now: core::time::Duration,
-}
-
-fn seam_error(error: &ncui_core::NcError) -> SeamError {
-    SeamError {
-        code: error.code().to_owned(),
-        message: error.to_string(),
-        retryable: error.is_retryable(),
-    }
 }
 
 /// The origins a hosted runtime loads by default.
@@ -1308,6 +1148,22 @@ pub fn hosted_registry(
     actions: &ActionTable,
     page_grant: CapabilitySet,
 ) -> WindowRegistry {
+    hosted_registry_with_services(allowed_origins, actions, page_grant, None)
+}
+
+/// Builds the registry a hosted runtime uses, with the native-view service channel installed.
+///
+/// The service factory is optional because the contract belongs to the window layer: tests
+/// and embeddings that only exercise pages should not have to know native services exist.
+/// A production runtime installs one so a native window is born with its own narrowed
+/// authority already closed over.
+#[must_use]
+pub fn hosted_registry_with_services(
+    allowed_origins: &[ncui_webview::Origin],
+    actions: &ActionTable,
+    page_grant: CapabilitySet,
+    service_factory: Option<TrustedServiceSeamFactory>,
+) -> WindowRegistry {
     // Loopback origins may be reached over plain `http:`. A loopback origin names this
     // machine, so the traffic never crosses a network, and a local development server
     // cannot offer `https` without a certificate the user has to trust. The allow-list is
@@ -1318,13 +1174,17 @@ pub fn hosted_registry(
     // cannot disagree.
     let locale = crate::describe::platform_locale();
     let direction = ncui_a11y::TextDirection::for_locale(&locale).as_str();
-    WindowRegistry::new()
+    let registry = WindowRegistry::new()
         .with_default_navigation(
             ncui_webview::NavigationPolicy::new(allowed_origins).with_loopback_http(true),
         )
         .with_default_grant(ncui_webview::CapabilityGrant::from_set(page_grant))
         .with_action_table(actions.clone())
-        .with_default_locale(locale, direction)
+        .with_default_locale(locale, direction);
+    match service_factory {
+        Some(factory) => registry.with_service_seam_factory(factory),
+        None => registry,
+    }
 }
 
 /// Builds the window surface a hosted runtime uses, over the caller's host factory.
@@ -1342,12 +1202,33 @@ pub fn hosted_surface_with(
     actions: &ActionTable,
     page_grant: CapabilitySet,
 ) -> Windows {
+    hosted_surface_with_services(factory, allowed_origins, actions, page_grant, None)
+}
+
+/// Builds the window surface a hosted runtime uses, with native-view services installed.
+///
+/// This is the production-shape constructor: the page policy, the native service channel
+/// and the host are installed together so no window can be born before the authority it
+/// will carry is decided.
+#[must_use]
+pub fn hosted_surface_with_services(
+    factory: Box<dyn HostFactory>,
+    allowed_origins: &[ncui_webview::Origin],
+    actions: &ActionTable,
+    page_grant: CapabilitySet,
+    service_factory: Option<TrustedServiceSeamFactory>,
+) -> Windows {
     // The displays are asked for here, because installing the host is what starts the engine: a
     // remembered window place has to be answerable before the first window exists, and only the
     // engine knows which displays this process can put a window on.
     let monitors = factory.monitors();
     let mut windows = Windows::new()
-        .with_registry(hosted_registry(allowed_origins, actions, page_grant))
+        .with_registry(hosted_registry_with_services(
+            allowed_origins,
+            actions,
+            page_grant,
+            service_factory,
+        ))
         .with_factory(factory);
     windows.monitors = monitors;
     windows
@@ -1434,8 +1315,9 @@ pub struct ComponentEntry {
 
 #[cfg(test)]
 mod tests {
+    use super::page_dispatch::probe_supersede_key;
     use super::*;
-    use ncui_core::{Capability, ComponentId};
+    use ncui_core::{Capability, CapabilitySet, ComponentId, Limits};
     use ncui_webview::{MountedComponent, WindowRegistry};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2353,6 +2235,251 @@ mod tests {
         assert!(
             matches!(error, WindowRejection::EngineUnavailable { .. }),
             "got: {error}"
+        );
+    }
+    #[test]
+    fn the_supersede_probe_reads_only_keyed_performs() {
+        let keyed =
+            r#"{"id":"p1-x","action":"perform","name":"playhead_move","supersede":"playhead"}"#;
+        let (id, key) = probe_supersede_key(keyed).expect("a keyed perform probes");
+        assert_eq!(id, "p1-x");
+        assert_eq!(key, "playhead");
+        // An unkeyed perform does not participate — the default is safety.
+        let plain = r#"{"id":"p2-x","action":"perform","name":"playhead_move"}"#;
+        assert!(probe_supersede_key(plain).is_none());
+        // Other actions never participate, key or no key.
+        let probe = r#"{"id":"p3-x","action":"probe_navigation","supersede":"playhead"}"#;
+        assert!(probe_supersede_key(probe).is_none());
+        // Abuse shapes do not participate: empty, over-long, non-ASCII-printable.
+        let empty = r#"{"id":"p4-x","action":"perform","supersede":""}"#;
+        assert!(probe_supersede_key(empty).is_none());
+        let oversized = format!(
+            r#"{{"id":"p5-x","action":"perform","supersede":"{}"}}"#,
+            "k".repeat(300)
+        );
+        assert!(probe_supersede_key(&oversized).is_none());
+        // Malformed JSON is not a keyed perform, merely malformed.
+        assert!(probe_supersede_key("{not json").is_none());
+        // An id-less message cannot be answered, so it cannot be superseded —
+        // serving it and letting the seam refuse is the honest path.
+        let no_id = r#"{"action":"perform","supersede":"playhead"}"#;
+        assert!(probe_supersede_key(no_id).is_none());
+    }
+
+    /// A page-message fixture the pump evidence is staged through: the page's
+    /// scripted messages in, every script the host was asked to evaluate out.
+    /// The evaluate capture is the response path — a seam answer is a posted
+    /// script, so what the page would settle is readable here exactly.
+    #[derive(Debug, Default)]
+    struct PageFixture {
+        messages: Mutex<std::collections::VecDeque<PageMessage>>,
+        scripts: Mutex<Vec<String>>,
+    }
+
+    #[derive(Debug)]
+    struct PageBackend {
+        fixture: Arc<PageFixture>,
+    }
+
+    impl ncui_webview::WebViewBackend for PageBackend {
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+        fn last_error(&self) -> Option<String> {
+            None
+        }
+        fn is_alive(&self) -> bool {
+            true
+        }
+        fn poll_page_message(&self) -> Option<PageMessage> {
+            self.fixture
+                .messages
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+        }
+        fn evaluate_script(&self, script: &str) -> bool {
+            self.fixture
+                .scripts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(script.to_owned());
+            true
+        }
+    }
+
+    #[derive(Debug)]
+    struct PageFactory {
+        fixture: Arc<PageFixture>,
+    }
+
+    impl HostFactory for PageFactory {
+        fn spawn(
+            &self,
+            _window: WindowId,
+            _request: &WindowRequest,
+            _seam: &Arc<HostSeam>,
+        ) -> Option<Box<dyn ncui_webview::WebViewBackend>> {
+            Some(Box::new(PageBackend {
+                fixture: Arc::clone(&self.fixture),
+            }))
+        }
+        fn monitors(&self) -> Vec<ncui_webview::MonitorRect> {
+            Vec::new()
+        }
+    }
+
+    /// A runtime whose window surface opens queue-backed windows, with one
+    /// native command registered whose executions are counted — the evidence
+    /// that distinguishes "served" from "superseded before it ever ran".
+    fn runtime_with_counting_echo() -> (Runtime, Arc<PageFixture>, Arc<AtomicUsize>) {
+        let mut runtime = Runtime::start(Limits::default()).expect("runtime starts");
+        let executions = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&executions);
+        let registration = runtime
+            .page_commands
+            .register(
+                "echo",
+                CapabilitySet::empty(),
+                "echoes the payload",
+                move |payload| {
+                    counted.fetch_add(1, Ordering::Relaxed);
+                    Ok(serde_json::json!({ "echoed": payload }))
+                },
+            )
+            .expect("the echo command registers");
+        // The registration must outlive the test's pumps: forgetting is the
+        // harness's honest answer — a registration dropped mid-pump would
+        // unregister the command the evidence depends on.
+        std::mem::forget(registration);
+        let fixture = Arc::new(PageFixture::default());
+        let actions = runtime.page_commands.actions();
+        let grant = runtime.page_grant();
+        let registry = hosted_registry(
+            &[ncui_webview::Origin::new(
+                ncui_webview::Scheme::Https,
+                "app.example.com",
+                None,
+            )],
+            &actions,
+            grant,
+        );
+        let windows = Windows::new()
+            .with_registry(registry)
+            .with_factory(Box::new(PageFactory {
+                fixture: Arc::clone(&fixture),
+            }));
+        runtime.windows = windows;
+        (runtime, fixture, executions)
+    }
+
+    fn keyed_invoke(id: &str, position: u32) -> String {
+        format!(
+            r#"{{"id":"{id}","action":"perform","name":"echo","payload":{{"position_ms":{position}}},"supersede":"playhead"}}"#
+        )
+    }
+
+    fn open_page_window(runtime: &Runtime) -> WindowId {
+        runtime
+            .windows
+            .open(&WindowRequest::new("https://app.example.com"), None)
+            .expect("the window opens")
+    }
+
+    fn stage(fixture: &Arc<PageFixture>, bodies: &[String]) {
+        let mut queue = fixture
+            .messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for body in bodies {
+            queue.push_back(PageMessage::new(body.clone()));
+        }
+    }
+
+    #[test]
+    fn a_stale_keyed_command_is_answered_superseded_and_never_executes() {
+        let (mut runtime, fixture, executions) = runtime_with_counting_echo();
+        let _window = open_page_window(&runtime);
+        // Three scrub positions queued before the pump runs: the first two are
+        // stale the moment their successors exist.
+        stage(
+            &fixture,
+            &[
+                keyed_invoke("p1", 0),
+                keyed_invoke("p2", 33),
+                keyed_invoke("p3", 66),
+            ],
+        );
+        let handled = runtime.pump_pages(core::time::Duration::from_millis(100));
+        assert_eq!(handled, 3, "every message is answered, none vanish");
+        assert_eq!(
+            executions.load(Ordering::Relaxed),
+            1,
+            "only the newest position executes — the rest were stale before they ran"
+        );
+        let scripts = fixture
+            .scripts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let joined = scripts.join("\n");
+        let superseded = joined.matches("superseded").count();
+        assert_eq!(
+            superseded, 2,
+            "two answers carry the superseded outcome: {joined}"
+        );
+        assert!(
+            joined.contains(r#""id":"p1","ok":true,"outcome":"superseded""#),
+            "p1 is answered superseded: {joined}"
+        );
+        assert!(
+            joined.contains(r#""id":"p2","ok":true,"outcome":"superseded""#),
+            "p2 is answered superseded: {joined}"
+        );
+        assert!(
+            joined.contains(r#""id":"p3","ok":true,"outcome":"performed""#),
+            "p3 is the one that executes: {joined}"
+        );
+    }
+
+    #[test]
+    fn unkeyed_and_other_keyed_messages_are_neither_superseded_nor_reordered() {
+        let (mut runtime, fixture, executions) = runtime_with_counting_echo();
+        let _window = open_page_window(&runtime);
+        stage(&fixture, &[
+            keyed_invoke("p1", 0),
+            // A different key is a different stream: trimming clip-7 never
+            // supersedes the playhead, and the playhead never supersedes it.
+            r#"{"id":"t1","action":"perform","name":"echo","payload":{"position_ms":5},"supersede":"trim:clip-7"}"#.to_owned(),
+            // An unkeyed command is never stale: the caller did not opt in.
+            r#"{"id":"u1","action":"perform","name":"echo","payload":{"position_ms":7}}"#.to_owned(),
+        ]);
+        let handled = runtime.pump_pages(core::time::Duration::from_millis(100));
+        assert_eq!(handled, 3);
+        assert_eq!(
+            executions.load(Ordering::Relaxed),
+            3,
+            "distinct keys and unkeyed commands all execute — supersede is opt-in per stream"
+        );
+        let scripts = fixture
+            .scripts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            !scripts.join("\n").contains("superseded"),
+            "nothing here is answered superseded"
+        );
+    }
+
+    #[test]
+    fn a_lone_keyed_command_executes_normally() {
+        let (mut runtime, fixture, executions) = runtime_with_counting_echo();
+        let _window = open_page_window(&runtime);
+        stage(&fixture, &[keyed_invoke("p1", 0)]);
+        runtime.pump_pages(core::time::Duration::from_millis(100));
+        assert_eq!(
+            executions.load(Ordering::Relaxed),
+            1,
+            "with nothing newer queued, the key costs nothing"
         );
     }
 }

@@ -12,12 +12,15 @@ authors = ["NC-UI Contributors"]
 workspace = true
 
 [features]
-default = []
-# Enables the real wgpu device binding. Off by default so the crate — and the whole
-# workspace — compiles on any machine without pulling in a graphics dependency.
+# On by default: "GPU-driven" that is compiled out is an aspiration, not an implementation.
+# wgpu compiles on any machine — it is pure Rust over the system driver — and a machine
+# without a hardware GPU is served by the software fallback adapter (WARP/llvmpipe) rather
+# than by compiling the renderer out. A minimal consumer that genuinely ships no renderer
+# opts out with `default-features = false` and says so in its own feature documentation.
+default = ["wgpu-device", "text-shaping"]
+# The real wgpu device binding.
 wgpu-device = ["dep:wgpu"]
-# Enables the text layout path. Off by default because it pulls in a font stack; the
-# layout policy itself is pure and is tested without it.
+# The text layout path; the layout policy itself is pure and is tested without it.
 text-shaping = ["dep:rustybuzz"]
 
 [dependencies]

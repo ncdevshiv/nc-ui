@@ -1,0 +1,18 @@
+[package]
+description = "Supervised child processes for nc-ui: spawn, restart, terminate — with the OS-level guarantee that no sidecar outlives its host."
+license.workspace = true
+name = "ncui-sidecar"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors = ["NC-UI Contributors"]
+
+[lints]
+workspace = true
+
+[dependencies]
+ncui-core = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+win32job = "2.1"

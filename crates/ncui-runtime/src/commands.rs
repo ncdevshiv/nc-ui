@@ -201,6 +201,41 @@ impl PageCommands {
         })
     }
 
+    /// Registers an application command that is told which window's page invoked it.
+    ///
+    /// The window id arrives in `params.window`, injected by the runtime from the call's
+    /// origin — never the page's own claim, so a page cannot spend the command on a window
+    /// it does not own. This is the composition point for per-window effects: a streaming
+    /// command reads the window, opens its stream there, and answers the subscription id.
+    ///
+    /// # Errors
+    ///
+    /// As [`PageCommands::register`]: an invalid or duplicate name is refused, and a
+    /// registration the runtime performs is checked against the page grant there.
+    pub fn register_for_caller_window<F>(
+        &self,
+        name: &str,
+        requires: CapabilitySet,
+        summary: impl Into<String>,
+        handler: F,
+    ) -> Result<CommandRegistration, CommandRegistrationError>
+    where
+        F: Fn(Value) -> Result<Value, SeamError> + Send + Sync + 'static,
+    {
+        self.insert(
+            name,
+            requires,
+            summary.into(),
+            CommandTarget::Native(Arc::new(handler)),
+            true,
+        )?;
+        Ok(CommandRegistration {
+            commands: self.clone(),
+            name: name.to_owned(),
+            active: true,
+        })
+    }
+
     /// Executes an application command on behalf of a component.
     ///
     /// `authority` is the component's own narrowed grant, never the page's and never the
@@ -217,6 +252,39 @@ impl PageCommands {
         authority: CapabilitySet,
         input: Value,
     ) -> Result<Value, SeamError> {
+        self.in_process_call(name, authority, input, "a component", "the component")
+    }
+
+    /// Executes an application command on behalf of a native view.
+    ///
+    /// A native view is trusted host-linked Rust, but trusted is not unaccountable: the
+    /// authority checked here is the window's narrowed grant, so a view cannot spend a
+    /// capability its window was never given. Runtime methods and page-handled commands
+    /// stay unreachable for the same reason they are unreachable to components — one is
+    /// the agent pipeline's surface, the other is the page's own code.
+    pub(crate) fn native_view_call(
+        &self,
+        name: &str,
+        authority: CapabilitySet,
+        input: Value,
+    ) -> Result<Value, SeamError> {
+        self.in_process_call(name, authority, input, "a native view", "the native view")
+    }
+
+    /// Executes an application command for an in-process caller that is not the page.
+    ///
+    /// The caller's kind is part of the refusal text because "capability denied" answers
+    /// the wrong question when it hides who was denied. The authorization rule itself is
+    /// shared: unknown commands, missing capabilities, runtime methods and page-owned
+    /// handlers are refused before any handler runs.
+    fn in_process_call(
+        &self,
+        name: &str,
+        authority: CapabilitySet,
+        input: Value,
+        caller: &str,
+        caller_definite: &str,
+    ) -> Result<Value, SeamError> {
         let command = self
             .inner
             .read()
@@ -227,7 +295,7 @@ impl PageCommands {
         let Some(command) = command else {
             return Err(SeamError::new(
                 "unknown_service",
-                format!("`{name}` is not a command this runtime can serve to a component"),
+                format!("`{name}` is not a command this runtime can serve to {caller}"),
             ));
         };
         if !command.requires.is_subset_of(authority) {
@@ -240,7 +308,7 @@ impl PageCommands {
             return Err(SeamError::new(
                 "capability_denied",
                 format!(
-                    "`{name}` requires {}, which the component was not granted",
+                    "`{name}` requires {}, which {caller_definite} was not granted",
                     render_set(missing)
                 ),
             ));
@@ -250,17 +318,15 @@ impl PageCommands {
             CommandTarget::RuntimeMethod(method) => Err(SeamError::new(
                 "not_available",
                 format!(
-                    "`{name}` is the runtime-internal method `{method}`, which a component                      cannot reach"
+                    "`{name}` is the runtime-internal method `{method}`, which {caller} cannot reach"
                 ),
             )),
-            // A page command's handler is the page's own JavaScript. A component reaching it
-            // would be a component running page code, and a page that registered a handler did
-            // not agree to have a component drive it, so it is refused rather than routed.
+            // A page command's handler is the page's own JavaScript. An in-process caller
+            // reaching it would drive page code the page did not agree to expose that way,
+            // so it is refused rather than routed.
             CommandTarget::Page => Err(SeamError::new(
                 "not_available",
-                format!(
-                    "`{name}` is answered by the page's own code, which a component cannot reach"
-                ),
+                format!("`{name}` is answered by the page's own code, which {caller} cannot reach"),
             )),
         }
     }

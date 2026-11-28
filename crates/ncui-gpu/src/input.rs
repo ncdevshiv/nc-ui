@@ -304,6 +304,11 @@ pub enum Routed {
         id: String,
         /// The point in that island's content coordinates.
         content: LogicalPoint,
+        /// The hit region the point landed in, when the island carries a display
+        /// list that declares one there — the application-defined answer a timeline
+        /// needs ("in-handle", not "(96, 24)"). `None` for row-model islands and for
+        /// points inside a custom island that hit no region.
+        region: Option<String>,
     },
     /// The host handled it, and the island should not see it.
     Host,
@@ -357,6 +362,21 @@ pub struct IslandHost {
     /// the accessibility arm of the contract is answered by what the tree contains, not by
     /// a claim.
     tree: Option<SemanticTree>,
+    /// The application-drawn content of the islands that carry any, by island id.
+    ///
+    /// The same [`crate::display::DisplayList`] the renderer draws: hit regions are
+    /// declared in the stream the paint reads, so a pointer answered with a region is
+    /// answered with what the user actually sees under the cursor.
+    display_lists: std::collections::HashMap<String, crate::display::DisplayList>,
+    /// The island holding pointer capture, by index.
+    ///
+    /// Capture is the modal semantic every windowing system has (`SetCapture`,
+    /// `setPointerCapture`): once a button goes down inside an island, every pointer
+    /// event until the button comes up belongs to that island — including the moves
+    /// that leave its bounds, which is exactly what a trim drag or a playhead scrub
+    /// does constantly. Without it the drag breaks at the island's edge, and an editor
+    /// whose trim handles stop responding mid-gesture is not an editor.
+    captured: Option<usize>,
 }
 
 impl IslandHost {
@@ -370,6 +390,8 @@ impl IslandHost {
             state: vec![IslandState::default(); count],
             focused: None,
             tree: None,
+            display_lists: std::collections::HashMap::new(),
+            captured: None,
         }
     }
 
@@ -389,6 +411,23 @@ impl IslandHost {
     #[must_use]
     pub const fn tree(&self) -> Option<&SemanticTree> {
         self.tree.as_ref()
+    }
+
+    /// A host that also knows one island's application-drawn content.
+    ///
+    /// The display list is the same object the renderer draws — passing separate hit
+    /// geometry would be exactly the two-lists-kept-in-sync lie the display-list design
+    /// exists to prevent.
+    #[must_use]
+    pub fn with_display_list(mut self, island_id: &str, list: crate::display::DisplayList) -> Self {
+        self.display_lists.insert(island_id.to_owned(), list);
+        self
+    }
+
+    /// One island's application-drawn content, when it carries any.
+    #[must_use]
+    pub fn display_list(&self, island_id: &str) -> Option<&crate::display::DisplayList> {
+        self.display_lists.get(island_id)
     }
 
     /// Merges an island's accessibility description into the host's tree.
@@ -492,18 +531,107 @@ impl IslandHost {
             None => Routed::Dom,
             Some(island) => {
                 let content = island.content_point(event.position).unwrap_or_default();
+                let region = self
+                    .display_lists
+                    .get(&island.id)
+                    .and_then(|list| list.hit_test(content))
+                    .map(|hit| hit.id);
                 Routed::Island {
                     id: island.id.clone(),
                     content,
+                    region,
                 }
             }
         }
     }
 
+    /// Routes a pointer event with capture semantics — the editor-class contract.
+    ///
+    /// The stateless [`IslandHost::route_pointer`] hit-tests every event, which is
+    /// correct for hover and wrong for a drag: a button that went down inside an
+    /// island belongs to that island until it comes up, wherever the pointer wanders.
+    /// A trim handle dragged past the island's edge, a playhead scrubbed across the
+    /// ruler and off the end — these are the normal shape of editing, and hit-testing
+    /// them afresh each move would hand them to whatever happens to be underneath.
+    ///
+    /// The content point of a captured event is real even outside the island's bounds:
+    /// negative and overshooting coordinates are exactly what a drag needs — a trim
+    /// that clamps at the edge is the application's decision, not the router's accident.
+    /// Region resolution still applies in content space, so a point outside every
+    /// region answers `region: None` rather than a lie.
+    ///
+    /// Capture begins on [`PointerPhase::Down`] inside an island and ends after the
+    /// matching [`PointerPhase::Up`] is routed. A down in the DOM captures nothing,
+    /// matching the platform semantics this models.
+    ///
+    /// The stream contract is lossless-by-construction: every event handed in is
+    /// routed, synchronously, in the order it arrived — the host keeps no queue,
+    /// no throttle and no coalescing of its own. Coalescing is the platform's
+    /// privilege: a browser delivers pointer moves at display rate with intermediate
+    /// positions merged, and that is correct — what would be wrong is a second,
+    /// hidden coalescer in the host deciding on its own which positions a scrub
+    /// "doesn't need". Whatever the platform delivers, the application sees.
+    pub fn route_pointer_captured(&mut self, event: &PointerEvent) -> Routed {
+        if let Some(index) = self.captured {
+            let routed = self.route_into(index, event.position);
+            if matches!(event.phase, PointerPhase::Up) {
+                self.captured = None;
+            }
+            return routed;
+        }
+        let routed = self.route_pointer(event);
+        if matches!(event.phase, PointerPhase::Down)
+            && let Routed::Island { id, .. } = &routed
+            && let Some(index) = self.islands.all().iter().position(|i| &i.id == id)
+        {
+            self.captured = Some(index);
+        }
+        routed
+    }
+
+    /// Routes a point into the island at `index` directly, bypassing the hit test —
+    /// the capture path, where the island is already decided and only the coordinate
+    /// transform and region resolution remain.
+    fn route_into(&self, index: usize, position: LogicalPoint) -> Routed {
+        let Some(island) = self.islands.all().get(index) else {
+            return Routed::Dom;
+        };
+        // The same transform `content_point` applies, minus the bounds check: capture
+        // means the bounds are allowed to be wrong.
+        let content = island.bounds.to_local(position) + island.scroll;
+        let region = self
+            .display_lists
+            .get(&island.id)
+            .and_then(|list| list.hit_test(content))
+            .map(|hit| hit.id);
+        Routed::Island {
+            id: island.id.clone(),
+            content,
+            region,
+        }
+    }
+
+    /// Whether an island currently holds pointer capture — evidence for the contract,
+    /// and the answer a host teardown needs before it can honestly report a drag in
+    /// progress.
+    #[must_use]
+    pub fn captured(&self) -> Option<usize> {
+        self.captured
+    }
+
     /// Handles a click, updating selection.
     #[must_use]
     pub fn click(&mut self, event: &PointerEvent) -> Routed {
-        let routed = self.route_pointer(event);
+        // The capture path, not the bare hit test: a button down inside an island
+        // belongs to that island until it comes up, and the click is where the down
+        // arrives. Moves and the release are the caller's to route through
+        // `route_pointer_captured` — capture is a stream property, and one routing
+        // truth is what keeps it from sticking.
+        let routed = if matches!(event.phase, PointerPhase::Down) {
+            self.route_pointer_captured(event)
+        } else {
+            self.route_pointer(event)
+        };
         let Routed::Island { content, .. } = &routed else {
             // A click on the DOM clears an island's selection: the user acted somewhere
             // else, so a stale highlight is wrong rather than merely untidy.
@@ -561,6 +689,7 @@ impl IslandHost {
         Routed::Island {
             id,
             content: LogicalPoint::default(),
+            region: None,
         }
     }
 
@@ -604,6 +733,7 @@ impl IslandHost {
         Routed::Island {
             id: self.islands.all()[next].id.clone(),
             content: LogicalPoint::default(),
+            region: None,
         }
     }
 
@@ -634,6 +764,7 @@ impl IslandHost {
         Routed::Island {
             id: self.islands.all()[index].id.clone(),
             content: LogicalPoint::default(),
+            region: None,
         }
     }
 
@@ -663,6 +794,7 @@ impl IslandHost {
                 Routed::Island {
                     id,
                     content: LogicalPoint::default(),
+                    region: None,
                 }
             }
             Key::CompositionCommit => {
@@ -675,6 +807,7 @@ impl IslandHost {
                 Routed::Island {
                     id,
                     content: LogicalPoint::default(),
+                    region: None,
                 }
             }
             Key::CompositionCancel => {
@@ -682,13 +815,30 @@ impl IslandHost {
                 Routed::Island {
                     id,
                     content: LogicalPoint::default(),
+                    region: None,
                 }
             }
             _ => Routed::Island {
                 id,
                 content: LogicalPoint::default(),
+                region: None,
             },
         }
+    }
+
+    /// Sets the focused island's composition from a platform composition event.
+    ///
+    /// Browser `compositionupdate` events carry the whole in-progress string, not a
+    /// keystroke — so the keystroke path in [`IslandHost::route_key`] cannot represent
+    /// them, and the platform needs a replace entry point rather than an append one.
+    /// Returns whether a focused island received the composition; with no focus there
+    /// is nowhere for composition to live, and saying so is the honest answer.
+    pub fn set_composition(&mut self, text: Option<String>) -> bool {
+        let Some(index) = self.focused else {
+            return false;
+        };
+        self.state[index].composition = text.filter(|t| !t.is_empty());
+        true
     }
 
     /// Routes a drag event.
@@ -698,9 +848,15 @@ impl IslandHost {
             None => Routed::Dom,
             Some(island) => {
                 let content = island.content_point(event.position).unwrap_or_default();
+                let region = self
+                    .display_lists
+                    .get(&island.id)
+                    .and_then(|list| list.hit_test(content))
+                    .map(|hit| hit.id);
                 Routed::Island {
                     id: island.id.clone(),
                     content,
+                    region,
                 }
             }
         }
@@ -1490,7 +1646,7 @@ mod tests {
         let host = host();
         let event = click_at(100.0, 250.0);
         match host.route_pointer(&event) {
-            Routed::Island { id, content } => {
+            Routed::Island { id, content, .. } => {
                 assert_eq!(id, "grid");
                 assert_eq!(content, LogicalPoint::new(100.0, 250.0), "window space");
             }
@@ -1552,8 +1708,15 @@ mod tests {
     #[test]
     fn clicking_the_dom_clears_a_stale_island_selection() {
         let mut host = host();
-        // The routing target is not what this test asserts; the state effect below is.
+        // A click is a down and an up — the stream a real pointer produces, which
+        // matters now that the down captures: without the up, the second click would
+        // still belong to the first island, which is the correct answer to a stream
+        // no real pointer can produce.
         let _ = host.click(&click_at(10.0, 70.0));
+        let _ = host.route_pointer_captured(&PointerEvent::new(
+            LogicalPoint::new(10.0, 70.0),
+            PointerPhase::Up,
+        ));
         assert!(host.state(0).expect("state").selection.is_some());
         // The routing target is not what this test asserts; the state effect below is.
         let _ = host.click(&click_at(10.0, 700.0));
@@ -1985,5 +2148,179 @@ mod tests {
         assert_eq!(places.len(), 1);
         assert_eq!(places[0].id, "b");
         assert_eq!(places[0].bounds.y, 0.0, "the empty row takes no room");
+    }
+
+    /// A host over one custom island — the miniature timeline the renderer's tests and
+    /// the browser gate already pin, so paint, hit-test and pixel probes share one truth.
+    fn custom_host() -> IslandHost {
+        use crate::display::{DisplayList, RegionRole};
+        let viewport = Viewport::new(LogicalSize::new(320.0, 200.0), 1.0);
+        let mut islands = Islands::new(viewport);
+        islands
+            .add(Island::new("timeline", Rect::new(10.0, 165.0, 300.0, 30.0)))
+            .expect("the island fits");
+        let list = DisplayList::builder()
+            .rect(Rect::new(20.0, 4.0, 120.0, 22.0), [50, 80, 180, 255])
+            .hit_region(
+                "waveform",
+                Rect::new(20.0, 4.0, 120.0, 22.0),
+                "waveform intro.mp4",
+                RegionRole::Surface,
+            )
+            .hit_region(
+                "playhead",
+                Rect::new(76.0, 0.0, 10.0, 30.0),
+                "playhead",
+                RegionRole::Handle,
+            )
+            .finish()
+            .expect("balanced");
+        IslandHost::new(islands, rows(3)).with_display_list("timeline", list)
+    }
+
+    fn region_at(host: &IslandHost, x: f32, y: f32) -> Option<String> {
+        match host.route_pointer(&PointerEvent::new(
+            LogicalPoint::new(x, y),
+            PointerPhase::Down,
+        )) {
+            Routed::Island { region, .. } => region,
+            other => panic!("the point is inside the island: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_pointer_over_a_hit_region_names_the_region() {
+        let host = custom_host();
+        // Window (50, 180) is content (40, 15): inside the waveform's rect.
+        assert_eq!(region_at(&host, 50.0, 180.0), Some("waveform".to_owned()));
+    }
+
+    #[test]
+    fn overlapping_regions_resolve_topmost_exactly_as_the_paint_orders_them() {
+        let host = custom_host();
+        // Window (90, 180) is content (80, 15): inside both the waveform and the
+        // playhead's wider hit rect — the playhead is declared later, draws on top,
+        // and wins the click.
+        assert_eq!(region_at(&host, 90.0, 180.0), Some("playhead".to_owned()));
+    }
+
+    #[test]
+    fn a_point_inside_the_island_but_outside_every_region_hits_no_region() {
+        let host = custom_host();
+        // Window (15, 180) is content (5, 15): inside the island, left of the waveform.
+        assert_eq!(region_at(&host, 15.0, 180.0), None);
+    }
+
+    #[test]
+    fn row_model_islands_answer_none_without_a_display_list() {
+        let host = host();
+        let event = PointerEvent::new(LogicalPoint::new(500.0, 100.0), PointerPhase::Down);
+        match host.route_pointer(&event) {
+            Routed::Island { region, .. } => assert_eq!(region, None),
+            other => panic!("the point is inside the grid: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_drag_outside_the_island_stays_captured_with_real_coordinates() {
+        let mut host = custom_host();
+        let inside = LogicalPoint::new(10.0 + 30.0, 165.0 + 10.0);
+        // Button down inside: capture begins.
+        let down = PointerEvent::new(inside, PointerPhase::Down);
+        let routed = host.route_pointer_captured(&down);
+        assert!(matches!(routed, Routed::Island { .. }), "down routes in");
+        assert!(host.captured().is_some(), "capture is held");
+        // A move far outside the island's bounds: still the island's event, and the
+        // content coordinates are honestly negative rather than clamped or dropped.
+        let far_outside = LogicalPoint::new(10.0 - 200.0, 165.0 - 100.0);
+        let moved =
+            host.route_pointer_captured(&PointerEvent::new(far_outside, PointerPhase::Move));
+        let Routed::Island {
+            content, region, ..
+        } = moved
+        else {
+            panic!("a captured move outside still routes to the island, got {moved:?}");
+        };
+        assert!(
+            content.x < 0.0,
+            "the content x is honestly negative: {content:?}"
+        );
+        assert!(region.is_none(), "no region lives outside the content");
+        // Up anywhere releases: the next move hit-tests fresh.
+        let up = host.route_pointer_captured(&PointerEvent::new(far_outside, PointerPhase::Up));
+        assert!(
+            matches!(up, Routed::Island { .. }),
+            "the release itself still routes in"
+        );
+        assert!(host.captured().is_none(), "capture is released");
+        let after =
+            host.route_pointer_captured(&PointerEvent::new(far_outside, PointerPhase::Move));
+        assert!(
+            matches!(after, Routed::Dom),
+            "after release the same point is the DOM's, got {after:?}"
+        );
+    }
+
+    #[test]
+    fn a_down_in_the_dom_captures_nothing() {
+        let mut host = custom_host();
+        let nowhere = LogicalPoint::new(1.0, 1.0);
+        let routed = host.route_pointer_captured(&PointerEvent::new(nowhere, PointerPhase::Down));
+        assert!(matches!(routed, Routed::Dom));
+        assert!(host.captured().is_none());
+    }
+
+    #[test]
+    fn a_burst_of_moves_is_routed_losslessly_in_order() {
+        let mut host = custom_host();
+        // A scrub-shaped stream: down inside the island, then a burst of moves at
+        // display-rate positions running well past the island's edge, then the
+        // release. The contract is 1:1 — every event the platform delivers is
+        // routed, in order, with no host-side coalescing deciding some positions
+        // do not matter.
+        let inside = LogicalPoint::new(10.0 + 30.0, 165.0 + 10.0);
+        host.route_pointer_captured(&PointerEvent::new(inside, PointerPhase::Down));
+        let positions: Vec<f32> = (0..120).map(|i| 40.0 + i as f32 * 3.0).collect();
+        let mut routed_x = Vec::new();
+        for x in &positions {
+            let event = PointerEvent::new(LogicalPoint::new(*x, 175.0), PointerPhase::Move);
+            let routed = host.route_pointer_captured(&event);
+            match routed {
+                Routed::Island { content, .. } => routed_x.push(content.x),
+                other => panic!("a mid-scrub move must stay captured, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            routed_x.len(),
+            positions.len(),
+            "every move is routed: nothing dropped, nothing merged"
+        );
+        // Order is exact, not just lossless in count: the content x coordinates are
+        // strictly increasing because the delivered positions are — a reordering
+        // or a coalesced-away position would break both halves of this.
+        assert!(
+            routed_x.windows(2).all(|pair| pair[1] > pair[0]),
+            "the stream arrives in the order it was delivered"
+        );
+        host.route_pointer_captured(&PointerEvent::new(
+            LogicalPoint::new(400.0, 175.0),
+            PointerPhase::Up,
+        ));
+    }
+
+    #[test]
+    fn capture_preserves_region_resolution_inside_the_content() {
+        let mut host = custom_host();
+        // Down in the playhead's region, then a move inside the waveform's: capture or
+        // not, the region answers what is under the point in content space.
+        let playhead = LogicalPoint::new(10.0 + 80.0, 165.0 + 10.0);
+        host.route_pointer_captured(&PointerEvent::new(playhead, PointerPhase::Down));
+        let waveform_point = LogicalPoint::new(10.0 + 40.0, 165.0 + 10.0);
+        let moved =
+            host.route_pointer_captured(&PointerEvent::new(waveform_point, PointerPhase::Move));
+        let Routed::Island { region, .. } = moved else {
+            panic!("captured move routes in, got {moved:?}");
+        };
+        assert_eq!(region.as_deref(), Some("waveform"));
     }
 }

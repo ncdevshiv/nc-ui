@@ -1,0 +1,19 @@
+[package]
+description = "Native audio output for nc-ui: a cpal-backed device stream that drains the shared sample ring — the output half of media.audio_output."
+license.workspace = true
+name = "ncui-audio-output"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors = ["NC-UI Contributors"]
+
+[lints]
+workspace = true
+
+[dependencies]
+ncui-gpu = { workspace = true }
+cpal = "0.18"
+
+[dev-dependencies]
+ncui-gpu = { workspace = true }

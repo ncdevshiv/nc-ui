@@ -264,6 +264,7 @@ pub(crate) fn open_window(
         window: spec.window,
         props: spec.props.clone(),
         events: Arc::clone(&sink),
+        services: spec.services.clone(),
     };
 
     let options = cx

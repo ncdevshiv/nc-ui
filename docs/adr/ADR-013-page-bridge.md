@@ -62,7 +62,7 @@ no second copy to drift.
 ## Implementation status
 
 **Implemented.** The protocol is in `crates/ncui-webview/src/seam.rs`, the runtime's
-dispatch of it is in `crates/ncui-runtime/src/window.rs`, the injected script and the typed
+dispatch of it is in `crates/ncui-runtime/src/window/page_dispatch.rs`, the injected script and the typed
 client are in `packages/ncui-client/`, and the command registry is in
 `crates/ncui-runtime/src/commands.rs`.
 

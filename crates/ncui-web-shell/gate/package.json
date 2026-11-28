@@ -1,0 +1,9 @@
+{
+  "name": "ncui-web-shell-gate",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "pngjs": "^7.0.0",
+    "puppeteer-core": "^24.9.0"
+  }
+}

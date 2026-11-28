@@ -90,6 +90,17 @@ the registry disagree, the registry is right and this table is the bug.
 | Cross-platform verification on Linux | Implemented |
 | WASM execution: untrusted components run under fuel, a memory cap and a copy budget | Implemented |
 | Text inside a GPU island: shaping, wrapping, glyph rasterisation and drawing | Implemented — a row's text is shaped with the machine's own font, broken into lines that fit the row, and drawn |
+| OS file drops: files dragged onto a window arrive at the page as a DOM event with normalised paths | Implemented |
+| Window zoom: a page or agent scales a window's page between 0.25 and 5.0 | Implemented |
+| DevTools: the application opens, closes and asks about the platform's web inspector | Implemented |
+| CDP: on Windows the host carries a DevTools command to a window's own endpoint | Implemented |
+| Embedded child webviews: a parent window owns each child surface — isolated policy, geometry and teardown | Implemented on Windows |
+| Pointer capture: a button down inside an island captures it until release, routing out-of-bounds moves honestly | Implemented |
+| Editor-grade IPC: a caller's `deadline_ms` is enforced; latest-wins command streams supersede | Implemented — round-trip latency measured in the bench harness |
+| Video surfaces: a persistent frame surface the page places by rect and a native producer feeds at video rate | Implemented on Windows — airspace-composited, 1080p30 and 4K30 sustained measurements stamped |
+| Audio output: a capability-gated native output stream sharing the video surface's timeline clock | Implemented on Windows — device-clock positions, drift measured in the microsecond range |
+| Application icon: the manifest names an icon; the runtime decodes and hands it to the platform | Implemented |
+| Bundle verification: an install or an update checks every copied file against the manifest's digest | Implemented |
 | Cross-platform verification on macOS | **Not implemented** — no macOS host reachable |
 
 **Linux and Windows both pass the full gate** — the full workspace suite, formatting, clippy
@@ -135,6 +146,8 @@ crates/
   ncui-scheduler       layer 1  priority, ageing, cooperative budget, cancellation
   ncui-a11y            layer 1  semantic tree, focus order, keyboard routing
   ncui-abi             layer 1  component ABI manifest and capability negotiation
+  ncui-sidecar         layer 1  sidecar process supervision: job objects, restart
+  ncui-webview-child   layer 1  child-webview contract shared by webview and hosts
   ncui-workers         layer 2  native worker pool with bounded queues
   ncui-webview         layer 2  webview host policy, lifecycle, navigation, capability
   ncui-gpu             layer 2  compositing boundary: geometry and the ADR-002 input contract
@@ -144,7 +157,10 @@ crates/
   ncui-webview-wry     layer 3  the `wry`/`tao` binding: a real window, a real page
   ncui-gpu-renderer     layer 3  the `wgpu` binding: device, surface, render pass, text
   ncui-gpui            layer 3  the `gpui` binding: trusted native views in their own windows
+  ncui-video-surface   layer 3  the Win32 child-window video surface (the unsafe boundary)
+  ncui-audio-output    layer 3  the `cpal`/WASAPI binding: device-timestamped playback
   ncui-kit-providers   layer 4  the nc-ui-kit widgets, registered as native-view providers
+  ncui-web-shell       layer 4  shell composition over the renderer, never the runtime
   ncui-runtime         layer 4  composition, JSON-RPC agent API, health
   ncui-cli             layer 5  machine-readable status, introspection, and `ncui run`
   ncui-bench           layer 5  latency and throughput harness with committed baselines

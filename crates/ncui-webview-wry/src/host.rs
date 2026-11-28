@@ -183,6 +183,26 @@ pub enum HostEvent {
         /// The window to drag.
         window: u64,
     },
+    /// Initiate an edge-resize drag on a frameless window.
+    DragResizeWindow {
+        /// The window to resize.
+        window: u64,
+        /// The edge or corner the user's gesture means.
+        edge: ncui_webview::ResizeEdge,
+    },
+    /// Files dropped onto a window from the OS shell.
+    ///
+    /// Carried through the loop rather than handled in the drop callback so the
+    /// disclosure decision and the page delivery happen where the seam and the
+    /// window table live — the callback itself only translates and forwards.
+    FileDrop {
+        /// The window the drop landed on, by engine identity.
+        window: u64,
+        /// The raw paths the shell handed over.
+        paths: Vec<std::path::PathBuf>,
+        /// Where the drop landed, relative to the webview's top-left corner.
+        position: (i32, i32),
+    },
     /// Build a child webview inside a parent window's frame.
     CreateChild {
         /// The parent window's internal engine identity.
@@ -310,6 +330,22 @@ pub enum HostEvent {
         /// Where the answer goes.
         reply: Sender<Vec<ncui_webview::MonitorRect>>,
     },
+    /// Show one destructive-operation confirmation parented to a window.
+    ///
+    /// This runs on the engine thread because the real `tao::Window` object is the parent,
+    /// and that object cannot leave the thread that owns it. Only the person's answer crosses
+    /// the boundary.
+    #[cfg(feature = "parented-dialogs")]
+    Confirm {
+        /// The window the confirmation belongs to.
+        window: u64,
+        /// The bounded dialog title.
+        title: String,
+        /// The bounded operation description.
+        message: String,
+        /// Where the person's answer, or the failure, is delivered.
+        reply: Sender<Result<bool, String>>,
+    },
     /// Report one window's geometry.
     ///
     /// The engine thread owns the window, so this is the only place the answer exists: a host
@@ -320,6 +356,18 @@ pub enum HostEvent {
         window: u64,
         /// Where the answer goes.
         reply: Sender<Option<Geometry>>,
+    },
+    /// Report one window's native handle integer.
+    ///
+    /// The video surface's presenter childs into this window at the platform level, and
+    /// the platform speaks in handles. Only the engine thread can read the handle truthfully —
+    /// it owns the window object — and platforms without a handle the presenter understands
+    /// answer `None` rather than a number that would mean the wrong thing.
+    NativeHandle {
+        /// The window whose handle is wanted.
+        window: u64,
+        /// Where the answer goes.
+        reply: Sender<Option<isize>>,
     },
     /// Report how one window is presented, optionally changing it first.
     ///
@@ -712,7 +760,24 @@ fn run_engine(
         *control_flow = ControlFlow::Wait;
         match event {
             Event::UserEvent(HostEvent::Create(create)) => {
-                create_window(target, *create, &mut windows);
+                create_window(target, *create, &mut windows, &proxy);
+            }
+            Event::UserEvent(HostEvent::FileDrop {
+                window,
+                paths,
+                position,
+            }) => {
+                // Disclosure is the filedrop module's decision; delivery is a
+                // DOM CustomEvent, so pages listen with addEventListener and
+                // no bridge-specific code.
+                if let ncui_webview::filedrop::DropDecision::Disclose(drop) =
+                    ncui_webview::filedrop::prepare_drop(&paths, position)
+                {
+                    let script = ncui_webview::filedrop::dispatch_script(&drop);
+                    if let Some(entry) = windows.get(&window) {
+                        let _ = entry.webview.evaluate_script(&script);
+                    }
+                }
             }
             Event::UserEvent(HostEvent::Eval { window, script }) => {
                 if let Some(entry) = windows.get(&window) {
@@ -730,20 +795,55 @@ fn run_engine(
                     let _ = entry.window.drag_window();
                 }
             }
+            Event::UserEvent(HostEvent::DragResizeWindow { window, edge }) => {
+                if let Some(entry) = windows.get(&window) {
+                    let direction = match edge {
+                        ncui_webview::ResizeEdge::East => tao::window::ResizeDirection::East,
+                        ncui_webview::ResizeEdge::North => tao::window::ResizeDirection::North,
+                        ncui_webview::ResizeEdge::NorthEast => {
+                            tao::window::ResizeDirection::NorthEast
+                        }
+                        ncui_webview::ResizeEdge::NorthWest => {
+                            tao::window::ResizeDirection::NorthWest
+                        }
+                        ncui_webview::ResizeEdge::South => tao::window::ResizeDirection::South,
+                        ncui_webview::ResizeEdge::SouthEast => {
+                            tao::window::ResizeDirection::SouthEast
+                        }
+                        ncui_webview::ResizeEdge::SouthWest => {
+                            tao::window::ResizeDirection::SouthWest
+                        }
+                        ncui_webview::ResizeEdge::West => tao::window::ResizeDirection::West,
+                    };
+                    let _ = entry.window.drag_resize_window(direction);
+                }
+            }
             Event::UserEvent(HostEvent::CdpRequest {
                 window,
                 command,
                 reply,
             }) => {
-                let answer = windows.get(&window).map_or_else(
-                    || {
-                        Err(crate::cdp::CdpError::TargetBindFailed {
-                            reason: format!("engine window {window} is not live"),
-                        })
-                    },
-                    |entry| entry.cdp.send(&command),
-                );
-                let _ = reply.send(answer);
+                // The exchange happens on a worker, never on this loop: a CDP send
+                // is a blocking websocket connect and exchange that can hang for the
+                // full exchange timeout when the endpoint is slow, and every
+                // `HostEvent::Eval` behind it is a page waiting for its answer.
+                // Measured before this fix: a 30 s connect hang dammed every page
+                // response behind it, because the loop that debugs the pages was
+                // the loop that serves them. The binding is plain endpoint metadata
+                // (`send` connects fresh per command), so cloning it into the worker
+                // shares nothing with the loop but the target's address.
+                let binding = windows.get(&window).map(|entry| entry.cdp.clone());
+                thread::spawn(move || {
+                    let answer = binding.map_or_else(
+                        || {
+                            Err(crate::cdp::CdpError::TargetBindFailed {
+                                reason: format!("engine window {window} is not live"),
+                            })
+                        },
+                        |binding| binding.send(&command),
+                    );
+                    let _ = reply.send(answer);
+                });
             }
             Event::UserEvent(HostEvent::CreateChild {
                 parent,
@@ -905,8 +1005,18 @@ fn run_engine(
                 answer_theme(&windows, window, &reply);
             }
             Event::UserEvent(HostEvent::Monitors { reply }) => answer_monitors(target, &reply),
+            #[cfg(feature = "parented-dialogs")]
+            Event::UserEvent(HostEvent::Confirm {
+                window,
+                title,
+                message,
+                reply,
+            }) => answer_confirmation(&windows, window, &title, &message, &reply),
             Event::UserEvent(HostEvent::Geometry { window, reply }) => {
                 answer_geometry(&windows, window, &reply);
+            }
+            Event::UserEvent(HostEvent::NativeHandle { window, reply }) => {
+                answer_native_handle(&windows, window, &reply);
             }
             Event::UserEvent(HostEvent::WindowState {
                 window,
@@ -1016,6 +1126,36 @@ fn answer_monitors(
     let _ = reply.send(monitors);
 }
 
+/// Shows one confirmation parented to the window that asked.
+///
+/// This is intentionally on the engine thread: parenting is a property of the live platform
+/// window object, not a value that can be safely detached and shipped to another thread. The
+/// modal blocks this engine's event processing while it is open, which is the correct severity
+/// for an irreversible operation: the application is waiting on the person's decision.
+#[cfg(feature = "parented-dialogs")]
+fn answer_confirmation(
+    windows: &HashMap<u64, EngineWindow>,
+    window: u64,
+    title: &str,
+    message: &str,
+    reply: &Sender<Result<bool, String>>,
+) {
+    let answer = windows.get(&window).map_or_else(
+        || Err("the window that asked for approval is gone".to_owned()),
+        |entry| {
+            let answer = rfd::MessageDialog::new()
+                .set_title(title)
+                .set_description(message)
+                .set_level(rfd::MessageLevel::Warning)
+                .set_buttons(rfd::MessageButtons::YesNo)
+                .set_parent(&entry.window)
+                .show();
+            Ok(matches!(answer, rfd::MessageDialogResult::Yes))
+        },
+    );
+    let _ = reply.send(answer);
+}
+
 /// Answers a request for one window's geometry.
 ///
 /// The size is the window's inner size and the position its outer position: what a user would
@@ -1055,6 +1195,39 @@ fn answer_geometry(
     let _ = reply.send(answer);
 }
 
+/// Answers a window's native handle integer, or `None` where the platform has none the
+/// presenter understands.
+///
+/// Windows answers the `HWND` as the integer tao already hands out. Every other platform
+/// answers `None` for now — not because the question is wrong but because no presenter yet
+/// exists that would understand their answer, and a number without a meaning is worse than
+/// an honest absence.
+#[cfg(feature = "wry-engine")]
+fn answer_native_handle(
+    windows: &HashMap<u64, EngineWindow>,
+    window: u64,
+    reply: &Sender<Option<isize>>,
+) {
+    #[allow(
+        clippy::bind_instead_of_map,
+        reason = "the closure body is cfg-split platform blocks; the map form cannot express the cfg shape without contorting it"
+    )]
+    let answer = windows.get(&window).and_then(|entry| {
+        #[cfg(target_os = "windows")]
+        {
+            use tao::platform::windows::WindowExtWindows as _;
+
+            Some(entry.window.hwnd())
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = entry;
+            None
+        }
+    });
+    let _ = reply.send(answer);
+}
+
 /// Builds a window and its page, and reports its identity or why it could not be built.
 ///
 /// The failure is recorded twice on purpose: on the host that asked, where the caller reads it, and
@@ -1064,6 +1237,7 @@ fn create_window(
     target: &EventLoopWindowTarget<HostEvent>,
     create: CreateRequest,
     windows: &mut HashMap<u64, EngineWindow>,
+    drop_proxy: &EventLoopProxy<HostEvent>,
 ) {
     let CreateRequest {
         request,
@@ -1077,7 +1251,15 @@ fn create_window(
     #[cfg(not(feature = "native-menu"))]
     let _ = menu_tx;
     let id = NEXT_WINDOW.fetch_add(1, Ordering::SeqCst);
-    match build_window(target, request.as_ref(), &seam, ipc_tx, &error) {
+    match build_window(
+        target,
+        request.as_ref(),
+        &seam,
+        ipc_tx,
+        &error,
+        drop_proxy,
+        id,
+    ) {
         Ok((window, webview, cdp)) => {
             windows.insert(
                 id,
@@ -1490,6 +1672,8 @@ fn build_window(
     seam: &Arc<HostSeam>,
     ipc_tx: Sender<HostIpcEvent>,
     error: &Arc<Mutex<Option<String>>>,
+    drop_proxy: &EventLoopProxy<HostEvent>,
+    engine_id: u64,
 ) -> Result<(Window, WebView, PageTargetBinding), String> {
     // The window's shape comes from the request, not from the host's own defaults. A host
     // that invented its own title and size would show the user something the application
@@ -1621,7 +1805,28 @@ fn build_window(
         .with_initialization_script(format!(
             "{BRIDGE_SCRIPT}
 {DRAG_REGION_SCRIPT}"
-        ));
+        ))
+        .with_drag_drop_handler({
+            // OS file drops (`native.os_file_drop`): the callback only
+            // translates and forwards into the event loop; the disclosure
+            // decision lives in `ncui_webview::filedrop` and the delivery in
+            // the loop, where the window table is. The return blocks the OS
+            // default — a webview's default drop behaviour is navigating to
+            // the file, which would route around the navigation policy.
+            // The cost, documented in wry: drops on `<input type="file">`
+            // forms are the page's own events now, not the browser's.
+            let proxy = drop_proxy.clone();
+            move |event| {
+                if let wry::DragDropEvent::Drop { paths, position } = event {
+                    let _ = proxy.send_event(HostEvent::FileDrop {
+                        window: engine_id,
+                        paths,
+                        position,
+                    });
+                }
+                true
+            }
+        });
 
     // Remote debugging (ADR-017 Phase 2): an ephemeral port keeps two instances of the
     // same application from colliding, and the chosen port is published by the runtime in
@@ -1795,6 +2000,43 @@ fn present_one_gpu_frame(window: &Window) {
     }
 }
 
+/// The cloneable confirmation channel for one live window.
+///
+/// It carries only the engine proxy and the engine-scoped window identity. That is enough to
+/// ask the engine thread to show the dialog with the real window object as parent.
+#[cfg(feature = "parented-dialogs")]
+pub(crate) struct WryWindowConfirmation {
+    engine: EventLoopProxy<HostEvent>,
+    window: u64,
+}
+
+#[cfg(feature = "parented-dialogs")]
+impl core::fmt::Debug for WryWindowConfirmation {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("WryWindowConfirmation")
+            .field("window", &self.window)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "parented-dialogs")]
+impl ncui_webview::WindowConfirmation for WryWindowConfirmation {
+    fn confirm(&self, title: &str, message: &str) -> Result<bool, String> {
+        let (reply, answers) = mpsc::channel();
+        self.engine
+            .send_event(HostEvent::Confirm {
+                window: self.window,
+                title: title.to_owned(),
+                message: message.to_owned(),
+                reply,
+            })
+            .map_err(|error| error.to_string())?;
+        answers.recv().map_err(|error| {
+            format!("the window engine stopped while approval was open: {error}")
+        })?
+    }
+}
+
 /// One window's engine handle.
 ///
 /// A host is one window: it holds the seam the page obeys and the channel the page talks
@@ -1904,6 +2146,22 @@ impl WindowHost {
         }
     }
 
+    /// Initiate an edge-resize drag on a frameless window.
+    ///
+    /// The page's own edge regions ask for this on mousedown; the platform
+    /// owns the gesture from there, exactly as it would from a decorated
+    /// border the window does not have.
+    #[cfg(feature = "wry-engine")]
+    pub fn drag_resize(&self, edge: ncui_webview::ResizeEdge) -> bool {
+        if let (Some(engine), Some(window)) = (&self.engine, self.window) {
+            engine
+                .send_event(HostEvent::DragResizeWindow { window, edge })
+                .is_ok()
+        } else {
+            false
+        }
+    }
+
     /// Whether the platform is drawing its interface light or dark, as it reports it.
     ///
     /// `None` when the engine has gone or has stopped answering: a window whose host cannot say is a
@@ -1984,6 +2242,20 @@ impl WindowHost {
         }
     }
 
+    /// A confirmation surface parented to this window, when this build carries one.
+    #[must_use]
+    pub fn window_confirmation(&self) -> Option<Box<dyn ncui_webview::WindowConfirmation>> {
+        #[cfg(feature = "parented-dialogs")]
+        {
+            let (engine, window) = (self.engine.clone()?, self.window?);
+            Some(Box::new(WryWindowConfirmation { engine, window }))
+        }
+        #[cfg(not(feature = "parented-dialogs"))]
+        {
+            None
+        }
+    }
+
     /// Where this window is and how big it is, as the platform reports it.
     ///
     /// The answer comes back from the engine thread, which owns the window. The wait is bounded:
@@ -2005,6 +2277,28 @@ impl WindowHost {
                 width: reported.width,
                 height: reported.height,
             })
+        }
+        #[cfg(not(feature = "wry-engine"))]
+        {
+            None
+        }
+    }
+
+    /// This window's native handle integer, when the platform has one a presenter understands.
+    ///
+    /// The video surface's presenter childs into the window at platform level; this is the
+    /// truth it childs into. The same bounded wait the geometry uses applies: a dead engine
+    /// reports nothing rather than blocking a caller mid-teardown.
+    #[must_use]
+    pub fn native_window_handle(&self) -> Option<isize> {
+        #[cfg(feature = "wry-engine")]
+        {
+            let (engine, window) = (self.engine.as_ref()?, self.window?);
+            let (reply, answers) = mpsc::channel();
+            engine
+                .send_event(HostEvent::NativeHandle { window, reply })
+                .ok()?;
+            answers.recv_timeout(GEOMETRY_TIMEOUT).ok().flatten()
         }
         #[cfg(not(feature = "wry-engine"))]
         {
@@ -2253,8 +2547,8 @@ impl WindowHost {
     /// Clone of the producer side of the IPC channel.
     ///
     /// Mostly useful for wiring: the `wry` handler already holds its own clone, but a
-    /// caller that needs to inject synthetic events can post into the same queue the host
-    /// drains.
+    /// caller that needs to inject synthetic host-IPC events can post into the same queue
+    /// the host drains. This is not page-input injection: interactive tests use CDP input.
     pub fn ipc_sender(&self) -> Sender<HostIpcEvent> {
         self.ipc_tx.clone()
     }
@@ -2333,6 +2627,10 @@ impl WindowHost {
 impl WebViewBackend for WindowHost {
     fn as_any(&self) -> &dyn core::any::Any {
         self
+    }
+
+    fn confirmation(&self) -> Option<Box<dyn ncui_webview::WindowConfirmation>> {
+        self.window_confirmation()
     }
 
     fn cdp_send(
@@ -2500,6 +2798,10 @@ impl WebViewBackend for WindowHost {
         self.window_geometry()
     }
 
+    fn native_window_handle(&self) -> Option<isize> {
+        WindowHost::native_window_handle(self)
+    }
+
     fn window_state(&self) -> Option<ncui_webview::WindowState> {
         self.window_state()
     }
@@ -2535,6 +2837,16 @@ impl WebViewBackend for WindowHost {
 
     fn set_zoom(&self, factor: f64) -> bool {
         self.set_zoom(factor)
+    }
+
+    #[cfg(feature = "wry-engine")]
+    fn drag_window(&self) -> bool {
+        self.drag_window()
+    }
+
+    #[cfg(feature = "wry-engine")]
+    fn drag_resize(&self, edge: ncui_webview::ResizeEdge) -> bool {
+        self.drag_resize(edge)
     }
 
     fn open_devtools(&self) -> bool {

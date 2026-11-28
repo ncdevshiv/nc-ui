@@ -48,7 +48,8 @@ use tracing::warn;
 
 use crate::Runtime;
 use crate::agent::AgentSession;
-use crate::dispatch::dispatch_with;
+use crate::consent::ConsentGate;
+use crate::dispatch::{dispatch_with, dispatch_with_consent};
 use crate::rpc::{Request, Response};
 
 /// The first frame a connection must send.
@@ -433,19 +434,7 @@ impl ServerShared {
 
             let response = match serde_json::from_slice::<Request>(&frame) {
                 Ok(request) => {
-                    let now = started.elapsed();
-                    let mut runtime = self
-                        .runtime
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    match dispatch_with(
-                        &mut runtime,
-                        &mut session,
-                        &request,
-                        now,
-                        self.registry.as_ref(),
-                        &method_table(),
-                    ) {
+                    match self.serve_request(&mut session, &request, started.elapsed()) {
                         Some(response) => response,
                         None => continue,
                     }
@@ -471,6 +460,78 @@ impl ServerShared {
 
         let _ = writer.flush();
         Ok(ConnectionOutcome::Authenticated)
+    }
+
+    /// Answers one request: through the consent gate when the method is
+    /// destructive, straight into dispatch otherwise.
+    ///
+    /// The gate runs in three phases so the human half is never waited on under
+    /// the runtime lock: judge the request under a brief lock, ask the person
+    /// with no lock held at all, then settle the answer back under the lock. A
+    /// person reading a dialog takes as long as they take, and every other
+    /// caller of this runtime must not be parked behind their answer.
+    ///
+    /// `None` means the request was a notification that dispatched without an
+    /// answer — the connection loop continues without writing a frame.
+    fn serve_request(
+        &self,
+        session: &mut AgentSession,
+        request: &Request,
+        now: Duration,
+    ) -> Option<Response> {
+        let table = method_table();
+        let gate = {
+            let runtime = self
+                .runtime
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::consent::gate_for_method(&runtime, session, request, &table, now, None)
+        };
+        match gate {
+            ConsentGate::Dispatch => {
+                let mut runtime = self
+                    .runtime
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                dispatch_with(
+                    &mut runtime,
+                    session,
+                    request,
+                    now,
+                    self.registry.as_ref(),
+                    &table,
+                )
+            }
+            ConsentGate::Ask {
+                request: approval,
+                required,
+                surface,
+            } => {
+                // No runtime lock is held while the person decides.
+                let approved = surface.ask(&approval);
+                let mut runtime = self
+                    .runtime
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let pre = crate::consent::settle(
+                    &mut runtime,
+                    session,
+                    &request.method,
+                    required,
+                    &request.params,
+                    approved,
+                );
+                dispatch_with_consent(
+                    &mut runtime,
+                    session,
+                    request,
+                    now,
+                    self.registry.as_ref(),
+                    &table,
+                    Some(pre),
+                )
+            }
+        }
     }
 
     /// Records a refusal and closes the connection.

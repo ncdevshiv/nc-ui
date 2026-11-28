@@ -451,6 +451,51 @@ impl WindowChange {
     }
 }
 
+/// One edge or corner a frameless window may be resized from.
+///
+/// The platform's own set, named the way the platform names it: eight
+/// directions, no "any edge" — a window dragged from "anywhere" is being
+/// moved, and that is [`crate::WebViewBackend::drag_window`], not this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResizeEdge {
+    /// The right edge.
+    East,
+    /// The top edge.
+    North,
+    /// The top-right corner.
+    NorthEast,
+    /// The top-left corner.
+    NorthWest,
+    /// The bottom edge.
+    South,
+    /// The bottom-right corner.
+    SouthEast,
+    /// The bottom-left corner.
+    SouthWest,
+    /// The left edge.
+    West,
+}
+
+impl ResizeEdge {
+    /// The edge a payload names, or `None` when it names none or one that is
+    /// not an edge.
+    #[must_use]
+    pub fn from_payload(payload: &serde_json::Value) -> Option<Self> {
+        match payload.get("edge").and_then(serde_json::Value::as_str)? {
+            "east" => Some(Self::East),
+            "north" => Some(Self::North),
+            "north_east" => Some(Self::NorthEast),
+            "north_west" => Some(Self::NorthWest),
+            "south" => Some(Self::South),
+            "south_east" => Some(Self::SouthEast),
+            "south_west" => Some(Self::SouthWest),
+            "west" => Some(Self::West),
+            _ => None,
+        }
+    }
+}
+
 /// Why a payload does not describe a change a window can be asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowChangeError {

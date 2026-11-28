@@ -12,16 +12,33 @@ gate: fmt lint test doc tools policy client budget
 	@echo "all gates passed"
 
 ## fmt: formatting must be clean
+# Scoped to this workspace, not --all: cargo-fmt's --all also formats local path
+# dependencies, and nc-ui-kit is a sibling repository whose baseline is
+# deliberately unformatted (its own AGENTS forbids blanket reformatting).
 fmt:
-	cargo fmt --all -- --check
+	cargo fmt -- --check
 
 ## lint: clippy at pedantic with warnings denied
 lint:
 	cargo clippy --workspace --all-targets -- -D warnings
 
-## test: unit, integration and doc tests
+## test: unit, integration and doc tests, plus the GPU-enabled leg
+# The workspace leg runs the renderer's GPU tests because `wgpu-device` is on by default
+# in ncui-gpu-renderer; a machine with no hardware GPU executes them through the software
+# fallback adapter rather than skipping. The runtime's island tests stay behind
+# `gpu-islands` — a shipping feature a minimal build may omit — so they get their own leg:
+# without it the default gate would compile `islands.rs` into zero tests and the registry
+# would cite tests that never ran here. The final line is F4 execution provenance: entries
+# whose cited test targets the legs actually executed are stamped with the instant and the
+# machine class, and everything else degrades to stale instead of hiding behind its citation.
+# `tee` under `bash -o pipefail` keeps both the live output and cargo's exit code.
 test:
-	cargo test --workspace --all-targets
+	bash -o pipefail -c 'cargo test --workspace --all-targets 2>&1 | tee target/gate-test-workspace.log'
+	bash -o pipefail -c 'cargo test -p ncui-runtime --features gpu-islands --test islands 2>&1 | tee target/gate-test-islands.log'
+	bash -o pipefail -c 'cargo test -p ncui-runtime --features gpu-islands --lib 2>&1 | tee target/gate-test-islands-lib.log'
+	if uname -s | grep -q MINGW; then bash -o pipefail -c 'cargo test -p ncui-runtime --features wry-host,gpui-host 2>&1 | tee target/gate-test-wry-host.log'; else echo "wry-host live leg is Windows-only; not executed here" > target/gate-test-wry-host.log; fi
+	bash -o pipefail -c 'cargo test --manifest-path tools/ncui-tools/Cargo.toml --all-targets 2>&1 | tee target/gate-test-tools.log'
+	python tools/record_execution_provenance.py protocols/feature-registry.json target/gate-test-workspace.log target/gate-test-islands.log target/gate-test-islands-lib.log target/gate-test-wry-host.log target/gate-test-tools.log
 
 ## doc: documentation must build without warnings
 doc:

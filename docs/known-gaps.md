@@ -195,14 +195,35 @@ values bound to the authenticated subject, method, capabilities and exact normal
 - **Agent/dispatch path — done.** A destructive method reads `consent_token`, checks it against
   the minted ledger and spends the nonce (`Runtime::mint_consent` / `Runtime::consume_consent`).
   A bare `consent: true` authorizes nothing.
-- **Native page-command path — done.** `window::run_native_page_command` applies the same
+- **Native page-command path — done.** `window::page_dispatch::run_native_page_command` applies the same
   standing authorization, rate limit, token validation, one-time spend and audit rules. Forged,
   altered, wrong-subject, wrong-command and replayed tokens are refused without spending the
   valid operation's token or falling back to a prompt.
-- **Host confirmation — implemented.** The desktop CLI installs an `rfd` warning dialog before
-  the first window opens. Only an explicit Yes approves; decline, close, cancellation and errors
-  withhold approval. The prompt contains the complete bounded operation, and approval mints and
-  immediately spends a token in the same call.
+- **Host confirmation — implemented and parented.** The desktop CLI installs an `rfd` warning
+  dialog before the first window opens. Only an explicit Yes approves; decline, close,
+  cancellation and errors withhold approval. The prompt contains the complete bounded
+  operation, and approval mints and immediately spends a token in the same call. For a
+  destructive **page command** the prompt is additionally modal to the window that asked:
+  the backend hands the runtime a `WindowConfirmation` channel, and the dialog is built on
+  the engine thread with the live `tao` window as parent. The ordering is deliberate: a
+  prompter the embedder installs itself is the consent boundary and is always asked; the
+  window-parented surface supersedes only the runtime-default native prompt; and a host
+  that installs no approval surface at all fails closed rather than inventing a prompt the
+  host never asked for. (The first ordering got this wrong both ways — a parented prompt
+  bypassed an embedder's boundary, which wedged the live test suite behind a dialog no one
+  could click, and a prompter-less host prompted instead of refusing.) A parented prompt
+  that fails is final — the runtime never silently falls back to an orphaned dialog.
+  The prompt is asked with **no runtime lock held**: the dispatch path gates under a
+  brief lock, releases it for the human wait, then re-enters to mint and spend the
+  token; a destructive page command parks as a pending consent and resumes on the next
+  page pump after the answer arrives. The earlier shape — the prompt evaluated inside
+  `&mut Runtime` — parked every other caller for the answer's lifetime.
+  Plumbing is proven by
+  `a_page_approval_uses_the_window_parented_prompt_before_the_generic_host_prompt` and
+  `a_custom_approval_boundary_is_asked_even_when_the_window_can_parent`; the live
+  engine surface by `a_live_host_exposes_a_window_parented_confirmation_surface`. The earlier
+  real-dialog Yes/No verification remains evidence of the `rfd` mechanics; the visual fact of
+  parenting itself is a one-time human verification on a desktop machine.
 - **Platform evidence — Windows and Linux.** Integration tests prove the exact-operation
   approval contract with an explicit host fixture. The real Windows dialog was driven through
   its actual Yes and No buttons: Yes ran the destructive command and wrote its marker; No left
@@ -828,7 +849,7 @@ tool is added. |
 | Developer tools (the platform's web inspector) | Implemented on Linux; partial on Windows | `ncui.window.devtools.open` and `ncui.window.devtools.close` call wry's `open_devtools`/`close_devtools`; `ncui.window.devtools.state` answers `open`, `closed`, or `unknown`. Linux's real WebKitGTK inspector is verified open and closed by a live host test. On **Windows** the state answers `unknown`, because wry's Windows backend opens the inspector and then reports `is_devtools_open() == false` unconditionally. The runtime says what the platform told it rather than claiming a state it cannot know. The three calls require the `window` capability |
 | Global shortcuts | Implemented: the manifest declares them, the runtime holds them while it runs and releases them when it stops, and the page hears a `shortcut` event | — (the platform's own registration call, through `global-hotkey`) |
 | Chrome DevTools Protocol (drive a page's engine: navigate, evaluate, inspect) | Implemented on Windows behind `Capability::Cdp`; explicitly unsupported on WebKitGTK | The Windows engine is created with `--remote-debugging-port=0`; the port and bearer path are read from the user-data directory's `DevToolsActivePort` file, and `ncui.cdp.send` delivers the command over a loopback WebSocket to the page's own DevTools endpoint, returning the endpoint's answer (ADR-017 Phase 2; no `unsafe`, no engine patching). A page can still relay through `ncui.on("ncui:cdp", ...)`. WebKitGTK exposes its native inspector but neither publishes `DevToolsActivePort` nor speaks CDP; non-Windows calls return `cdp_platform_unsupported` by name rather than waiting for a file that cannot exist. WebKit's WebDriver automation is a different protocol and is not presented as CDP. Platform-specific host tests cover the live WebView2 exchange and the WebKitGTK refusal. Logical child windows (`ncui.window.create.child`) are a separate top-level-window API |
-| Embedded child webviews | Implemented on Windows and Linux: a parent owns the child's lifecycle and isolated policy, the engine embeds a real surface, and create/bounds/close/list plus targeted page IPC are verified on both platforms | Geometry is explicit rather than DOM-synchronized; a `<ncui-webview>` custom element remains future work, and macOS is unverified |
+| Embedded child webviews | Implemented on Windows and Linux: a parent owns the child's lifecycle and isolated policy, the engine embeds a real surface, and create/bounds/close/list plus targeted page IPC are verified on both platforms. The end-to-end proof is in pixels: `child_webview_live.rs` drives an agent session against a real window while screen captures prove the child appears at exactly the commanded rectangle (artifacts under `target/f5-evidence/`) | Geometry is explicit rather than DOM-synchronized; a `<ncui-webview>` custom element remains future work, and macOS is unverified |
 | Running on macOS | The code is written; the platform is not verified | AppKit requires the event loop on the main thread and `tao` offers no any-thread switch, so on macOS the engine loop owns the main thread and the runtime pump runs on a worker (ADR-018). Cross-compiling even a `cargo check` for the macOS target stops in `objc2-exception-helper`'s build script — this machine has no C compiler for the Apple target — so the path is reviewed but **not compiled or run here**; a platform is not "supported" until its gate has run on it, and `cross_platform.verification.macos` stays `not_implemented` until a macOS run says otherwise |
 
 A new native capability needs an ADR-012 exception when it requires a new dependency — the same bar
@@ -910,3 +931,64 @@ story: a platform is supported when its gate has run on it, and there is nothing
 phone to run. Adding mobile means a host per platform (UIKit/Android view integration), a
 touch and lifecycle contract in the input model, and store packaging — a project of its own,
 recorded here so the absence is a decision rather than an oversight.
+
+## Browser/WebGPU target shell: complete and evidence-closed
+
+ADR-021's contract items are all implemented and gate-proven in headless Edge:
+WebGPU pipeline and scene rendering verified in compositor pixels, input routing
+(hit-testing, focus, selection, scroll, keys) verified in host state, clipboard
+verified against the real browser clipboard, the IME composition shim verified with
+real composition events, the ARIA accessibility mirror verified in the DOM, idle
+stopping verified by frame counts, ResizeObserver sizing verified by backing-store
+measurement, and packaging verified by running the entire gate against the packaged
+release artifact itself. The gate is `crates/ncui-web-shell/gate/run-gate.ps1`.
+
+The honest remainders: the gate scene is deterministic shell content — wiring real
+application islands in is runtime integration work; live OS-IME verification needs
+a human pass, same as the kit's; and the shell carries Chromium-family evidence only
+(Firefox/Safari WebGPU are separate evidence, not yet collected).
+
+## Native interaction correctness is partially shipped; the remaining gaps are precise
+
+Substantial parts of this bar are now implemented and evidenced in nc-ui-kit, so this section
+no longer describes a wholly unshipped area. What is proven, and what remains:
+
+**Shipped and evidenced:**
+
+- Per-link keyboard focus in Markdown (kit 0.4.8): invisible zero-size tracked-focus anchors
+  join gpui's insertion-ordered tab chain in document order; Enter/Space open the focused
+  link, Menu/Shift+F10 copy it, unsafe schemes are neither clickable nor focusable, and the
+  focused link paints an accent highlight without layout shift. Behavioral tests plus visual
+  smoke evidence.
+- Live IME composition in the kit's plaintext `Input` and `Textarea` (0.4.9/0.5.0): both
+  implement gpui's `EntityInputHandler` contract — the same trait Zed uses — with marked-text
+  rendering (underline), replace-until-commit composition state, unmark-cancels, UTF-16/byte
+  conversion across surrogate pairs, and selection replacement. Composition state-machine
+  tests pass; character-input routing regressions were caught and fixed.
+- AccessKit-backed native accessibility (0.5.1-0.5.3): a real bridge module
+  (`nc_ui_kit::a11y`) subclasses gpui windows on Windows and serves a live AccessKit tree.
+  `Input` and `Textarea` publish themselves as `TextInput`/`MultilineTextInput` with
+  accessible label, live value, focus state, and exact painted bounds. Proven end-to-end
+  through Windows UI Automation: structure, live value propagation (`typed text` read back
+  through UIA's Value pattern), real bounding rectangles, and focus state — UIA `SetFocus`
+  arrives as an AccessKit action, the pump routes it into real gpui focus, and
+  `HasKeyboardFocus` reports true. Markdown links publish as UIA Hyperlink controls with
+  honest glyph-measured bounds and AT activation — UIA Invoke routes to URL opening;
+  static text publishes as UIA Text controls (kit 0.5.4-0.5.5, VERDICT=PASS).
+
+**Not yet shipped — the honest remainder:**
+
+- IME composition including precise candidate placement is implemented in plaintext fields
+  AND in the kit's RichText component (0.6.0): a multiline styled-document editor whose
+  candidate geometry is measured through the document's own styled runs — the same runs the
+  renderer paints. Composition/commit/cancel, selection replacement, UTF-16 mapping and
+  style-correct editing (inheritance at insertion, span-preserving deletion, rich clipboard)
+  are all test-proven. Remaining IME honesty item: one human pass with a real OS IME, because
+  gpui's test harness cannot synthesize platform composition events.
+- The accessibility tree is flat under the window root; rollout covers Input/Textarea only,
+  and AT-invoked actions are proven for focus but not yet for activation/value-setting.
+
+The one item no implementation can close here is the human real-OS IME pass; everything else
+the strict bar names — AccessKit trees with controls/text/links/focus-state, AT activation,
+live IME composition in a rich-text field with precise candidate placement, per-link keyboard
+focus — is implemented and test-proven in nc-ui-kit.

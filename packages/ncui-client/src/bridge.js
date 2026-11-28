@@ -104,6 +104,14 @@
       pendingCount += 1;
       var message = { id: id, action: request.action, payload: request.payload === undefined ? null : request.payload };
       if (request.name !== undefined) { message.name = request.name; }
+      // Supersede keys travel as transport metadata: a keyed command whose
+      // successor is already queued is answered "superseded" without executing,
+      // which is what makes a scrub a latest-wins stream instead of a backlog.
+      // Only the caller knows which of its commands form such a stream, so the
+      // key is per-call, never per-registration.
+      if (isObject(options) && typeof options.supersede === "string" && options.supersede.length > 0) {
+        message.supersede = options.supersede;
+      }
       for (var key in request.extra) {
         if (Object.prototype.hasOwnProperty.call(request.extra, key)) {
           message[key] = request.extra[key];

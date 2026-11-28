@@ -38,6 +38,7 @@ default = []
 wry-host = [
     "dep:ncui-webview-wry",
     "ncui-webview-wry/wry-engine",
+    "ncui-webview-wry/parented-dialogs",
     "global-shortcuts",
     "native-menu",
     "dialogs",
@@ -69,6 +70,9 @@ ncui-webview = { workspace = true }
 ncui-webview-child = { workspace = true }
 ncui-webview-wry = { workspace = true, optional = true }
 ncui-gpu = { workspace = true }
+ncui-video-surface = { path = "../ncui-video-surface" }
+ncui-audio-output = { path = "../ncui-audio-output" }
+ncui-sidecar = { path = "../ncui-sidecar" }
 # Optional: only a build that links the GPUI native window host needs it.
 ncui-gpui = { workspace = true, optional = true }
 # Optional: only the island surface draws anything.
@@ -91,3 +95,7 @@ tracing = { workspace = true }
 gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest"] }
 ncui-gpui = { workspace = true, features = ["gpui-engine"] }
 ncui-webview-wry = { workspace = true, features = ["wry-engine"] }
+# The video-surface compositing proof presents into a real host window and reads
+# the composited screen back.
+ncui-video-surface = { path = "../ncui-video-surface" }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }

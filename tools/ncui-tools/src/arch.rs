@@ -11,16 +11,20 @@
 //! ncui-state         (1)   │
 //! ncui-scheduler     (1)   │
 //! ncui-a11y          (1)  ─┤
-//! ncui-abi           (1)  ─┘
+//! ncui-abi           (1)   │
+//! ncui-sidecar       (1)  ─┘ sidecar process supervision: needs only core
 //! ncui-workers       (2)  worker runtime: needs the scheduler and observability
 //! ncui-webview       (2)  webview host policy
 //! ncui-app           (2)  the application layer: manifest and loopback asset server
 //! ncui-native        (2)  native capabilities behind the capability model
 //! ncui-component     (2)  the component host: bounded WASM execution behind the ABI
 //! ncui-gpu           (2)  compositing boundary's decision logic
-//! ncui-webview-wry   (3)  ─┐ platform adapters: a layer-2 port over a real library
-//! ncui-gpu-renderer  (3)  ─┘
+//! ncui-webview-wry   (3)  ─┐
+//! ncui-gpu-renderer  (3)   │ platform adapters: a layer-2 port over a real library
+//! ncui-video-surface (3)   │
+//! ncui-audio-output  (3)  ─┘
 //! ncui-runtime       (4)  composition: wires every subsystem together
+//! ncui-web-shell     (4)  shell composition over the renderer, never the runtime
 //! ncui-cli           (5)  user-facing entry point
 //! ncui-bench         (5)  measurement harness
 //! ```
@@ -53,6 +57,7 @@ pub const LAYERS: &[(&str, u8)] = &[
     ("ncui-a11y", 1),
     ("ncui-abi", 1),
     ("ncui-scheduler", 1),
+    ("ncui-sidecar", 1),
     ("ncui-workers", 2),
     ("ncui-webview", 2),
     ("ncui-webview-child", 1),
@@ -66,11 +71,16 @@ pub const LAYERS: &[(&str, u8)] = &[
     ("ncui-webview-wry", 3),
     ("ncui-gpu-renderer", 3),
     ("ncui-gpui", 3),
+    ("ncui-video-surface", 3),
+    ("ncui-audio-output", 3),
     ("ncui-runtime", 4),
     // Layer 4 also holds the kit bridge: it implements ncui-gpui's provider contract over
     // the nc-ui-kit widget library and is wired into composition by the CLI, never by the
     // runtime, so the two layer-4 crates never depend on each other.
     ("ncui-kit-providers", 4),
+    // The web shell composes the renderer and GPU decision layer into a standalone shell;
+    // it sits beside the runtime at layer 4 and never depends on it.
+    ("ncui-web-shell", 4),
     ("ncui-cli", 5),
     ("ncui-bench", 5),
 ];

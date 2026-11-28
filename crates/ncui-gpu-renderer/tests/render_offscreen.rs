@@ -68,9 +68,14 @@ fn a_drawn_frame_contains_the_pixels_it_was_asked_to_draw() {
     };
     let size = SurfaceSize::new(64, 64);
     let target = OffscreenTarget::new(device.wgpu_device(), size);
-    let pipeline = QuadPipeline::new(device.wgpu_device(), wgpu::TextureFormat::Rgba8Unorm);
+    let pipeline = QuadPipeline::new(
+        device.wgpu_device(),
+        device.queue(),
+        wgpu::TextureFormat::Rgba8Unorm,
+    );
 
     let frame = Frame {
+        custom_islands: Vec::new(),
         clear_colour: [0, 0, 0, 255],
         islands: vec![IslandRect {
             x: 16.0,
@@ -115,9 +120,14 @@ fn an_empty_frame_clears_the_target_and_draws_nothing() {
     };
     let size = SurfaceSize::new(32, 32);
     let target = OffscreenTarget::new(device.wgpu_device(), size);
-    let pipeline = QuadPipeline::new(device.wgpu_device(), wgpu::TextureFormat::Rgba8Unorm);
+    let pipeline = QuadPipeline::new(
+        device.wgpu_device(),
+        device.queue(),
+        wgpu::TextureFormat::Rgba8Unorm,
+    );
 
     let frame = Frame {
+        custom_islands: Vec::new(),
         clear_colour: [10, 20, 30, 255],
         islands: Vec::new(),
     };

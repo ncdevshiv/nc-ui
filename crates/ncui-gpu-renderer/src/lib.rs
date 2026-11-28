@@ -39,11 +39,14 @@ pub mod glyphs;
 pub mod island;
 pub mod render;
 pub mod surface;
+pub mod wire_v2;
 
 #[cfg(feature = "text-shaping")]
 pub mod atlas;
+pub mod bitmap;
 #[cfg(feature = "text-shaping")]
 pub mod text;
+pub mod text_layout;
 
 pub use device::{DeviceError, DeviceSupervisor, GpuDevice};
 pub use frame::{Frame, FrameError, IslandRect};

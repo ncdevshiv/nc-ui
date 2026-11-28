@@ -1,6 +1,6 @@
 # Remaining work
 
-The registry records 77 tracked features: 76 complete, 1 absent. This file is the plan for the
+The registry records 84 tracked features: 83 complete, 1 absent. This file is the plan for the
 one that remains, and records what building it needs — and, below, what the ones that used to
 remain needed, because the reasoning that moved them is worth keeping.
 

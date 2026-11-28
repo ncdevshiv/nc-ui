@@ -127,6 +127,7 @@ This gives ZCode's Browser tool a working native port immediately — the browse
 5. `ncui.cdp.send` (requiring `Capability::Cdp`) carries the command through the window's backend and returns the endpoint's `result`; the page-side `__cdpSend` relay remains for pages that want to observe the traffic.
 6. `CdpError` is engine-neutral and `WebViewBackend::cdp_send` returns it directly. Runtime dispatch, screenshot/PDF capture, JSON-RPC, and recognized IPC codecs preserve the stable `cdp_*` code instead of collapsing every failure to a conflict.
 7. WebKitGTK has no Chromium CDP endpoint. Non-Windows engines return `cdp_platform_unsupported` without waiting for a port file that cannot exist; the real Linux inspector remains available through the separate devtools methods.
+8. Interactive-test input uses the same page-targeted CDP channel. `Input.dispatchMouseEvent` and `Input.dispatchKeyEvent` are the supported injection path on Windows because OS-level synthesized input does not reliably reach WebView2's embedded browser window; there is no supported synthetic-input side door. `crates/ncui-runtime/tests/cdp_window_isolation.rs` carries the helper and a live click proof.
 
 This gives ZCode the CDP protocol it expects on Windows, with no `unsafe` code and no policy exception. Linux's refusal is explicit rather than presented as CDP support, and one window's page commands cannot silently execute in another window.
 

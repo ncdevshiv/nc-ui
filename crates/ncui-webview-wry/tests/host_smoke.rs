@@ -30,3 +30,20 @@ fn a_host_can_be_created_on_a_machine_with_a_display() {
         );
     }
 }
+
+#[cfg(feature = "parented-dialogs")]
+#[test]
+fn a_live_host_exposes_a_window_parented_confirmation_surface() {
+    let host = ncui_webview_wry::WindowHost::new();
+    if host.is_alive() {
+        assert!(
+            host.confirmation().is_some(),
+            "a live parented-dialogs host must be able to ask the engine for its confirmation surface"
+        );
+    } else {
+        assert!(
+            host.last_error().is_some(),
+            "a host that did not come up must say why"
+        );
+    }
+}

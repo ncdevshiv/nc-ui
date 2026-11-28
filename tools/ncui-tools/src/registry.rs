@@ -329,6 +329,105 @@ pub struct Feature {
     pub evidence: Evidence,
     /// Per-platform state.
     pub platforms: BTreeMap<String, PlatformState>,
+    /// When and where this feature's evidence last actually executed, written by the gate.
+    ///
+    /// Optional because a registry written before provenance existed is still readable;
+    /// its entries simply degrade to stale — "never recorded" is the oldest possible age.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ExecutionProvenance>,
+}
+
+/// When and where a feature's evidence last executed.
+///
+/// The gate writes this after a test leg passes. A registry entry whose `verified`
+/// citations never execute is exactly the lie this field exists to catch: the citation
+/// looks alive while the test behind it is compiled out, skipped, or long rotten.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionProvenance {
+    /// ISO-8601 UTC instant of the execution, `YYYY-MM-DDTHH:MM:SSZ`. One fixed shape,
+    /// because a provenance field that accepts any spelling accepts any typo.
+    pub last_executed: String,
+    /// The machine class the execution happened on, `<os>-<arch>` (e.g. `windows-x86_64`).
+    /// Provenance without a machine is a claim without a jurisdiction.
+    pub machine_class: String,
+}
+
+/// After this many days without re-execution, a complete feature's effective status
+/// degrades to stale. Thirty days is long enough that a feature re-verified by every gate
+/// run never degrades spuriously, and short enough that a silently broken test cannot hide
+/// behind a citation for a quarter.
+pub const STALE_AFTER_DAYS: u64 = 30;
+
+/// The status a feature effectively has, once execution provenance is taken into account.
+///
+/// `Stale` is deliberately not a stored status — it is derived. Storing it would let an
+/// author write "stale" by hand and the degradation would be a choice rather than a fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectiveStatus {
+    /// Implemented and its evidence executed recently enough to trust the citation.
+    Complete,
+    /// The feature claims completeness, but its evidence is too old or never recorded.
+    Stale,
+    /// Not implemented; honest and acceptable.
+    Absent,
+}
+
+/// Days since the civil epoch, Howard Hinnant's algorithm. The provenance format is fixed
+/// and machine-written, so a full date library would be weight without a reason.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Parses the fixed provenance instant `YYYY-MM-DDTHH:MM:SSZ` into seconds since the Unix
+/// epoch. Anything outside the one shape is not a timestamp this system wrote.
+#[must_use]
+pub fn parse_execution_instant(text: &str) -> Option<i64> {
+    let digits: Vec<u32> = text
+        .split(['-', 'T', ':', 'Z'])
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse().ok())
+        .collect::<Option<Vec<_>>>()?;
+    if digits.len() != 6 || text.len() != 20 || !text.ends_with('Z') {
+        return None;
+    }
+    let (y, mo, d, h, mi, sec) = (
+        i64::from(digits[0]),
+        i64::from(digits[1]),
+        i64::from(digits[2]),
+        i64::from(digits[3]),
+        i64::from(digits[4]),
+        i64::from(digits[5]),
+    );
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || sec > 60 {
+        return None;
+    }
+    Some(days_from_civil(y, mo, d) * 86_400 + h * 3600 + mi * 60 + sec)
+}
+
+/// The effective status of `feature` at `now` (seconds since the Unix epoch).
+#[must_use]
+pub fn effective_status(feature: &Feature, now: i64) -> EffectiveStatus {
+    if feature.status == FeatureStatus::Absent {
+        return EffectiveStatus::Absent;
+    }
+    let Some(execution) = &feature.execution else {
+        return EffectiveStatus::Stale;
+    };
+    let Some(instant) = parse_execution_instant(&execution.last_executed) else {
+        return EffectiveStatus::Stale;
+    };
+    if now.saturating_sub(instant) > (STALE_AFTER_DAYS * 86_400).cast_signed() {
+        EffectiveStatus::Stale
+    } else {
+        EffectiveStatus::Complete
+    }
 }
 
 /// The registry document.
@@ -364,6 +463,15 @@ pub struct PlatformGap {
     pub platform: String,
 }
 
+/// A complete feature whose evidence is too old to trust.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleEntry {
+    /// The feature whose execution provenance degraded.
+    pub feature_id: String,
+    /// Why it degraded: never recorded, malformed instant, or the age in days.
+    pub reason: String,
+}
+
 /// The result of validating a registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Validation {
@@ -371,6 +479,10 @@ pub struct Validation {
     pub violations: Vec<RegistryViolation>,
     /// Outstanding platform verification: reported, not blocking.
     pub platform_gaps: Vec<PlatformGap>,
+    /// Complete features whose evidence did not execute recently enough: reported, not
+    /// blocking. Blocking would deadlock the gate — provenance can only be written by a
+    /// gate that passes — so degradation is surfaced everywhere the gaps are instead.
+    pub stale_entries: Vec<StaleEntry>,
 }
 
 impl Validation {
@@ -379,6 +491,45 @@ impl Validation {
     pub const fn is_clean(&self) -> bool {
         self.violations.is_empty()
     }
+}
+
+/// Why a complete feature's evidence is too old to trust, or `None` when it is fresh.
+///
+/// The reason is part of the report: "stale" without a cause would send every reader back
+/// to the timestamp by hand, which is the kind of friction that gets reports ignored.
+fn stale_reason(feature: &Feature, now: i64) -> Option<String> {
+    if effective_status(feature, now) != EffectiveStatus::Stale {
+        return None;
+    }
+    match &feature.execution {
+        None => Some("evidence never recorded as executed".to_owned()),
+        Some(execution) => match parse_execution_instant(&execution.last_executed) {
+            None => Some(format!(
+                "execution instant `{}` is not the machine-written shape",
+                execution.last_executed
+            )),
+            Some(instant) => Some(format!(
+                "evidence last executed {} days ago on {}",
+                now.saturating_sub(instant) / 86_400,
+                execution.machine_class
+            )),
+        },
+    }
+}
+
+/// Duplicate feature ids, which must be unique for every id-keyed rule to mean anything.
+fn duplicate_id_violations(registry: &Registry) -> Vec<RegistryViolation> {
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    for feature in &registry.features {
+        *seen.entry(feature.id.as_str()).or_insert(0) += 1;
+    }
+    seen.into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(id, count)| RegistryViolation {
+            feature_id: id.to_owned(),
+            message: format!("feature id appears {count} times; ids must be unique"),
+        })
+        .collect()
 }
 
 /// Validates a registry against the rules in spec 42 and spec 80.
@@ -390,6 +541,10 @@ impl Validation {
 pub fn validate(registry: &Registry, repository_root: Option<&std::path::Path>) -> Validation {
     let mut violations = Vec::new();
     let mut platform_gaps = Vec::new();
+    let mut stale_entries = Vec::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |span| span.as_secs().cast_signed());
 
     if registry.schema_version != 1 {
         violations.push(RegistryViolation {
@@ -409,18 +564,7 @@ pub fn validate(registry: &Registry, repository_root: Option<&std::path::Path>) 
         });
     }
 
-    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
-    for feature in &registry.features {
-        *seen.entry(feature.id.as_str()).or_insert(0) += 1;
-    }
-    for (id, count) in seen {
-        if count > 1 {
-            violations.push(RegistryViolation {
-                feature_id: id.to_owned(),
-                message: format!("feature id appears {count} times; ids must be unique"),
-            });
-        }
-    }
+    violations.extend(duplicate_id_violations(registry));
 
     for feature in &registry.features {
         if !is_valid_feature_id(&feature.id) {
@@ -447,6 +591,13 @@ pub fn validate(registry: &Registry, repository_root: Option<&std::path::Path>) 
         }
 
         validate_evidence(feature, repository_root, &mut violations);
+
+        if let Some(reason) = stale_reason(feature, now) {
+            stale_entries.push(StaleEntry {
+                feature_id: feature.id.clone(),
+                reason,
+            });
+        }
 
         let mut verified_anywhere = false;
         for platform in PLATFORMS {
@@ -502,6 +653,7 @@ pub fn validate(registry: &Registry, repository_root: Option<&std::path::Path>) 
     Validation {
         violations,
         platform_gaps,
+        stale_entries,
     }
 }
 
@@ -690,6 +842,7 @@ mod tests {
                 api_review: EvidenceItem::verified("docs/adr/ADR-012-dependency-policy.md"),
             },
             platforms: platforms_verified(),
+            execution: None,
         }
     }
 
@@ -787,10 +940,90 @@ mod tests {
             crates: Vec::new(),
             evidence: Evidence::all_optional(),
             platforms: BTreeMap::new(),
+            execution: None,
         };
         let result = validate(&registry_of(vec![feature]), None);
         assert!(result.is_clean(), "{:?}", result.violations);
         assert!(result.platform_gaps.is_empty());
+    }
+
+    /// A feature whose evidence executed moments ago. The far-future instant keeps the
+    /// test deterministic: it cannot age past the stale threshold in any plausible lifetime
+    /// of this codebase.
+    fn freshly_executed_feature(id: &str) -> Feature {
+        let mut feature = fully_evidenced_feature(id);
+        feature.execution = Some(ExecutionProvenance {
+            last_executed: "2999-01-01T00:00:00Z".to_owned(),
+            machine_class: "windows-x86_64".to_owned(),
+        });
+        feature
+    }
+
+    #[test]
+    fn a_deliberately_staled_entry_degrades() {
+        let mut feature = fully_evidenced_feature("core.errors");
+        feature.execution = Some(ExecutionProvenance {
+            last_executed: "1970-01-01T00:00:00Z".to_owned(),
+            machine_class: "windows-x86_64".to_owned(),
+        });
+        let result = validate(&registry_of(vec![feature]), None);
+        assert!(
+            result
+                .stale_entries
+                .iter()
+                .any(|entry| entry.feature_id == "core.errors"
+                    && entry.reason.contains("days ago")),
+            "a 1970 execution must degrade: {:?}",
+            result.stale_entries
+        );
+        // Staleness is reported rather than blocking: provenance can only be written by a
+        // gate that passes, so a blocking rule would deadlock its own remedy.
+        assert!(result.is_clean(), "{:?}", result.violations);
+    }
+
+    #[test]
+    fn never_recorded_and_fresh_entries_degrade_or_hold_as_their_provenance_says() {
+        let result = validate(
+            &registry_of(vec![
+                fully_evidenced_feature("core.errors"),
+                freshly_executed_feature("core.capabilities"),
+            ]),
+            None,
+        );
+        assert!(
+            result
+                .stale_entries
+                .iter()
+                .any(|entry| entry.feature_id == "core.errors"
+                    && entry.reason.contains("never recorded")),
+            "an entry without provenance must degrade: {:?}",
+            result.stale_entries
+        );
+        assert!(
+            !result
+                .stale_entries
+                .iter()
+                .any(|entry| entry.feature_id == "core.capabilities"),
+            "a fresh entry must hold: {:?}",
+            result.stale_entries
+        );
+    }
+
+    #[test]
+    fn the_machine_written_instant_shape_is_the_only_one_accepted() {
+        assert_eq!(
+            parse_execution_instant("2026-11-28T14:32:05Z"),
+            Some(days_from_civil(2026, 11, 28) * 86_400 + 14 * 3600 + 32 * 60 + 5)
+        );
+        for malformed in [
+            "2026-11-28 14:32:05",
+            "2026-11-28T14:32:05",
+            "28.11.2026",
+            "not a date",
+            "2026-13-28T14:32:05Z",
+        ] {
+            assert_eq!(parse_execution_instant(malformed), None, "{malformed}");
+        }
     }
 
     #[test]

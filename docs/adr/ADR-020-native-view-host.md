@@ -210,5 +210,12 @@ root window without a page present (`crates/ncui-runtime/tests/native_entry_laun
 The composition root installs the kit's asset source through
 `GpuiHostFactory::with_asset_source`, so provider SVG assets resolve in hosted windows —
 the plumbing is proven headlessly in `crates/ncui-gpui`'s lib tests and end to end by the
-display-gated `the_asset_source_reaches_the_running_application`. What genuinely remains
-open is platform coverage: neither Linux nor macOS has been verified.
+display-gated `the_asset_source_reaches_the_running_application`. Native windows are born
+with a trusted-service seam when the runtime offers services: the registry constructs it
+through `TrustedServiceSeamFactory` with that window's identity and narrowed grant closed
+over, and the production runtime installs an implementation over the application command
+table. The integration coverage proves the trust boundary rather than asserting it —
+an allowed service succeeds, a narrowed-away capability is refused as
+`capability_denied`, an unknown service is refused, and runtime-internal or page-owned
+commands stay unreachable. What genuinely remains open is platform coverage: neither
+Linux nor macOS has been verified.

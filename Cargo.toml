@@ -92,6 +92,9 @@ wgpu = { version = "29", default-features = false, features = [
     "metal",
     "vulkan",
     "gles",
+    # The browser backend: inert on native targets (wgpu gates per-platform
+    # internally), required for the ADR-021 web shell on wasm32.
+    "webgpu",
 ] }
 # The text layout path. `rustybuzz` is a pure-Rust port of HarfBuzz and `ttf-parser` is
 # its font reader; neither performs FFI, so the `unsafe_code = "forbid"` ban holds. ADR-012

@@ -59,7 +59,20 @@ impl std::error::Error for DeviceError {}
 /// A trait rather than the concrete `wgpu::Device` for two reasons: the recovery path can
 /// then be tested on a machine with no GPU, and a second backend could be added without
 /// changing the supervisor that owns the device.
-pub trait GpuDevice: Send + Sync + fmt::Debug {
+/// Thread-safety follows the platform: native devices move between threads,
+/// while browser objects on wasm32 are single-threaded by platform design.
+/// The bound is one named concept so the cfg lives in exactly one place.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait ThreadSafe: Send + Sync {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send + Sync> ThreadSafe for T {}
+/// wasm32: the browser is single-threaded; the bound is honestly empty.
+#[cfg(target_arch = "wasm32")]
+pub trait ThreadSafe {}
+#[cfg(target_arch = "wasm32")]
+impl<T> ThreadSafe for T {}
+
+pub trait GpuDevice: ThreadSafe + fmt::Debug {
     /// Whether the device is still usable.
     fn is_alive(&self) -> bool;
 
@@ -79,13 +92,20 @@ pub trait GpuDevice: Send + Sync + fmt::Debug {
 /// driver, and the driver answers on its own schedule. The trait returns a boxed future
 /// rather than being an `async fn` so that it stays usable as a trait object — the
 /// supervisor holds one behind a `Box`.
-pub trait DeviceFactory<D: GpuDevice>: Send + Sync {
+pub trait DeviceFactory<D: GpuDevice>: ThreadSafe {
     /// Creates a device.
     fn create(&self) -> DeviceFuture<'_, D>;
 }
 
 /// The future a [`DeviceFactory`] returns.
+/// wgpu's futures are `Send` everywhere except wasm32, where the browser is
+/// single-threaded — the bound follows the target rather than pretending the
+/// web platform is something it is not.
+#[cfg(not(target_arch = "wasm32"))]
 pub type DeviceFuture<'a, D> = Pin<Box<dyn Future<Output = Result<D, DeviceError>> + Send + 'a>>;
+/// The wasm32 variant: same future, honestly un-`Send`.
+#[cfg(target_arch = "wasm32")]
+pub type DeviceFuture<'a, D> = Pin<Box<dyn Future<Output = Result<D, DeviceError>> + 'a>>;
 
 /// A future that is already resolved, for factories that do not need to wait.
 ///
@@ -310,14 +330,36 @@ impl DeviceFactory<WgpuDevice> for WgpuDeviceFactory {
             instance_desc.backends = wgpu::Backends::PRIMARY;
             let instance = wgpu::Instance::new(instance_desc);
 
-            let adapter = instance
-                .request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::HighPerformance,
-                    compatible_surface: None,
-                    force_fallback_adapter: false,
-                })
-                .await
-                .map_err(|_| DeviceError::NoAdapter)?;
+            // Hardware first; when the machine has none, wgpu's own software rasterizer
+            // (WARP on Windows, llvmpipe on Linux) is the fallback rather than a refusal.
+            // The fallback is a real device executing the same shaders — the pipeline is
+            // genuinely tested, which is the whole point: a test that silently skips on a
+            // GPU-less runner proves nothing. `NCUI_GPU_FORCE_SOFTWARE` pins the software
+            // path so the fallback itself is provable on a machine that has a GPU.
+            let force_software = std::env::var_os("NCUI_GPU_FORCE_SOFTWARE").is_some();
+            let mut adapter = if force_software {
+                None
+            } else {
+                instance
+                    .request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::HighPerformance,
+                        compatible_surface: None,
+                        force_fallback_adapter: false,
+                    })
+                    .await
+                    .ok()
+            };
+            if adapter.is_none() {
+                adapter = instance
+                    .request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::LowPower,
+                        compatible_surface: None,
+                        force_fallback_adapter: true,
+                    })
+                    .await
+                    .ok();
+            }
+            let adapter = adapter.ok_or(DeviceError::NoAdapter)?;
 
             let (device, queue) = adapter
                 .request_device(&wgpu::DeviceDescriptor {

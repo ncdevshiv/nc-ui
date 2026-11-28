@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>ncui web shell gate</title></head>
+<body style="margin:0">
+<canvas id="gpu" width="320" height="200"></canvas>
+<script type="module">
+  import init, { attach, input_state } from './ncui_web_shell.js';
+  const status = { attached: false, error: null };
+  window.__ncui_status = status;
+  window.ncui_input_state = input_state;
+  try {
+    await init();
+    await attach(document.getElementById('gpu'));
+    status.attached = true;
+  } catch (e) {
+    status.error = String(e);
+  }
+  status.webgpu = !!navigator.gpu;
+</script>
+</body>
+</html>

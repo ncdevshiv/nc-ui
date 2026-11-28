@@ -162,6 +162,7 @@ mod enabled {
                 // through them. A black clear would paste a rectangle over the document.
                 clear_colour: [0, 0, 0, 0],
                 islands: request.rectangles(),
+                custom_islands: Vec::new(),
             };
             let pixels = render_to_pixels(device, size, &frame).ok()?;
             self.draw_text(pixels, request)

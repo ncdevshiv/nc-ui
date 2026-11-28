@@ -1,0 +1,7 @@
+bin/
+node_modules/
+web/ncui_web_shell*
+package-lock.json
+*.log
+dist/
+web/ncui-font.ttf

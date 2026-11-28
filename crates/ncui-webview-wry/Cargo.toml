@@ -59,6 +59,9 @@ tray-icon = ["wry-engine", "dep:tray-icon"]
 # Enables manifest-declared native menu bars. The menu is built and attached on the engine's
 # thread, beside the native window it belongs to.
 native-menu = ["wry-engine", "dep:muda"]
+# Enables destructive-operation confirmations parented to the window that asked. The dialog
+# is shown on the engine thread, where the real window object can be used as its parent.
+parented-dialogs = ["wry-engine", "dep:rfd"]
 [dependencies]
 ncui-webview = { workspace = true }
 ncui-webview-child = { workspace = true }
@@ -72,6 +75,8 @@ tao = { version = "0.33", optional = true, default-features = false, features = 
 wgpu = { workspace = true, optional = true }
 tray-icon = { workspace = true, optional = true }
 muda = { workspace = true, optional = true }
+rfd = { workspace = true, optional = true }
+
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", optional = true }

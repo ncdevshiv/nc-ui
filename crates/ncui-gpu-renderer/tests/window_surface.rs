@@ -70,11 +70,12 @@ fn a_frame_can_be_presented_to_a_window_surface() {
         return;
     }
 
-    let pipeline = QuadPipeline::new(device.wgpu_device(), format);
+    let pipeline = QuadPipeline::new(device.wgpu_device(), device.queue(), format);
     let plan = RenderPlan::from_frame(
         &ncui_gpu_renderer::frame::Frame {
             clear_colour: [0, 0, 0, 255],
             islands: Vec::new(),
+            custom_islands: Vec::new(),
         },
         size,
     )

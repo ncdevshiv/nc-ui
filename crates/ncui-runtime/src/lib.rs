@@ -48,6 +48,7 @@
 
 pub mod agent;
 pub mod application;
+pub(crate) mod audio;
 pub mod commands;
 pub mod components;
 pub mod consent;
@@ -61,17 +62,22 @@ pub mod icon;
 pub mod islands;
 pub mod mcp;
 pub mod native;
+mod native_services;
 pub mod page_state;
 pub mod reload;
 pub mod rpc;
+pub mod stream;
 pub mod transport;
+pub(crate) mod video_surface;
 pub mod window;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use crate::devtools::DevTools;
-use ncui_core::{Capability, CapabilitySet, CorrelationId, ErrorKind, Limits, NcError, Result};
+use ncui_core::{
+    Capability, CapabilitySet, CorrelationId, ErrorKind, Limits, NcError, Result, WindowId,
+};
 use ncui_observability::logring::LogRing;
 use ncui_observability::metrics::MetricsRegistry;
 use ncui_scheduler::Scheduler;
@@ -105,6 +111,10 @@ pub struct Runtime {
     pub workers: Arc<WorkerPool>,
     /// The window surface. Empty until a host is installed.
     pub windows: window::Windows,
+    /// The supervised child processes — sidecars the host spawns, talks to,
+    /// and never orphans. Dropping the runtime drops the supervisor, and the
+    /// job object is the guarantee even when the drop never runs.
+    pub sidecars: ncui_sidecar::Supervisor,
     /// The commands a page may call.
     pub page_commands: PageCommands,
     /// The capabilities every page is granted when its window opens.
@@ -152,13 +162,36 @@ pub struct Runtime {
     started: std::time::Instant,
     /// The host surface that obtains real approval for destructive operations.
     consent_prompter: Option<Arc<dyn consent::ConsentPrompter>>,
+    /// Whether the installed prompter is the embedder's own boundary rather than the
+    /// runtime-default native prompt. A custom boundary decides every approval, even
+    /// for a window that could parent its own prompt: a test or embedding that
+    /// substitutes the boundary expects the substitute to be asked.
+    consent_prompter_custom: bool,
     /// Minted consent tokens by nonce. The ledger is the authority: a token whose
     /// nonce is absent here was not minted by this runtime and is refused, however
     /// well-formed its JSON is.
     consent_minted: HashMap<u128, ConsentTokenBinding>,
     /// Nonces already spent. A nonce here authorizes nothing further.
     consent_spent: HashSet<u128>,
+    /// Page calls parked while a person answers their consent prompt off-lock.
+    ///
+    /// `pump_pages` runs under `&mut Runtime` — which *is* the runtime lock in the
+    /// shared-transport topology — so a prompt waited on in place would park every
+    /// other caller of this runtime for the answer's whole life. The parked call
+    /// resumes when the worker's answer lands on `consent_answers`.
+    pending_page_consents: HashMap<u64, window::PendingPageConsent>,
+    /// The source of keys for `pending_page_consents`.
+    next_pending_consent: u64,
+    /// Prompt answers arriving from off-lock workers, drained by `pump_pages`.
+    consent_answers: ConsentAnswerQueue,
+    /// The page call whose response the current message must not send — it was
+    /// parked at the consent gate inside that message's own dispatch.
+    deferred_page_call: Option<u64>,
 }
+
+/// A prompt answer as an off-lock worker delivers it: the parked call's key
+/// and the person's approval (or the prompt's own failure).
+type ConsentAnswerQueue = Arc<Mutex<VecDeque<(u64, Result<bool>)>>>;
 
 /// The binding the runtime recorded at mint time for one nonce.
 #[derive(Debug, Clone)]
@@ -222,6 +255,7 @@ impl Runtime {
             scheduler,
             workers,
             windows: window::Windows::new(),
+            sidecars: ncui_sidecar::Supervisor::new(),
             page_commands,
             page_grant,
             gpu: gpu::Gpu::new(),
@@ -232,8 +266,13 @@ impl Runtime {
             page_limiter: Arc::new(Mutex::new(page_limiter)),
             started: std::time::Instant::now(),
             consent_prompter: None,
+            consent_prompter_custom: false,
             consent_minted: HashMap::new(),
             consent_spent: HashSet::new(),
+            pending_page_consents: HashMap::new(),
+            next_pending_consent: 0,
+            consent_answers: Arc::new(Mutex::new(VecDeque::new())),
+            deferred_page_call: None,
         })
     }
 
@@ -250,6 +289,226 @@ impl Runtime {
     #[must_use]
     pub fn page_limiter(&self) -> Arc<Mutex<RateLimiter>> {
         Arc::clone(&self.page_limiter)
+    }
+
+    /// Pushes a producer's frame into a video surface, presenting the newest truth.
+    ///
+    /// This is the native half of the producer seam: frames arrive from whatever thread
+    /// the engine decodes on — the registry's exclusion is its own — and presentation
+    /// happens on this call because the producer owns time. The answer is the ring's
+    /// outcome: when it reports drops the producer is outrunning the display, which is
+    /// the producer's signal to slow down rather than the runtime's to buffer deeper.
+    ///
+    /// # Errors
+    ///
+    /// The registry's typed refusal when the window or surface does not exist, the
+    /// surface is torn down, or the presenter refuses the frame.
+    #[cfg(target_os = "windows")]
+    pub fn push_video_frame(
+        &self,
+        window: WindowId,
+        surface: u64,
+        frame: ncui_gpu::surface::Frame<ncui_video_surface::RgbaPixels>,
+    ) -> std::result::Result<ncui_gpu::surface::PushOutcome, video_surface::VideoSurfaceError> {
+        self.windows
+            .video_surfaces()
+            .push_frame(window, surface, frame)
+    }
+
+    /// The producer's own handle onto the video surface registry.
+    ///
+    /// Clone it once and the frame path never touches the runtime again: the
+    /// registry synchronizes itself, and the only exclusion a frame waits on
+    /// is the one serializing presentation against teardown — a correctness
+    /// requirement rather than contention with page traffic. Measured need:
+    /// sharing the runtime's lock with the pump cost a 1080p30 stream a p99
+    /// double its frame budget in the acceptance harness.
+    #[cfg(target_os = "windows")]
+    #[must_use]
+    pub fn video_surface_producer(&self) -> video_surface::VideoSurfaceProducer {
+        self.windows.video_surface_producer()
+    }
+
+    /// Drains the playback control intents a video surface's producer has not yet seen.
+    ///
+    /// Pull-shaped because the decode loop's cadence is the engine's own: a producer
+    /// drains when its iteration begins, and intents it finds are the truth since the
+    /// last iteration — never reordered, never coalesced, because a scrub's every position
+    /// is one the user asked for.
+    #[cfg(target_os = "windows")]
+    #[must_use]
+    pub fn drain_video_control(
+        &self,
+        window: WindowId,
+        surface: u64,
+    ) -> Vec<ncui_gpu::surface::ControlIntent> {
+        self.windows.video_surfaces().drain_control(window, surface)
+    }
+
+    /// The producer's own handle onto the audio stream registry.
+    ///
+    /// Clone it once, take the stream's ring, and the sample path never touches the
+    /// runtime again — the same convoy lesson the video acceptance harness measured:
+    /// hot media paths do not share locks with page traffic.
+    #[cfg(target_os = "windows")]
+    #[must_use]
+    pub fn audio_stream_producer(&self) -> audio::AudioStreamProducer {
+        self.windows.audio_stream_producer()
+    }
+
+    /// Creates an audio stream on a window: the device stream opens, the ring
+    /// starts empty, and the accounting begins counting honestly.
+    ///
+    /// This is the native half of the audio seam — the dispatch layer will drive
+    /// the same registry method when the page-facing seam lands, and diagnostics
+    /// need it regardless: a stream whose creation cannot be observed cannot be
+    /// evidence.
+    ///
+    /// # Errors
+    ///
+    /// The registry's typed refusal: the device missing, the format refused, or
+    /// the stream failing to start.
+    #[cfg(target_os = "windows")]
+    pub fn create_audio_stream(
+        &self,
+        window: WindowId,
+    ) -> std::result::Result<u64, audio::AudioStreamError> {
+        self.windows.audio_streams().create(window)
+    }
+
+    /// Tears an audio stream down — the device stream stops and the ring's
+    /// accounting closes.
+    ///
+    /// # Errors
+    ///
+    /// The registry's typed refusal when the stream does not exist.
+    #[cfg(target_os = "windows")]
+    pub fn teardown_audio_stream(
+        &self,
+        window: WindowId,
+        stream: u64,
+    ) -> std::result::Result<(), audio::AudioStreamError> {
+        self.windows.audio_streams().teardown(window, stream)
+    }
+
+    /// A stream's truth for diagnostics: the ring's loss accounting and the sync
+    /// reading the lip-sync measurement consumes.
+    #[cfg(target_os = "windows")]
+    #[must_use]
+    pub fn inspect_audio_stream(
+        &self,
+        window: WindowId,
+        stream: u64,
+    ) -> Option<(
+        ncui_gpu::audio::RingAccounting,
+        Option<ncui_audio_output::SyncReading>,
+    )> {
+        self.windows.audio_streams().inspect(window, stream)
+    }
+
+    /// Drains the playback control intents an audio stream's producer has not
+    /// yet seen — pull-shaped, never reordered, never coalesced.
+    #[cfg(target_os = "windows")]
+    #[must_use]
+    pub fn drain_audio_control(
+        &self,
+        window: WindowId,
+        stream: u64,
+    ) -> Vec<ncui_gpu::surface::ControlIntent> {
+        self.windows.audio_streams().drain_control(window, stream)
+    }
+
+    /// A video surface's truth for diagnostics: dropped frames, queued frames,
+    /// and the last presented frame's sequence — the video half of what the
+    /// lip-sync measurement reads.
+    #[cfg(target_os = "windows")]
+    #[must_use]
+    pub fn inspect_video_surface(
+        &self,
+        window: WindowId,
+        surface: u64,
+    ) -> Option<(u64, usize, Option<u64>)> {
+        self.windows.video_surfaces().inspect(window, surface)
+    }
+
+    /// Opens an event stream on a window: the subscription registers, and the
+    /// answer is the stream's id plus the producer's own sink.
+    ///
+    /// This is the host half of the streaming bridge: the application — or a
+    /// command handler that captured this runtime handle at registration —
+    /// opens the stream, hands the sink to whatever thread produces the
+    /// events, and the page receives them through `window.ncui.on(event)`. The
+    /// window the events target is explicit here; a page-initiated shape
+    /// composes this primitive with the caller-window mechanism every command
+    /// already has, which is composition rather than new machinery.
+    ///
+    /// Cancellation is three truths: `close_stream` explicitly, the window
+    /// dying implicitly, the runtime tearing down wholly. The producer reads
+    /// closure pull-shaped off the sink.
+    ///
+    /// # Errors
+    ///
+    /// A window that is not open is refused before any subscription exists —
+    /// a stream for nobody is a bug in the caller, not a stream.
+    pub fn open_stream(
+        &self,
+        window: WindowId,
+        event: &str,
+    ) -> std::result::Result<(u64, stream::StreamSink), NcError> {
+        if self.windows.native_window_handle(window).is_none() {
+            return Err(NcError::new(ErrorKind::NotFound {
+                kind: "window".to_owned(),
+                id: window.to_string(),
+            })
+            .operation("runtime::open_stream"));
+        }
+        let Some((id, state)) = self.windows.stream_subscriptions().open(window) else {
+            return Err(NcError::new(ErrorKind::Conflict {
+                reason: format!(
+                    "window {window} already owns {} open streams — the per-window budget exists so a page cannot own the pump",
+                    stream::MAX_STREAM_SUBSCRIPTIONS
+                ),
+            })
+            .operation("runtime::open_stream"));
+        };
+        let sink = stream::StreamSink::new(
+            self.windows.registry_handle(),
+            window,
+            event.to_owned(),
+            state,
+        );
+        Ok((id, sink))
+    }
+
+    /// Closes a stream explicitly. Answers whether the subscription existed —
+    /// cancelling something already gone is a truth the caller is owed rather
+    /// than a silent success.
+    #[must_use]
+    pub fn close_stream(&self, subscription: u64) -> bool {
+        self.windows.stream_subscriptions().close(subscription)
+    }
+
+    /// A stream's inspection truth: delivered count, failed count, whether it
+    /// is closed. `None` when the subscription does not exist.
+    #[must_use]
+    pub fn inspect_stream(&self, subscription: u64) -> Option<(u64, u64, bool)> {
+        self.windows.stream_subscriptions().counts(subscription)
+    }
+
+    /// The lock-free streaming handle a command handler captures at
+    /// registration time.
+    ///
+    /// A page's invoke is served on the pump thread while the runtime lock is
+    /// held, so a handler that captured the runtime would deadlock reaching
+    /// for it. The factory carries only interior state — subscriptions and the
+    /// shared window registry — so a handler can open, close, and inspect
+    /// streams from inside its own execution. This is the composition point
+    /// for page-initiated streaming: register with
+    /// [`Runtime::register_page_command_for_caller_window`], read
+    /// `params.window`, open the stream here, answer the subscription id.
+    #[must_use]
+    pub fn stream_factory(&self) -> stream::StreamFactory {
+        self.windows.stream_factory()
     }
 
     /// The capabilities every new page is granted.
@@ -306,6 +565,46 @@ impl Runtime {
             .register(name, requires, summary, handler)
     }
 
+    /// Registers a page command that is told which window's page invoked it.
+    ///
+    /// The window id arrives in `params.window`, injected by the runtime from the
+    /// call's origin rather than the page's claim — the composition point for
+    /// page-initiated streaming: the handler reads the window, opens a stream on
+    /// it through a runtime handle captured at registration, and answers the
+    /// subscription id.
+    ///
+    /// # Errors
+    ///
+    /// As [`Runtime::register_page_command`]: a name the action table refuses, or
+    /// required capabilities the page grant does not cover.
+    pub fn register_page_command_for_caller_window<F>(
+        &self,
+        name: &str,
+        requires: CapabilitySet,
+        summary: impl Into<String>,
+        handler: F,
+    ) -> std::result::Result<CommandRegistration, CommandRegistrationError>
+    where
+        F: Fn(serde_json::Value) -> std::result::Result<serde_json::Value, ncui_webview::SeamError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let missing = CapabilitySet::from_iter_caps(
+            requires
+                .iter()
+                .filter(|capability| !self.page_grant.contains(*capability)),
+        );
+        if !missing.is_empty() {
+            return Err(CommandRegistrationError::PageNotGranted {
+                name: name.to_owned(),
+                missing,
+            });
+        }
+        self.page_commands
+            .register_for_caller_window(name, requires, summary, handler)
+    }
+
     /// Delivers one application-defined event to one window's page.
     ///
     /// This is the Rust half of `ncui.app.emit`: an embedding application calls it
@@ -324,7 +623,7 @@ impl Runtime {
     /// not exist.
     pub fn emit(
         &mut self,
-        window: ncui_core::WindowId,
+        window: WindowId,
         event: &str,
         payload: &serde_json::Value,
     ) -> Result<()> {
@@ -419,6 +718,18 @@ impl Runtime {
     /// surface before the window opens and its page can make its first request.
     pub fn set_consent_prompter(&mut self, prompter: Arc<dyn consent::ConsentPrompter>) {
         self.consent_prompter = Some(prompter);
+        self.consent_prompter_custom = true;
+    }
+
+    /// Installs the runtime-default native approval surface.
+    ///
+    /// The default yields to a window's own parented confirmation surface, because the
+    /// parented prompt is the same approval asked in the window the operation is about
+    /// rather than an orphaned dialog. A prompter installed through
+    /// [`Runtime::set_consent_prompter`] is the embedder's boundary and is always asked.
+    pub fn set_default_consent_prompter(&mut self, prompter: Arc<dyn consent::ConsentPrompter>) {
+        self.consent_prompter = Some(prompter);
+        self.consent_prompter_custom = false;
     }
 
     /// Installs the caller's window host, over the origins given.
@@ -445,8 +756,16 @@ impl Runtime {
         allowed_origins: &[ncui_webview::Origin],
     ) -> Result<Self> {
         let actions = self.page_commands.actions();
-        self.windows =
-            window::hosted_surface_with(factory, allowed_origins, &actions, self.page_grant);
+        self.windows = window::hosted_surface_with_services(
+            factory,
+            allowed_origins,
+            &actions,
+            self.page_grant,
+            Some(native_services::factory(
+                self.page_commands.clone(),
+                Arc::clone(&self.metrics),
+            )),
+        );
         Ok(self)
     }
 

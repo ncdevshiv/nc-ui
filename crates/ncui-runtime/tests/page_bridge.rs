@@ -18,7 +18,7 @@
 )]
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -26,18 +26,19 @@ use ncui_core::{
     Capability, CapabilitySet, CorrelationId, ErrorKind, Limits, LimitsBuilder, NcError,
 };
 use ncui_runtime::Runtime;
-use ncui_runtime::consent::{ConsentPrompter, ConsentRequest};
+use ncui_runtime::consent::{CONSENT_PROMPT_TITLE, ConsentPrompter, ConsentRequest};
 use ncui_runtime::dispatch::dispatch;
 use ncui_runtime::rpc::Request;
 use ncui_security::authz::ConsentToken;
 use ncui_webview::{
     ChildPageMessage, HostFactory, HostSeam, PageMessage, PageTarget, WebViewBackend,
+    WindowConfirmation,
 };
 use ncui_webview_child::{ChildWebviewId, ChildWebviewRequest};
 use serde_json::{Value, json};
 
 /// The state the test's engine shares with the test.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct EngineState {
     /// Messages the page has "sent", waiting to be polled.
     outgoing: Mutex<Vec<String>>,
@@ -53,8 +54,32 @@ struct EngineState {
     bounds: Mutex<BTreeMap<u64, ChildWebviewRequest>>,
     /// Children the parent engine closed.
     closed: Mutex<Vec<u64>>,
+    /// Confirmation prompts this window-owned surface has shown.
+    confirmations: Mutex<Vec<(String, String)>>,
+    /// Whether this engine can show a parented confirmation.
+    confirmation_enabled: AtomicBool,
+    /// The answer the test's person gives.
+    confirmation_answer: AtomicBool,
     /// The test engine's child identity source.
     next_child: AtomicU64,
+}
+
+impl Default for EngineState {
+    fn default() -> Self {
+        Self {
+            outgoing: Mutex::new(Vec::new()),
+            evaluated: Mutex::new(Vec::new()),
+            drags: Mutex::new(Vec::new()),
+            children: Mutex::new(BTreeMap::new()),
+            created: Mutex::new(Vec::new()),
+            bounds: Mutex::new(BTreeMap::new()),
+            closed: Mutex::new(Vec::new()),
+            confirmations: Mutex::new(Vec::new()),
+            confirmation_enabled: AtomicBool::new(false),
+            confirmation_answer: AtomicBool::new(true),
+            next_child: AtomicU64::new(0),
+        }
+    }
 }
 
 /// A page engine the test drives.
@@ -113,6 +138,39 @@ impl PageEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
     }
+
+    /// Gives this engine a parented confirmation surface.
+    fn enable_confirmation(&self) {
+        self.state
+            .confirmation_enabled
+            .store(true, Ordering::SeqCst);
+    }
+
+    /// The confirmation prompts this engine was asked to show.
+    fn confirmations(&self) -> Vec<(String, String)> {
+        self.state
+            .confirmations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// The test's window-owned confirmation surface.
+#[derive(Debug)]
+struct TestWindowConfirmation {
+    state: Arc<EngineState>,
+}
+
+impl WindowConfirmation for TestWindowConfirmation {
+    fn confirm(&self, title: &str, message: &str) -> Result<bool, String> {
+        self.state
+            .confirmations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((title.to_owned(), message.to_owned()));
+        Ok(self.state.confirmation_answer.load(Ordering::SeqCst))
+    }
 }
 
 impl WebViewBackend for PageEngine {
@@ -136,6 +194,17 @@ impl WebViewBackend for PageEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pop()?;
         Some(PageMessage::new(body))
+    }
+
+    fn confirmation(&self) -> Option<Box<dyn WindowConfirmation>> {
+        self.state
+            .confirmation_enabled
+            .load(Ordering::SeqCst)
+            .then(|| {
+                Box::new(TestWindowConfirmation {
+                    state: Arc::clone(&self.state),
+                }) as Box<dyn WindowConfirmation>
+            })
     }
 
     fn evaluate_script(&self, script: &str) -> bool {
@@ -393,9 +462,33 @@ impl ConsentPrompter for RecordingPrompter {
     }
 }
 
+/// A prompter that records the ask, then waits on the test's answer — the
+/// scripted person whose reading time the pump must not spend.
+struct GatedPrompter {
+    asked: std::sync::mpsc::Sender<()>,
+    answers: Mutex<std::sync::mpsc::Receiver<bool>>,
+}
+
+impl core::fmt::Debug for GatedPrompter {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GatedPrompter").finish_non_exhaustive()
+    }
+}
+
+impl ConsentPrompter for GatedPrompter {
+    fn confirm(&self, _request: &ConsentRequest) -> ncui_core::Result<bool> {
+        let _ = self.asked.send(());
+        let answers = self
+            .answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(answers.recv().unwrap_or(false))
+    }
+}
+
 fn runtime_with_page_grant_and_prompter(
     capabilities: &[Capability],
-    prompter: Arc<RecordingPrompter>,
+    prompter: Arc<dyn ConsentPrompter>,
 ) -> (Runtime, PageFactory) {
     let mut runtime = Runtime::start(Limits::default())
         .expect("runtime should start")
@@ -420,8 +513,21 @@ fn invoke_page(
         })
         .to_string(),
     );
-    assert_eq!(runtime.pump_pages(Duration::from_secs(0)), 1);
-    engine.scripts().pop().expect("the page receives an answer")
+    // A call that reaches the consent prompt parks rather than answering in
+    // place — the person is asked off the runtime lock — so pump until the
+    // answer lands: the first pass handles the message, later passes settle it.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        runtime.pump_pages(Duration::from_secs(0));
+        if let Some(script) = engine.scripts().last() {
+            return script.clone();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the page received no answer to {id}"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
 }
 
 fn page_subject(window: ncui_core::WindowId) -> String {
@@ -885,8 +991,10 @@ fn a_destructive_application_command_without_host_approval_fails_closed() {
 #[test]
 fn a_destructive_page_command_validates_and_spends_consent_tokens() {
     let prompter = Arc::new(RecordingPrompter::new(PromptReply::Approve));
-    let (mut runtime, factory) =
-        runtime_with_page_grant_and_prompter(&[Capability::FilesystemWrite], Arc::clone(&prompter));
+    let (mut runtime, factory) = runtime_with_page_grant_and_prompter(
+        &[Capability::FilesystemWrite],
+        Arc::clone(&prompter) as Arc<dyn ConsentPrompter>,
+    );
     let required = CapabilitySet::empty().with(Capability::FilesystemWrite);
     let executions = register_counting_write(&runtime);
     let owner = open_window(&mut runtime);
@@ -984,8 +1092,10 @@ fn a_destructive_page_command_validates_and_spends_consent_tokens() {
 #[test]
 fn host_approval_presents_the_exact_page_operation_before_it_runs() {
     let prompter = Arc::new(RecordingPrompter::new(PromptReply::Approve));
-    let (mut runtime, factory) =
-        runtime_with_page_grant_and_prompter(&[Capability::FilesystemWrite], Arc::clone(&prompter));
+    let (mut runtime, factory) = runtime_with_page_grant_and_prompter(
+        &[Capability::FilesystemWrite],
+        Arc::clone(&prompter) as Arc<dyn ConsentPrompter>,
+    );
     let required = CapabilitySet::empty().with(Capability::FilesystemWrite);
     let executions = register_counting_write(&runtime);
     let window = open_window(&mut runtime);
@@ -1046,12 +1156,57 @@ fn host_approval_presents_the_exact_page_operation_before_it_runs() {
 }
 
 #[test]
+fn a_page_approval_uses_the_window_parented_prompt_before_the_generic_host_prompt() {
+    let prompter = Arc::new(RecordingPrompter::new(PromptReply::Approve));
+    let (mut runtime, factory) = runtime_with_page_grant_and_prompter(
+        &[Capability::FilesystemWrite],
+        Arc::clone(&prompter) as Arc<dyn ConsentPrompter>,
+    );
+    // The runtime-default native prompt is what a parented window supersedes; a custom
+    // boundary would be asked instead, which the decline/fail tests below rely on.
+    let as_default: Arc<dyn ConsentPrompter> = prompter.clone();
+    runtime.set_default_consent_prompter(as_default);
+    let executions = register_counting_write(&runtime);
+    let _window = open_window(&mut runtime);
+    let engine = parent_engine(&factory, 0);
+    engine.enable_confirmation();
+
+    let answer = invoke_page(
+        &mut runtime,
+        &engine,
+        "parented-approval",
+        "write_note",
+        &json!({ "path": "note.txt", "text": "approved" }),
+    );
+
+    assert!(
+        answer.contains("\"ok\":true") && answer.contains("\"written\":true"),
+        "the parented approval should permit the operation: {answer}"
+    );
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert!(
+        prompter.requests().is_empty(),
+        "a window that can parent its prompt must not fall back to an unparented generic prompt"
+    );
+    let confirmations = engine.confirmations();
+    assert_eq!(confirmations.len(), 1);
+    assert_eq!(confirmations[0].0, CONSENT_PROMPT_TITLE);
+    assert!(
+        confirmations[0].1.contains("write_note")
+            && confirmations[0].1.contains("note.txt")
+            && confirmations[0].1.contains("approved"),
+        "the parented prompt must show the exact operation: {:?}",
+        confirmations[0].1
+    );
+}
+
+#[test]
 fn a_declined_or_failed_page_approval_never_runs_the_command() {
     for reply in [PromptReply::Decline, PromptReply::Fail] {
         let prompter = Arc::new(RecordingPrompter::new(reply));
         let (mut runtime, factory) = runtime_with_page_grant_and_prompter(
             &[Capability::FilesystemWrite],
-            Arc::clone(&prompter),
+            Arc::clone(&prompter) as Arc<dyn ConsentPrompter>,
         );
         let executions = register_counting_write(&runtime);
         let _window = open_window(&mut runtime);
@@ -1072,6 +1227,195 @@ fn a_declined_or_failed_page_approval_never_runs_the_command() {
         );
         assert_eq!(prompter.requests().len(), 1, "{reply:?} must be observable");
     }
+}
+
+#[test]
+fn a_consent_prompt_parks_the_call_not_the_pump() {
+    // The lock-hostage regression test the F2 arc measured: a prompt waited on
+    // under `&mut Runtime` parks every other caller for the answer's whole life.
+    // The pump must handle the next message while the person is still reading.
+    let (asked, asked_rx) = std::sync::mpsc::channel::<()>();
+    let (answer_tx, answer_rx) = std::sync::mpsc::channel::<bool>();
+    let prompter = Arc::new(GatedPrompter {
+        asked,
+        answers: Mutex::new(answer_rx),
+    });
+    let (mut runtime, factory) = runtime_with_page_grant_and_prompter(
+        &[Capability::FilesystemWrite, Capability::FilesystemRead],
+        prompter,
+    );
+    let executions = register_counting_write(&runtime);
+    let pinged = Arc::new(AtomicU64::new(0));
+    let observed = Arc::clone(&pinged);
+    let _ping = runtime
+        .register_page_command(
+            "ping",
+            CapabilitySet::empty().with(Capability::FilesystemRead),
+            "Ping",
+            move |_| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({ "pong": true }))
+            },
+        )
+        .expect("register a non-destructive page command");
+    let _window = open_window(&mut runtime);
+    let engine = parent_engine(&factory, 0);
+
+    // The destructive call parks: the person is asked by a worker, and the
+    // pump returns rather than spending the person's reading time.
+    engine.post(
+        &json!({
+            "id": "parked",
+            "action": "perform",
+            "name": "write_note",
+            "payload": { "path": "note.txt", "text": "first" }
+        })
+        .to_string(),
+    );
+    assert_eq!(runtime.pump_pages(Duration::from_secs(0)), 1);
+    asked_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the destructive call reaches the person");
+    assert!(
+        engine.scripts().is_empty(),
+        "the parked call has not been answered"
+    );
+    assert_eq!(
+        executions.load(Ordering::SeqCst),
+        0,
+        "consent has not run the handler"
+    );
+
+    // While the person decides, an unrelated call is served — the prompt is not
+    // a hostage the runtime holds for them.
+    engine.post(
+        &json!({
+            "id": "during-prompt",
+            "action": "perform",
+            "name": "ping",
+            "payload": {}
+        })
+        .to_string(),
+    );
+    assert_eq!(runtime.pump_pages(Duration::from_secs(0)), 1);
+    let scripts = engine.scripts();
+    assert_eq!(scripts.len(), 1, "the unrelated call is answered");
+    assert!(
+        scripts[0].contains("\"id\":\"during-prompt\"") && scripts[0].contains("pong"),
+        "the unrelated call completes during the prompt: {}",
+        scripts[0]
+    );
+
+    // The person's answer wakes the settle worker; the pump delivers the reply
+    // once it lands, which is why this pumps until the answer arrives.
+    answer_tx.send(true).expect("the person answers");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let settled = loop {
+        runtime.pump_pages(Duration::from_secs(0));
+        let scripts = engine.scripts();
+        if scripts.len() == 2 {
+            break scripts[1].clone();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the parked call never settled"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    assert!(
+        settled.contains("\"id\":\"parked\"") && settled.contains("\"written\":true"),
+        "the approved call completes: {settled}"
+    );
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_declined_answer_settles_the_parked_call_as_a_refusal() {
+    let (asked, asked_rx) = std::sync::mpsc::channel::<()>();
+    let (answer_tx, answer_rx) = std::sync::mpsc::channel::<bool>();
+    let prompter = Arc::new(GatedPrompter {
+        asked,
+        answers: Mutex::new(answer_rx),
+    });
+    let (mut runtime, factory) =
+        runtime_with_page_grant_and_prompter(&[Capability::FilesystemWrite], prompter);
+    let executions = register_counting_write(&runtime);
+    let _window = open_window(&mut runtime);
+    let engine = parent_engine(&factory, 0);
+
+    engine.post(
+        &json!({
+            "id": "declined",
+            "action": "perform",
+            "name": "write_note",
+            "payload": { "path": "note.txt" }
+        })
+        .to_string(),
+    );
+    runtime.pump_pages(Duration::from_secs(0));
+    asked_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the call reaches the person");
+    answer_tx.send(false).expect("the person declines");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let settled = loop {
+        runtime.pump_pages(Duration::from_secs(0));
+        let scripts = engine.scripts();
+        if let Some(script) = scripts.first() {
+            break script.clone();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the refusal never settled the call"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    assert_page_refused(&settled, "declined", "capability_denied");
+    assert_eq!(
+        executions.load(Ordering::SeqCst),
+        0,
+        "a declined call never runs"
+    );
+}
+
+#[test]
+fn a_custom_approval_boundary_is_asked_even_when_the_window_can_parent() {
+    // The window-parented prompt supersedes only the runtime-default native prompt. An
+    // embedder that installs its own boundary — a test harness, an embedding application
+    // with its own consent UX — must be asked instead, or every automated run of a
+    // destructive page operation would wedge behind a dialog no one can click.
+    let prompter = Arc::new(RecordingPrompter::new(PromptReply::Approve));
+    let (mut runtime, factory) = runtime_with_page_grant_and_prompter(
+        &[Capability::FilesystemWrite],
+        Arc::clone(&prompter) as Arc<dyn ConsentPrompter>,
+    );
+    let executions = register_counting_write(&runtime);
+    let _window = open_window(&mut runtime);
+    let engine = parent_engine(&factory, 0);
+    engine.enable_confirmation();
+
+    let answer = invoke_page(
+        &mut runtime,
+        &engine,
+        "custom-boundary",
+        "write_note",
+        &json!({ "path": "note.txt", "text": "approved" }),
+    );
+
+    assert!(
+        answer.contains("\"ok\":true"),
+        "the custom boundary approves the operation: {answer}"
+    );
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        prompter.requests().len(),
+        1,
+        "the embedder's own boundary must be asked"
+    );
+    assert!(
+        engine.confirmations().is_empty(),
+        "a window that can parent its prompt must not bypass the embedder's boundary"
+    );
 }
 
 #[test]

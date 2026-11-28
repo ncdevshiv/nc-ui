@@ -1,0 +1,1 @@
+- **Native views now receive a real trusted-service seam at window birth.** The runtime installs the seam in the production host surface with the window's narrowed grant closed over, so trusted Rust providers can call application services in-process while unknown services, missing capabilities, runtime-internal methods, and page-owned handlers are still refused.

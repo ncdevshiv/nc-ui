@@ -290,8 +290,16 @@ fn register_sidecar(
         // A streaming sidecar is one program kept running across calls. It starts on the
         // first call — the call that pays the start-up cost — and every call after it is
         // warm. The program stops when the registration is dropped with the runtime.
+        //
+        // The lifecycle is the supervisor's, not this closure's: `runtime.sidecars`
+        // owns the process, the job object, and the restart policy, and hands over the
+        // stable pipe ends. The wire layer built on them keeps its NDJSON protocol
+        // unchanged — what changes is that a crashed backend comes back instead of
+        // leaving every later call permanently refused. A call pending across a crash
+        // times out, the bounded honest answer for an incarnation that is gone.
         let live: Arc<std::sync::Mutex<Option<Arc<StreamingSidecar>>>> =
             Arc::new(std::sync::Mutex::new(None));
+        let supervisor = runtime.sidecars.clone();
         return register_command(
             runtime,
             &sidecar.command,
@@ -304,7 +312,32 @@ fn register_sidecar(
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if live.is_none() {
-                        let started = StreamingSidecar::spawn(&runner, &program, &args)
+                        let resolved = runner
+                            .resolve_program(&program)
+                            .map_err(|error| process_error(&error))?;
+                        let handle = supervisor
+                            .spawn(ncui_sidecar::SidecarSpec {
+                                name: name.clone(),
+                                program: resolved,
+                                args: args.clone(),
+                                env: ncui_native::process::scrubbed_environment(),
+                                env_clear: true,
+                                working_dir: Some(runner.root().to_path_buf()),
+                                restart: ncui_sidecar::RestartPolicy::OnFailure {
+                                    // A backend that cannot stay up is a fault to
+                                    // surface, not a loop to run — eight restarts
+                                    // covers a flaky start, not a broken program.
+                                    max_restarts: 8,
+                                    base_backoff: std::time::Duration::from_millis(200),
+                                },
+                            })
+                            .map_err(|error| SeamError {
+                                code: "sidecar_spawn_refused".to_owned(),
+                                message: format!("the supervised sidecar could not start: {error}"),
+                                retryable: false,
+                            })?;
+                        let (stdin, stdout) = handle.into_transport();
+                        let started = StreamingSidecar::from_pipes(stdin, stdout, program.clone())
                             .map_err(|error| process_error(&error))?;
                         *live = Some(Arc::new(started));
                     }

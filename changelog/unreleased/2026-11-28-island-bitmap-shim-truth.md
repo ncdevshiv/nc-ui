@@ -1,0 +1,1 @@
+- **The one-shot GPU-island bitmap route is now labelled as a compatibility shim in the feature registry.** The route remains real and verified, but the registry no longer lets it masquerade as the persistent surface object and frame queue required by the media architecture.

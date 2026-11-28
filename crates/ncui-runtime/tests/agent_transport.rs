@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use ncui_core::{Capability, CapabilitySet, Limits, LimitsBuilder};
 use ncui_runtime::Runtime;
 use ncui_runtime::agent::AgentSession;
+use ncui_runtime::consent::{ConsentPrompter, ConsentRequest};
 use ncui_runtime::rpc::{Request, Response};
 use ncui_runtime::transport::{AgentServer, handshake_frame};
 use ncui_security::authz::AgentRole;
@@ -743,4 +744,133 @@ fn a_server_without_a_registry_reports_the_feature_status_method_as_unavailable(
         error.data.ncui_code, "not_found",
         "the refusal must carry the stable code rather than a bare message"
     );
+}
+
+/// A prompter that signals it was asked, then waits on the test's answer — the
+/// scripted person whose reading time is the point of the test.
+struct GatedPrompter {
+    asked: std::sync::mpsc::Sender<()>,
+    answers: Mutex<std::sync::mpsc::Receiver<bool>>,
+}
+
+impl core::fmt::Debug for GatedPrompter {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GatedPrompter").finish_non_exhaustive()
+    }
+}
+
+impl ConsentPrompter for GatedPrompter {
+    fn confirm(&self, _request: &ConsentRequest) -> ncui_core::Result<bool> {
+        let _ = self.asked.send(());
+        let answers = self
+            .answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(answers.recv().unwrap_or(false))
+    }
+}
+
+/// The lock-hostage regression test: an unanswered prompt must park only its own
+/// caller, never the runtime lock — every other caller of this runtime would
+/// otherwise wait for the person's reading time.
+#[test]
+fn a_consent_prompt_parks_its_caller_not_the_runtime_lock() {
+    let harness = Harness::start(AgentRole::Administrator);
+    let (asked, asked_rx) = std::sync::mpsc::channel::<()>();
+    let (answer_tx, answer_rx) = std::sync::mpsc::channel::<bool>();
+    {
+        let mut runtime = harness
+            .runtime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        runtime.set_consent_prompter(Arc::new(GatedPrompter {
+            asked,
+            answers: Mutex::new(answer_rx),
+        }));
+    }
+
+    // `ncui.logs.purge` is destructive: without a token it reaches the prompt.
+    let mut stream = harness.connect();
+    let request = Request::new(json!(1), "ncui.logs.purge", json!({}));
+    write_frame(
+        &mut stream,
+        &serde_json::to_vec(&request).expect("serialise"),
+    );
+    asked_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the destructive call reaches the person");
+
+    // The defect this test watches: while the person reads, the runtime lock
+    // must still be free — a caller that parks it parks everyone behind a
+    // human's reading time.
+    let guard = harness.runtime.try_lock();
+    assert!(
+        guard.is_ok(),
+        "the runtime lock is free while the person decides"
+    );
+    drop(guard);
+
+    // And a second connection's request is served in the same window.
+    let health = harness.call("ncui.health", json!({}));
+    assert!(
+        health.error.is_none(),
+        "an unrelated call is served during the prompt: {:?}",
+        health.error
+    );
+
+    // The person's answer settles the waiting call through the same pipeline.
+    answer_tx.send(true).expect("the person answers");
+    let response = read_response(&mut stream).expect("a response");
+    assert!(
+        response.error.is_none(),
+        "the approved call completes: {:?}",
+        response.error
+    );
+    assert!(response.result.expect("a result")["purged"].is_u64());
+}
+
+/// A declined answer must reach the caller as the same refusal a prompt inside
+/// the pipeline produces — consent answered off the lock is indistinguishable
+/// to validation.
+#[test]
+fn a_declined_consent_answer_arrives_as_the_prompts_own_refusal() {
+    let harness = Harness::start(AgentRole::Administrator);
+    let (asked, asked_rx) = std::sync::mpsc::channel::<()>();
+    let (answer_tx, answer_rx) = std::sync::mpsc::channel::<bool>();
+    {
+        let mut runtime = harness
+            .runtime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        runtime.set_consent_prompter(Arc::new(GatedPrompter {
+            asked,
+            answers: Mutex::new(answer_rx),
+        }));
+    }
+
+    let mut stream = harness.connect();
+    let request = Request::new(json!(1), "ncui.logs.purge", json!({}));
+    write_frame(
+        &mut stream,
+        &serde_json::to_vec(&request).expect("serialise"),
+    );
+    asked_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the call reaches the person");
+    answer_tx.send(false).expect("the person declines");
+    let response = read_response(&mut stream).expect("a response");
+    let error = response.error.expect("a declined call is refused");
+    assert_eq!(
+        error.data.ncui_code, "capability_denied",
+        "the refusal is the consent gate's own, not a transport error"
+    );
+
+    // The attempt is audited as denied, exactly as an in-pipeline refusal is.
+    let runtime = harness
+        .runtime
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let event = runtime.audit.newest().expect("the attempt is audited");
+    assert_eq!(event.action, "ncui.logs.purge");
+    assert_eq!(event.outcome.as_str(), "denied");
 }

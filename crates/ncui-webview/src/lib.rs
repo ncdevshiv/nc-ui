@@ -41,6 +41,7 @@
 //! content the runtime does not control.
 
 pub mod capability;
+pub mod filedrop;
 pub mod lifecycle;
 pub mod menu;
 pub mod native;
@@ -59,7 +60,8 @@ pub use lifecycle::{HostState, IllegalTransition, WindowLifecycle};
 pub use menu::{MenuEntry, MenuEvent, MenuRequest, MenuSubmenu};
 pub use native::{
     MAX_NATIVE_PAYLOAD_BYTES, MAX_QUEUED_NATIVE_EVENTS, NativeViewBackend, NativeViewCommand,
-    NativeViewError, NativeViewEvent, RoutingFactory,
+    NativeViewError, NativeViewEvent, RoutingFactory, TrustedServiceSeam,
+    TrustedServiceSeamFactory,
 };
 pub use navigation::{
     NavigationPolicy, NavigationRequest, Origin, Scheme, Verdict, is_loopback_host,
@@ -67,8 +69,9 @@ pub use navigation::{
 pub use request::{
     DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_TITLE, DEFAULT_WINDOW_WIDTH, Icon, MAX_ICON_EDGE,
     MAX_NATIVE_PROPS_BYTES, MAX_PROVIDER_ID_BYTES, MAX_WINDOW_HEIGHT, MAX_WINDOW_WIDTH,
-    MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, MonitorRect, Theme, WindowChange, WindowChangeError,
-    WindowContent, WindowGeometry, WindowRequest, WindowRequestError, WindowShape, WindowState,
+    MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, MonitorRect, ResizeEdge, Theme, WindowChange,
+    WindowChangeError, WindowContent, WindowGeometry, WindowRequest, WindowRequestError,
+    WindowShape, WindowState,
 };
 pub use seam::{
     ActionDefinition, ActionTable, ActionTableError, BRIDGE_PROTOCOL_VERSION, HostSeam,
@@ -220,6 +223,24 @@ impl core::fmt::Display for PageTarget {
     }
 }
 
+/// A synchronous confirmation surface owned by one top-level native window.
+///
+/// The platform dialog is shown by the engine that owns the window, because that is the only
+/// place the window object can be used as the dialog's parent without copying raw handles or
+/// unsafe pointers across threads. The runtime receives only the person's answer.
+pub trait WindowConfirmation: core::fmt::Debug + Send + Sync {
+    /// Shows a destructive-operation confirmation parented to the window.
+    ///
+    /// The text has already been bounded and validated by runtime consent policy. `Ok(true)`
+    /// means the person explicitly approved; every other completed answer is `Ok(false)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an engine-owned failure when the window is gone or the platform dialog cannot
+    /// be shown or completed. The runtime treats an error as withholding approval.
+    fn confirm(&self, title: &str, message: &str) -> Result<bool, String>;
+}
+
 /// The native binding behind this host.
 ///
 /// Implementations wrap the platform embedding layer. Everything above this trait is policy
@@ -262,6 +283,15 @@ pub trait WebViewBackend: core::fmt::Debug + Send {
         }
     }
 
+    /// A confirmation surface owned by this backend's top-level window, when it can show one.
+    ///
+    /// `None` means the runtime uses its ordinary host prompt. When a backend does provide one,
+    /// its failure is final rather than a reason to fall back to an unparented prompt: consent
+    /// must never become less clearly attached to the asking window merely because parenting failed.
+    fn confirmation(&self) -> Option<Box<dyn WindowConfirmation>> {
+        None
+    }
+
     /// Evaluates a script in the page, returning whether it was accepted.
     ///
     /// This is the host-to-page direction of the bridge. A host that cannot evaluate a
@@ -278,12 +308,37 @@ pub trait WebViewBackend: core::fmt::Debug + Send {
         false
     }
 
+    /// Initiate an edge-resize drag on a frameless window.
+    ///
+    /// The complement of [`WebViewBackend::drag_window`]: a window the OS did
+    /// not decorate has no borders to grab, so the page's own edge regions ask
+    /// the platform for the resize the user is reaching for. Returns `true`
+    /// when the drag was initiated, `false` when the backend cannot.
+    fn drag_resize(&self, edge: ResizeEdge) -> bool {
+        let _ = edge;
+        false
+    }
+
     /// Where the window is and how big it is, or `None` when this backend cannot say.
     ///
     /// A backend that cannot report its geometry says so rather than guessing: a guessed
     /// geometry written into an application's state would move the user's window somewhere it
     /// has never been, and the next run would put it there.
     fn geometry(&self) -> Option<WindowGeometry> {
+        None
+    }
+
+    /// The platform's native handle for this window as an integer, or `None` when this
+    /// backend cannot or will not say.
+    ///
+    /// Native surfaces — the video presenter is the first — child into the host window at
+    /// platform level, and the platform speaks in handles. The integer is the platform's own
+    /// currency (`HWND` on Windows); what it means is the consumer's business, which is why
+    /// backends on platforms no consumer yet understands answer `None` rather than a number
+    /// that would mean the wrong thing. A backend that cannot answer says so, exactly as it
+    /// does for geometry: a guessed handle would child a surface into a window that is not
+    /// this one.
+    fn native_window_handle(&self) -> Option<isize> {
         None
     }
 
@@ -504,6 +559,10 @@ impl<T: WebViewBackend + ?Sized> WebViewBackend for Box<T> {
 
     fn drag_window(&self) -> bool {
         T::drag_window(self)
+    }
+
+    fn drag_resize(&self, edge: ResizeEdge) -> bool {
+        T::drag_resize(self, edge)
     }
 
     fn geometry(&self) -> Option<WindowGeometry> {

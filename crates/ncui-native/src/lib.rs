@@ -66,6 +66,7 @@ pub mod process;
 pub mod protocol;
 pub mod sidecar;
 pub mod single_instance;
+pub mod userdata;
 
 pub use association::{
     ASSOCIATION_TIMEOUT, AssociationError, RESERVED_EXTENSIONS, check_extension,

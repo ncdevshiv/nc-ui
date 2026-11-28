@@ -248,7 +248,9 @@ measured rather than asserted when the feature is enabled.
 
 ## The eighth exception: `rfd`
 
-`ncui-native` depends on `rfd`, and nothing else in the workspace does.
+`ncui-native` and `ncui-webview-wry` depend on `rfd`, and nothing else in the workspace does.
+
+The two use it for different steps of the same boundary. `ncui-native` shows file, save and folder pickers plus the generic host confirmation. `ncui-webview-wry` shows only the destructive-operation confirmation of a page command, and it shows it the one way that is honest about ownership: the dialog is constructed on the engine thread with the live `tao` window as its parent, so the confirmation is modal to the window that asked instead of an orphaned dialog behind it. Raw window handles never cross threads for this: the runtime receives a cloneable channel (`WindowConfirmation`), and only the person's answer crosses back. That design is what keeps this project free of first-party unsafe window-handle borrowing.
 
 The reason is specific. A native file, save or folder dialog is the platform's own picker: the
 thing that puts `IFileOpenDialog` in front of a person on Windows, an `NSOpenPanel` on macOS and a

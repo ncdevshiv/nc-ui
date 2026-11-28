@@ -83,6 +83,13 @@ pub enum Capability {
     Database,
     /// Allocate GPU resources.
     Gpu,
+    /// Play audio through the system's output device.
+    ///
+    /// Separate from [`Capability::Gpu`] because the authority is distinct: a page
+    /// that may render may not thereby make sound. Audio is user-visible outside
+    /// the window's own pixels — it crosses the machine's shared output — so it
+    /// is its own grant rather than a rendering consequence.
+    Audio,
     /// Attach debuggers and access runtime internals.
     Debug,
     /// Load and run an untrusted component artifact in this process.
@@ -135,6 +142,7 @@ impl Capability {
         Capability::Dialog,
         Capability::Database,
         Capability::Gpu,
+        Capability::Audio,
         Capability::Debug,
         Capability::RunComponents,
         Capability::ModifySource,
@@ -164,6 +172,7 @@ impl Capability {
             Self::Dialog => "dialog",
             Self::Database => "database",
             Self::Gpu => "gpu",
+            Self::Audio => "audio",
             Self::Debug => "debug",
             Self::RunComponents => "run.components",
             Self::ModifySource => "modify.source",
@@ -194,6 +203,7 @@ impl Capability {
             | Self::Notifications
             | Self::Database
             | Self::Gpu
+            | Self::Audio
             | Self::Debug
             | Self::RunComponents => CapabilityScope::Runtime,
             Self::ModifySource | Self::InstallDependencies | Self::Deploy | Self::DeleteData => {
@@ -291,6 +301,7 @@ static CAPABILITY_NAMES: &[&str] = &[
     "dialog",
     "database",
     "gpu",
+    "audio",
     "debug",
     "run.components",
     "modify.source",

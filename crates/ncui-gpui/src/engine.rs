@@ -75,6 +75,12 @@ pub(crate) struct OpenWindowSpec {
     pub props: serde_json::Value,
     /// The frame the window was asked for: title, size, position and presentation flags.
     pub request: ncui_webview::WindowRequest,
+    /// The trusted service seam the window's seam carried, when the runtime offered one.
+    ///
+    /// Carried through the open rather than looked up afterwards because the seam is a
+    /// birth fact: the grant it closes over is the window's narrowed grant at creation,
+    /// and no later reconstruction could honestly reproduce it.
+    pub services: Option<Arc<dyn ncui_webview::TrustedServiceSeam>>,
 }
 
 /// What a successful window-open hands back to the host.

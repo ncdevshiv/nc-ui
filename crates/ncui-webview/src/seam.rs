@@ -495,6 +495,13 @@ pub struct HostSeam {
     /// the runtime does not say, which is the honest "unknown" rather than a guess.
     locale: String,
     text_direction: String,
+    /// The trusted service seam a native view may call, when the window's content is one.
+    ///
+    /// Pages never see this: a page's services arrive over the JSON bridge, and handing a page
+    /// window an in-process channel it cannot use would be a second answer to "how does content
+    /// ask" — one nobody watches. A native window's seam carries the runtime's implementation
+    /// with the window's grant already closed over; a page window's carries `None`.
+    services: Option<Arc<dyn crate::native::TrustedServiceSeam>>,
 }
 
 impl HostSeam {
@@ -512,6 +519,7 @@ impl HostSeam {
             actions: ActionTable::new(),
             locale: "und".to_owned(),
             text_direction: "ltr".to_owned(),
+            services: None,
         }
     }
 
@@ -527,6 +535,28 @@ impl HostSeam {
         self
     }
 
+    /// Hands the seam the trusted service channel a native view may call.
+    ///
+    /// The implementation is the runtime's own, constructed for this one window with the
+    /// window's identity and narrowed grant closed over. Only a native window's seam is meant
+    /// to carry one — the registry decides that by the content kind, the way it decides
+    /// everything else about what a window is.
+    #[must_use]
+    pub fn with_services(mut self, services: Arc<dyn crate::native::TrustedServiceSeam>) -> Self {
+        self.services = Some(services);
+        self
+    }
+
+    /// The trusted service seam a native view may call, when this window is one.
+    ///
+    /// `None` is the honest answer for every page window and for a native window in a
+    /// runtime that offers no services — a provider must treat it as "no services exist"
+    /// rather than assuming the channel is hidden somewhere else.
+    #[must_use]
+    pub fn services(&self) -> Option<&Arc<dyn crate::native::TrustedServiceSeam>> {
+        self.services.as_ref()
+    }
+
     /// Creates a child seam with its own lifecycle and no capabilities.
     ///
     /// Navigation, actions, locale and text direction are copied from the parent. The empty grant
@@ -540,6 +570,10 @@ impl HostSeam {
             actions: self.actions.clone(),
             locale: self.locale.clone(),
             text_direction: self.text_direction.clone(),
+            // A child page is a page: its services arrive over the bridge like its parent's,
+            // and inheriting the parent's in-process channel would be authority a child is
+            // explicitly built not to inherit.
+            services: None,
         }
     }
 

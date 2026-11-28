@@ -1,0 +1,1 @@
+- The input host's move-stream contract is now documented and pinned: every pointer event handed in is routed synchronously in arrival order, with no queue, throttle or coalescing of the host's own — a 120-move scrub burst test proves 1:1 routing in delivered order, so a future optimization cannot silently decide which positions a scrub does not need.

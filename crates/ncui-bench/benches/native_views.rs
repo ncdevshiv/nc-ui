@@ -420,6 +420,7 @@ impl ProviderHarness {
             window: self.window,
             props: props.clone(),
             events: Arc::clone(&self.events),
+            services: None,
         };
         let outcome = self
             .visual
@@ -468,6 +469,7 @@ fn bench_provider_build_case(
                 window: window_id,
                 props: props_fixture.clone(),
                 events: Arc::clone(&events),
+                services: None,
             },
             |context| {
                 harness.visual.update(|window, cx| {

@@ -73,6 +73,20 @@ fn main() -> ExitCode {
         }
     }
 
+    // Stale execution provenance is reported beside the platform gaps: a citation whose
+    // test has not executed recently is a claim going soft, and an invisible one is
+    // indistinguishable from a lie.
+    if !result.stale_entries.is_empty() {
+        let _ = writeln!(
+            out,
+            "  stale execution provenance ({}):",
+            result.stale_entries.len()
+        );
+        for entry in &result.stale_entries {
+            let _ = writeln!(out, "    {} — {}", entry.feature_id, entry.reason);
+        }
+    }
+
     if result.is_clean() {
         let _ = writeln!(out, "every completed feature carries its required evidence");
         return ExitCode::SUCCESS;

@@ -14,6 +14,9 @@
 //! and both directions carry JSON, because both cross a boundary where one side did not
 //! write the other.
 
+use std::sync::Arc;
+
+use ncui_core::{CapabilitySet, WindowId};
 use serde::{Deserialize, Serialize};
 
 use crate::WindowContent;
@@ -126,6 +129,45 @@ impl NativeViewCommand {
         }
     }
 }
+
+/// The trusted service seam: how a native view asks the runtime for real work.
+///
+/// A page reaches runtime services through the JSON bridge, where every call is authorised
+/// against the window's grant. A native view is in-process Rust — there is no bridge to
+/// cross — but trusted is not the same as unaccountable: the view holds the window's grant
+/// exactly the way the page does, and a service the grant does not cover is refused with
+/// the same `capability_denied` a page would see. The difference is the transport alone:
+/// the payload is already a [`serde_json::Value`], so no JSON is marshalled to cross in.
+///
+/// The trait is object-safe and `Send + Sync` because the view that uses it lives on the
+/// engine thread while the implementation lives behind the runtime's own synchronisation.
+/// Implementations are constructed per window, with the window's identity and its narrowed
+/// grant already closed over — a seam cannot be tricked into spending another window's
+/// authority because it never learns that another window exists.
+///
+/// A view whose provider ignores the seam changes nothing: the seam is a capability, not
+/// an obligation, and a provider that needs no services is the common case.
+pub trait TrustedServiceSeam: core::fmt::Debug + Send + Sync {
+    /// Runs the runtime service `service` with `input`, returning what the service answered.
+    ///
+    /// An `Err` is a refusal — the service is unknown, the window's grant does not cover
+    /// what it requires, or the service itself failed — reported in the same [`crate::SeamError`]
+    /// shape a page's refused call carries, so a caller that handles one handles both.
+    fn invoke(
+        &self,
+        service: &str,
+        input: serde_json::Value,
+    ) -> Result<serde_json::Value, crate::SeamError>;
+}
+
+/// Builds the trusted service seam one native window carries.
+///
+/// The factory receives the window's identity and its narrowed grant at birth. Those are
+/// the whole authority context the seam may close over: anything wider would let one
+/// window spend another window's authority, and anything built later could only guess at
+/// what the window was actually granted.
+pub type TrustedServiceSeamFactory =
+    Arc<dyn Fn(WindowId, CapabilitySet) -> Arc<dyn TrustedServiceSeam> + Send + Sync>;
 
 /// One way a native view can refuse or fail a command.
 ///
@@ -299,9 +341,9 @@ impl RoutingFactory {
 impl crate::HostFactory for RoutingFactory {
     fn spawn(
         &self,
-        window: ncui_core::WindowId,
+        window: WindowId,
         request: &crate::WindowRequest,
-        seam: &std::sync::Arc<crate::HostSeam>,
+        seam: &Arc<crate::HostSeam>,
     ) -> Option<Box<dyn crate::WebViewBackend>> {
         let host = match request.content {
             WindowContent::Page => self.page.as_ref(),
@@ -411,12 +453,12 @@ mod tests {
     fn a_router_with_no_hosts_refuses_with_the_kind_in_its_reason() {
         let router = RoutingFactory::new();
         let request = crate::WindowRequest::native("nc-ui-kit::gallery");
-        let seam = std::sync::Arc::new(crate::HostSeam::new(
+        let seam = Arc::new(crate::HostSeam::new(
             crate::WindowLifecycle::new(),
             crate::CapabilityGrant::none(),
             crate::NavigationPolicy::new(&[]),
         ));
-        let spawned = router.spawn(ncui_core::WindowId::new(), &request, &seam);
+        let spawned = router.spawn(WindowId::new(), &request, &seam);
         assert!(spawned.is_none());
         let error = router.last_error();
         assert!(

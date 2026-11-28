@@ -115,6 +115,14 @@ pub struct NativeViewContext {
     pub props: serde_json::Value,
     /// The sink the view's events leave through.
     pub events: Arc<NativeEventSink>,
+    /// The trusted service seam the view may call, when the runtime offers one.
+    ///
+    /// The seam closes over this window's own narrowed grant — a service the grant does
+    /// not cover is refused exactly as it would be for the page of a page window. `None`
+    /// is the honest "this runtime offers no in-process services", and a provider that
+    /// cannot do its work without one should refuse to build rather than build a view
+    /// that cannot act.
+    pub services: Option<Arc<dyn ncui_webview::TrustedServiceSeam>>,
 }
 
 /// A live native view: the instance half of a provider, created once per window.

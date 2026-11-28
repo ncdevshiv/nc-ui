@@ -1,0 +1,1 @@
+- Prove the consent prompt surfaces for a page-initiated `component.open`: a live-window test answers the parented dialog through `WM_COMMAND` and drives the counter plugin's `component.open` → `component.invoke` chain to settlement, with the lock-hostage span measured while the prompt is held.

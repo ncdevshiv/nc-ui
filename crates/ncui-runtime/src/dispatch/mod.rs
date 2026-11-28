@@ -21,6 +21,7 @@ use ncui_core::error::validation;
 use ncui_core::{Capability, CapabilitySet, CorrelationId, ErrorKind, NcError, Result};
 use ncui_security::audit::AuditEvent;
 use ncui_security::audit::AuditOutcome;
+use ncui_security::authz::ConsentToken;
 use serde_json::{Value, json};
 
 use self::cargo::{invoke_benchmark_run, invoke_test_run};
@@ -31,10 +32,13 @@ use crate::health;
 use crate::rpc::{Request, Response};
 
 pub(crate) use self::params::{consent_token_param, json_error};
+#[cfg(target_os = "windows")]
+mod audio;
 mod cargo;
 mod cdp_handler;
 mod native_handler;
 mod params;
+mod video_surface;
 
 use self::cdp_handler::invoke_cdp_send;
 use self::native_handler::{invoke_window_native_command, invoke_window_native_events};
@@ -43,10 +47,10 @@ use self::params::{
     invoke_devtools_events, invoke_devtools_profile, invoke_devtools_tree, invoke_logs_query,
     invoke_state_inspect, invoke_window_child_bounds, invoke_window_child_close,
     invoke_window_child_create, invoke_window_child_list, invoke_window_devtools_close,
-    invoke_window_devtools_open, invoke_window_devtools_state, invoke_window_drag_region,
-    invoke_window_post, invoke_window_print_to_pdf, invoke_window_screenshot, invoke_window_zoom,
-    remembered_place, window_change_param, window_id_param, window_rejection, window_request_param,
-    window_shape_param,
+    invoke_window_devtools_open, invoke_window_devtools_state, invoke_window_drag_edge,
+    invoke_window_drag_region, invoke_window_post, invoke_window_print_to_pdf,
+    invoke_window_screenshot, invoke_window_zoom, remembered_place, window_change_param,
+    window_id_param, window_rejection, window_request_param, window_shape_param,
 };
 
 /// The methods this runtime implements, with the authority each one needs.
@@ -148,6 +152,12 @@ pub fn method_table() -> Vec<MethodDescription> {
             false,
         ),
         entry(
+            "ncui.window.drag.edge",
+            "Initiate an edge-resize drag on a frameless window. Called by the page when the user mousedowns on a border region; params name the window and the edge.",
+            CapabilitySet::empty().with(Capability::Window),
+            false,
+        ),
+        entry(
             "ncui.window.zoom",
             "Scale a window's page by a factor, where 1.0 is the platform default and the accepted range is 0.25 to 5.0.",
             CapabilitySet::empty().with(Capability::Window),
@@ -217,6 +227,60 @@ pub fn method_table() -> Vec<MethodDescription> {
             "ncui.window.theme",
             "Whether the platform is drawing its interface light or dark.",
             CapabilitySet::empty().with(Capability::Window),
+            false,
+        ),
+        entry(
+            "ncui.videoSurface.create",
+            "Declare a video surface and its placement over the page.",
+            CapabilitySet::empty().with(Capability::Gpu),
+            false,
+        ),
+        entry(
+            "ncui.videoSurface.place",
+            "Update a video surface's placement as the page's geometry moves.",
+            CapabilitySet::empty().with(Capability::Gpu),
+            false,
+        ),
+        entry(
+            "ncui.videoSurface.control",
+            "A playback intent for a video surface: pause, resume, seek or step.",
+            CapabilitySet::empty().with(Capability::Gpu),
+            false,
+        ),
+        entry(
+            "ncui.videoSurface.teardown",
+            "Destroy a video surface before its window dies.",
+            CapabilitySet::empty().with(Capability::Gpu),
+            false,
+        ),
+        entry(
+            "ncui.videoSurface.inspect",
+            "A video surface ring's drop count and queue depth.",
+            CapabilitySet::empty().with(Capability::InspectGpu),
+            false,
+        ),
+        entry(
+            "ncui.audioStream.create",
+            "Declare an audio output stream on this window.",
+            CapabilitySet::empty().with(Capability::Audio),
+            false,
+        ),
+        entry(
+            "ncui.audioStream.control",
+            "A playback intent for an audio stream: pause, resume or seek.",
+            CapabilitySet::empty().with(Capability::Audio),
+            false,
+        ),
+        entry(
+            "ncui.audioStream.teardown",
+            "Destroy an audio stream before its window dies.",
+            CapabilitySet::empty().with(Capability::Audio),
+            false,
+        ),
+        entry(
+            "ncui.audioStream.inspect",
+            "An audio stream's loss accounting and sync truth.",
+            CapabilitySet::empty().with(Capability::InspectRuntime),
             false,
         ),
         entry(
@@ -398,15 +462,64 @@ pub fn dispatch_with(
     feature_registry: Option<&Value>,
     table: &[MethodDescription],
 ) -> Option<Response> {
+    dispatch_with_consent(
+        runtime,
+        session,
+        request,
+        now,
+        feature_registry,
+        table,
+        None,
+    )
+}
+
+/// Handles one request whose human consent was already answered outside the
+/// runtime lock.
+///
+/// `pre_approved` is what [`crate::consent::settle`] produced after the caller
+/// ran the prompt itself: `Ok` carries the token minted from the approval,
+/// `Err` the refusal a declined or failed prompt produced. Both take the same
+/// path the pipeline's own consent stage would produce — the audit, ordering
+/// and denial shape are unchanged — because the only thing that moved is which
+/// thread waited on the person.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mirrors dispatch_with; the pre-resolved consent is one more pipeline input"
+)]
+pub(crate) fn dispatch_with_consent(
+    runtime: &mut Runtime,
+    session: &mut AgentSession,
+    request: &Request,
+    now: Duration,
+    feature_registry: Option<&Value>,
+    table: &[MethodDescription],
+    pre_approved: Option<Result<ConsentToken>>,
+) -> Option<Response> {
     let id = request.id.clone().unwrap_or(Value::Null);
     if request.is_notification() {
         // A notification still goes through authorization and auditing; it simply gets no
         // response. Skipping the pipeline here would make notifications a bypass.
-        let _ = run_pipeline(runtime, session, request, now, feature_registry, table);
+        let _ = run_pipeline(
+            runtime,
+            session,
+            request,
+            now,
+            feature_registry,
+            table,
+            pre_approved,
+        );
         return None;
     }
     Some(
-        match run_pipeline(runtime, session, request, now, feature_registry, table) {
+        match run_pipeline(
+            runtime,
+            session,
+            request,
+            now,
+            feature_registry,
+            table,
+            pre_approved,
+        ) {
             Ok(value) => Response::success(id, value),
             Err(error) => Response::from_error(id, &error),
         },
@@ -424,6 +537,7 @@ fn run_pipeline(
     now: Duration,
     feature_registry: Option<&Value>,
     table: &[MethodDescription],
+    pre_approved: Option<Result<ConsentToken>>,
 ) -> Result<Value> {
     let mut correlation = CorrelationId::new();
 
@@ -458,6 +572,12 @@ fn run_pipeline(
         if let Some(token) = &consent_token {
             correlation = token.correlation();
         }
+        // A token minted from an out-of-lock prompt carries its own correlation
+        // for the same reason a supplied token's does: mint and consume must
+        // agree on the operation they bound.
+        if let Some(Ok(token)) = &pre_approved {
+            correlation = token.correlation();
+        }
         crate::consent::resolve(
             runtime,
             session,
@@ -466,6 +586,8 @@ fn run_pipeline(
             method.destructive,
             &request.params,
             consent_token.as_ref(),
+            pre_approved,
+            None,
             correlation,
         )?;
         invoke(runtime, session, method, request, feature_registry)
@@ -796,7 +918,38 @@ fn invoke(
         }
         "ncui.window.post" => invoke_window_post(runtime, &request.params),
         "ncui.window.drag.region" => invoke_window_drag_region(runtime, &request.params),
+        "ncui.window.drag.edge" => invoke_window_drag_edge(runtime, &request.params),
         "ncui.window.native.events" => invoke_window_native_events(runtime, &request.params),
+        #[cfg(target_os = "windows")]
+        "ncui.videoSurface.create" => {
+            video_surface::invoke_video_surface_create(runtime, &request.params)
+        }
+        #[cfg(target_os = "windows")]
+        "ncui.videoSurface.place" => {
+            video_surface::invoke_video_surface_place(runtime, &request.params)
+        }
+        #[cfg(target_os = "windows")]
+        "ncui.videoSurface.control" => {
+            video_surface::invoke_video_surface_control(runtime, &request.params)
+        }
+        #[cfg(target_os = "windows")]
+        "ncui.videoSurface.teardown" => {
+            video_surface::invoke_video_surface_teardown(runtime, &request.params)
+        }
+        #[cfg(target_os = "windows")]
+        "ncui.videoSurface.inspect" => {
+            video_surface::invoke_video_surface_inspect(runtime, &request.params)
+        }
+        #[cfg(target_os = "windows")]
+        "ncui.audioStream.create" => audio::invoke_audio_stream_create(runtime, &request.params),
+        #[cfg(target_os = "windows")]
+        "ncui.audioStream.control" => audio::invoke_audio_stream_control(runtime, &request.params),
+        #[cfg(target_os = "windows")]
+        "ncui.audioStream.teardown" => {
+            audio::invoke_audio_stream_teardown(runtime, &request.params)
+        }
+        #[cfg(target_os = "windows")]
+        "ncui.audioStream.inspect" => audio::invoke_audio_stream_inspect(runtime, &request.params),
         "ncui.window.native.command" => invoke_window_native_command(runtime, &request.params),
         "ncui.window.zoom" => invoke_window_zoom(runtime, &request.params),
         "ncui.window.print.pdf" => invoke_window_print_to_pdf(runtime, &request.params),
@@ -1186,6 +1339,20 @@ mod tests {
                 if method.name == "ncui.test.run" || method.name == "ncui.benchmark.run" {
                     continue;
                 }
+                // The video surface methods child a presenter into the window's
+                // platform-native handle — a synthetic harness window has none, so the
+                // methods can only refuse here, which is correct behavior and not what
+                // these tests measure. Their handler wiring and success path are proven
+                // end to end in `video_surface_wiring_live.rs` against a real window.
+                if method.name.starts_with("ncui.videoSurface.") {
+                    continue;
+                }
+                // The audio stream methods open a real device stream keyed to a real
+                // window — the same harness limitation as the video surface methods,
+                // with the same live-proof answer in `audio_stream_wiring_live.rs`.
+                if method.name.starts_with("ncui.audioStream.") {
+                    continue;
+                }
                 let params = if method.destructive {
                     let operation = if method.name == "ncui.cdp.send" {
                         json!({
@@ -1235,6 +1402,12 @@ mod tests {
                             Some(id) => json!({ "window": id.to_string(), "factor": 1.25 }),
                             None => {
                                 json!({ "window": "00000000000000000000000000000001", "factor": 1.25 })
+                            }
+                        },
+                        "ncui.window.drag.edge" => match created_window {
+                            Some(id) => json!({ "window": id.to_string(), "edge": "east" }),
+                            None => {
+                                json!({ "window": "00000000000000000000000000000001", "edge": "east" })
                             }
                         },
                         "ncui.window.post" => match created_window {
@@ -1557,6 +1730,22 @@ mod tests {
                 // covered by `the_nested_build_methods_are_guarded` instead.
                 continue;
             }
+            // The video surface methods child a presenter into the window's platform-native
+            // handle — a synthetic harness window has none, so they can only refuse here,
+            // which is correct behavior and not what this test measures. Their wiring and
+            // success path are proven end to end in `video_surface_wiring_live.rs`.
+            if method.name.starts_with("ncui.videoSurface.") {
+                continue;
+            }
+            // The audio stream methods open a real device stream keyed to a real
+            // window — a synthetic harness window has no native handle and the
+            // harness machine owes no device traffic, so they can only refuse here,
+            // which is correct behavior and not what this test measures. Their wiring
+            // and success path are proven end to end in `audio_stream_wiring_live.rs`
+            // and the seam proof in the same file.
+            if method.name.starts_with("ncui.audioStream.") {
+                continue;
+            }
             // `ncui.window.close` is exercised on a window of its own, so the window the
             // later window methods name is still open: closing the shared window here would
             // make every later window method report a window that is genuinely gone, which
@@ -1680,6 +1869,12 @@ mod tests {
                         "child": "child-0000000000000001",
                     }),
                     "ncui.window.child.list" => json!({}),
+                    "ncui.window.drag.edge" => json!({
+                        "window": created_window
+                            .expect("create is listed before drag.edge")
+                            .to_string(),
+                        "edge": "east",
+                    }),
                     "ncui.window.zoom" => json!({
                         "window": created_window
                             .expect("create is listed before zoom")
@@ -1959,6 +2154,9 @@ mod tests {
             true
         }
         fn drag_window(&self) -> bool {
+            true
+        }
+        fn drag_resize(&self, _edge: ncui_webview::ResizeEdge) -> bool {
             true
         }
 

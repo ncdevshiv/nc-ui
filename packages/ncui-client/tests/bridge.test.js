@@ -201,3 +201,27 @@ test("the bridge is installed once and stays frozen", () => {
     page.ncui.invoke = null;
   }, TypeError);
 });
+
+test("a supersede key travels on the wire only when the caller opts in", async () => {
+  const page = createPage();
+  const keyed = page.ncui.invoke("playhead_move", { position_ms: 33 }, { supersede: "playhead" });
+  const plain = page.ncui.invoke("playhead_move", { position_ms: 66 });
+
+  const [keyedRequest, plainRequest] = page.sent;
+  assert.equal(keyedRequest.supersede, "playhead");
+  assert.equal(plainRequest.supersede, undefined);
+
+  // Both settle normally — the key is transport metadata, not a change to the contract.
+  page.answer(keyedRequest.id, null);
+  page.answer(plainRequest.id, null);
+  await keyed;
+  await plain;
+});
+
+test("an empty supersede key does not reach the wire", async () => {
+  const page = createPage();
+  const pending = page.ncui.invoke("playhead_move", { position_ms: 1 }, { supersede: "" });
+  assert.equal(page.sent[0].supersede, undefined);
+  page.answer(page.sent[0].id, null);
+  await pending;
+});

@@ -1047,6 +1047,45 @@ fn page_commands(scenarios: &mut Vec<Repeated>) {
         )
         .unwrap_or_else(|e| fail(&e)),
     );
+
+    // The editor-grade number: the whole native-side cost of one page command, the way
+    // a scrub actually pays it — request JSON text in, the seam's own page-facing parse,
+    // the capability check, the handler, and the response serialized back to JSON text.
+    // `runtime.page_command_dispatch` above passes a constructed message and so skips
+    // both directions of serialization; an interaction-rate command stream pays them on
+    // every frame. The payload is scrub-shaped — a playhead move is the chatty command
+    // this budget exists for — and the handler echoes it the way a engine bind would,
+    // so the measurement is the pipeline rather than the fixture.
+    let request_json = serde_json::json!({
+        "id": "bench-scrub:0",
+        "action": "perform",
+        "name": "app_command",
+        "payload": { "kind": "playhead_move", "position_ms": 4210 }
+    })
+    .to_string();
+
+    scenarios.push(
+        measure(
+            "runtime.page_command_roundtrip",
+            "one page command end to end: request JSON parsed, capability checked, handler run, response JSON serialized",
+            500,
+            20_000,
+            || {
+                let Ok(request) = ncui_webview::seam::SeamRequest::parse(&request_json) else {
+                    return 0;
+                };
+                let response = seam.handle(
+                    &request.message,
+                    &mut |request: &CapabilityRequest, payload| {
+                        let _ = request;
+                        Ok(serde_json::json!({ "applied": payload }))
+                    },
+                );
+                serde_json::to_string(&response).map_or(0, |encoded| encoded.len())
+            },
+        )
+        .unwrap_or_else(|e| fail(&e)),
+    );
 }
 
 /// Scenarios for the application layer.
